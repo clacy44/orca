@@ -8,7 +8,10 @@ import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AgentHookServer } from './server'
-import { getWindowsManagedLifecycleHook } from '../claude/hook-settings'
+import {
+  getWindowsManagedLifecycleHook,
+  WINDOWS_HOOK_HOST_DESCRIPTOR_FIELDS
+} from '../claude/hook-settings'
 import { makePaneKey } from '../../shared/stable-pane-id'
 import { HOOK_REQUEST_MAX_BYTES } from '../../shared/agent-hook-listener'
 import {
@@ -128,6 +131,16 @@ describe('parseWindowsHookHostDescriptor', () => {
       pathname: '/hook/claude',
       fields: WINDOWS_HOOK_HOST_DEFAULT_FIELDS
     })
+  })
+
+  // D-R167 M-4: three hand-synced copies of this field list exist (hook-settings.ts,
+  // this mirror, and OrcaHookHost.cs's BuiltInDescriptor — the C# copy cannot be checked from
+  // here, see the source-of-truth comment on that array). This test is the guard for the two
+  // copies a Linux test run CAN see: the mirror's fall-open default must equal the descriptor
+  // hook-settings.ts actually writes, or a drift here would silently degrade (ParseDescriptor
+  // falls open rather than failing loud).
+  it('the mirror default field list matches hook-settings.ts WINDOWS_HOOK_HOST_DESCRIPTOR_FIELDS', () => {
+    expect(WINDOWS_HOOK_HOST_DEFAULT_FIELDS).toEqual(WINDOWS_HOOK_HOST_DESCRIPTOR_FIELDS)
   })
 })
 

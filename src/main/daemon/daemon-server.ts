@@ -22,7 +22,7 @@ import {
   startDaemonStreamBacklogProbe
 } from './daemon-stream-backlog-probe'
 import { readCurrentProcessMacSystemResolverHealth } from '../network/macos-system-resolver-health'
-import type { SubprocessHandle } from './session'
+import { PRODUCER_PAUSE_FAILSAFE_MS, type SubprocessHandle } from './session'
 import { checkPtySpawnHealth } from './pty-subprocess'
 import { createNoopDaemonFileLog, type DaemonFileLog } from './daemon-file-log'
 import { isTuiAgent } from '../../shared/tui-agent-config'
@@ -112,9 +112,12 @@ type PendingShutdownReply = {
   start: () => void
 }
 
-// R117 FIX 3: below session.ts PRODUCER_PAUSE_FAILSAFE_MS (5s) so a deep-socket producer pause is
-// always re-asserted before the session's own failsafe self-resumes it.
-const PRODUCER_PAUSE_REASSERT_MS = 4_000
+// R117 FIX 3 (D-R167 M-3): derived from session.ts PRODUCER_PAUSE_FAILSAFE_MS, not hand-copied —
+// a deep-socket producer pause must always re-assert before the session's own failsafe clears it.
+const PRODUCER_PAUSE_REASSERT_FRACTION = 0.8
+export const PRODUCER_PAUSE_REASSERT_MS = Math.round(
+  PRODUCER_PAUSE_FAILSAFE_MS * PRODUCER_PAUSE_REASSERT_FRACTION
+)
 // D-R164 H2: this daemon-side pacer's own reason key into Session's reason-keyed pause Set —
 // distinct from the RPC pausePty/resumePty path's 'main', so one controller's resume can never
 // release the other's pause.

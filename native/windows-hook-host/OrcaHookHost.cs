@@ -36,6 +36,7 @@ internal static class OrcaHookHost
     // request; 1500ms approximates the spec's "connect 500ms, total 1500ms" as one total budget
     // (see docs/windows-hook-host.md — R-note, unverified on this box).
     private const int RequestTimeoutMilliseconds = 1500;
+    // Source of truth: hook-settings.ts WINDOWS_HOOK_HOST_DESCRIPTOR_FIELDS — keep in sync by hand (D-R167 M-4).
     private static readonly string[] DefaultDescriptorFields =
     {
         "paneKey", "tabId", "launchToken", "worktreeId", "env", "version", "payload"
