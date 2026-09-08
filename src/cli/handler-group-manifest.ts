@@ -24,6 +24,11 @@ export const HANDLER_GROUPS: readonly HandlerGroup[] = [
     load: async () => (await import('./handlers/account.js')).ACCOUNT_HANDLERS
   },
   {
+    name: 'chairs',
+    keys: ['chairs restore', 'chairs status', 'chairs export'],
+    load: async () => (await import('./handlers/chairs.js')).CHAIRS_HANDLERS
+  },
+  {
     name: 'lane',
     keys: [
       'lane persons',
