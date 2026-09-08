@@ -1,5 +1,10 @@
 import type { PendingStreamDataBatch } from './daemon-stream-keep-tail-drop'
 
+// R117 FIX 2: mirrors session.ts:667's 64KB coalesce cap — an uncapped coalesce lets a single
+// entry fuse an entire 32MB HELD_WRITE_THROUGH backlog, forcing a rope-flatten on drain (measured
+// 24ms + a 32MB transient vs ~0ms capped) and making queuedCharsForSession effectively O(queue).
+const COALESCE_MAX_CHARS = 64 * 1024
+
 export type DaemonStreamEnqueueOptions = {
   flushImmediately?: boolean
   flushMaxChars?: number
@@ -20,7 +25,8 @@ export function appendDaemonStreamData(
     last?.sessionId === sessionId &&
     !last.control &&
     !last.transformed &&
-    options.transformed !== true
+    options.transformed !== true &&
+    last.data.length < COALESCE_MAX_CHARS
   ) {
     last.data += data
     const rawLengthBefore = last.sequenceChars ?? last.data.length - data.length

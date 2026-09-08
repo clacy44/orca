@@ -13,6 +13,11 @@ import {
   evaluateDroppableEnqueue,
   refreshDroppableSessionMembership
 } from './daemon-stream-droppable-membership'
+import {
+  holdForSocketWriteCeiling,
+  SOCKET_WRITE_CEILING_BYTES,
+  SOCKET_WRITE_CEILING_KEEP_TAIL_CHARS
+} from './daemon-stream-socket-write-ceiling'
 
 type StreamDataClient = {
   streamSocket: Socket | null
@@ -23,7 +28,9 @@ const STREAM_DATA_BATCH_INTERVAL_MS = 2
 
 // Shallow socket: the stream is one FIFO, so a deep buffer buries a visible pane's echo behind other panes' bulk; bulk stops here and is HELD (flushSession can jump it), bounding echo latency.
 // 128KB stays above the socket's ~16KB highWaterMark so a held state implies a false write() and thus a guaranteed 'drain' wake-up.
-const SHALLOW_SOCKET_WRITE_GATE_BYTES =
+// Exported: daemon-server.ts reuses this exact gate to decide when to pause the PTY producer off
+// the daemon's own client-socket depth (R117 FIX 3) — one threshold, one semantics.
+export const SHALLOW_SOCKET_WRITE_GATE_BYTES =
   process.env.ORCA_DAEMON_SHALLOW_SOCKET_GATE === '0' ? Number.POSITIVE_INFINITY : 128 * 1024
 // Sliced writes: a coalesced entry can grow to megabytes; writing it whole would re-deepen the socket past the gate in one call.
 const BULK_WRITE_SLICE_CHARS = 64 * 1024
@@ -34,10 +41,14 @@ const SMALL_SESSION_HOLD_BYPASS_CHARS = 4 * 1024
 
 type DaemonStreamDataBatcherOptions = {
   maxLineBytes?: number
-  /** Fires after each stream-socket write — the only place backlog grows, so the backlog pacer checks its watermark here. */
-  onAfterSocketWrite?: () => void
+  /** Fires after each non-control-entry stream-socket write with the client and session it wrote
+   *  for — the only place backlog grows, so the backpressure pacer checks the client socket's
+   *  depth here and pauses/resumes that session's producer. */
+  onAfterSocketWrite?: (clientId: string, sessionId: string) => void
   /** True for sessions whose queued output may be keep-tail dropped (main-marked background sessions). */
   isSessionDroppable?: (sessionId: string) => boolean
+  /** Test-only override for SOCKET_WRITE_CEILING_BYTES (R117 FIX 1) — production callers omit it. */
+  socketWriteCeilingBytes?: number
   /** Carve reply-eliciting query bytes (DSR/DA/DECRQM/OSC probes) out of dropped data — the hidden program blocks on the reply, so they must still be delivered even when their flood is not. */
   salvageDroppedData?: (dropped: string) => string
 }
@@ -46,9 +57,10 @@ export class DaemonStreamDataBatcher {
   private pendingByClient = new Map<string, PendingStreamDataBatch>()
   private getClient: (clientId: string) => StreamDataClient | undefined
   private maxLineBytes: number
-  private onAfterSocketWrite: (() => void) | undefined
+  private onAfterSocketWrite: ((clientId: string, sessionId: string) => void) | undefined
   private isSessionDroppable: (sessionId: string) => boolean
   private salvageDroppedData: (dropped: string) => string
+  private socketWriteCeilingBytes: number
 
   constructor(
     getClient: (clientId: string) => StreamDataClient | undefined,
@@ -59,6 +71,7 @@ export class DaemonStreamDataBatcher {
     this.onAfterSocketWrite = options.onAfterSocketWrite
     this.isSessionDroppable = options.isSessionDroppable ?? (() => false)
     this.salvageDroppedData = options.salvageDroppedData ?? (() => '')
+    this.socketWriteCeilingBytes = options.socketWriteCeilingBytes ?? SOCKET_WRITE_CEILING_BYTES
   }
 
   enqueue(
@@ -167,10 +180,27 @@ export class DaemonStreamDataBatcher {
         }
         batch.queue.shift()
         socket.write(encodeNdjson(entry.control))
-        this.onAfterSocketWrite?.()
+        this.onAfterSocketWrite?.(clientId, entry.sessionId)
         continue
       }
-      const socketDeep = (socket.writableLength ?? 0) >= SHALLOW_SOCKET_WRITE_GATE_BYTES
+      // R117 FIX 1 (daemon-stream-socket-write-ceiling.ts): the socket's own OS write buffer, not
+      // just this batcher's queue, is what actually grows unbounded — hold this pass and trim.
+      const writableLength = socket.writableLength ?? 0
+      if (
+        holdForSocketWriteCeiling(
+          batch,
+          entry,
+          writableLength,
+          this.socketWriteCeilingBytes,
+          SOCKET_WRITE_CEILING_KEEP_TAIL_CHARS,
+          this.salvageDroppedData,
+          heldSessions,
+          retained
+        )
+      ) {
+        continue
+      }
+      const socketDeep = writableLength >= SHALLOW_SOCKET_WRITE_GATE_BYTES
       if (socketDeep && batch.queuedChars <= HELD_WRITE_THROUGH_TOTAL_CHARS) {
         const sessionHeld = batch.queuedCharsBySession.get(entry.sessionId) ?? 0
         if (heldSessions.has(entry.sessionId) || sessionHeld > SMALL_SESSION_HOLD_BYPASS_CHARS) {
@@ -224,7 +254,7 @@ export class DaemonStreamDataBatcher {
         entry.seq,
         entry.transformed
       )
-      this.onAfterSocketWrite?.()
+      this.onAfterSocketWrite?.(clientId, entry.sessionId)
     }
     if (retained.length > 0) {
       batch.queue = retained
@@ -300,7 +330,7 @@ export class DaemonStreamDataBatcher {
     for (const entry of flushed) {
       if (entry.control) {
         client.streamSocket.write(encodeNdjson(entry.control))
-        this.onAfterSocketWrite?.()
+        this.onAfterSocketWrite?.(clientId, entry.sessionId)
       } else {
         writeStreamDataEvents(
           client.streamSocket,
@@ -311,7 +341,7 @@ export class DaemonStreamDataBatcher {
           entry.seq,
           entry.transformed
         )
-        this.onAfterSocketWrite?.()
+        this.onAfterSocketWrite?.(clientId, entry.sessionId)
       }
     }
   }
