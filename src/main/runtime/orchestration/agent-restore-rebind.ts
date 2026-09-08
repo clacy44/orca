@@ -364,7 +364,11 @@ export function rebindRestoredPane(
         launchGeneration: params.launchGeneration,
         executionHostId: params.executionHostId,
         evidence: 'sweep_record',
-        supersedePaneKey: params.ticketPayload.predecessorPaneKey
+        // [S10-21d b3] `predecessorPaneKey` is `string | null` on the shared ticket payload type
+        // now (the launcher's own unheld-session ticket) — evaluateRebindPredicate's own null
+        // guard above already refuses before this call is ever reached with a null value; `??
+        // undefined` keeps that guarantee type-sound here without a cast.
+        supersedePaneKey: params.ticketPayload.predecessorPaneKey ?? undefined
       })
       if (!launchResult.ok) {
         db.exec('ROLLBACK')

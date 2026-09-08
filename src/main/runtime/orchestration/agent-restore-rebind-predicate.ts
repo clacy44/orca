@@ -164,6 +164,15 @@ export function evaluateRebindPredicate(
     return { kind: 'refuse', reason: 'ticket_stale_generation' }
   }
 
+  // [S10-21d b3] `predecessorPaneKey` is nullable on `RestoreTicketPayload` only for the
+  // launcher's own unheld-session ticket (DEC-2) — the sweep, this predicate's one caller, never
+  // mints one. Unreachable in practice; refused rather than assumed, so the type stays sound
+  // without a cast. Narrows `predecessorPaneKey` to `string` for the rest of this function (the
+  // field is readonly).
+  if (params.ticketPayload.predecessorPaneKey === null) {
+    return { kind: 'refuse', reason: 'predecessor_row_not_found' }
+  }
+
   const row = findRowByPaneSuffix(db, params.hostId, params.ticketPayload.predecessorPaneKey)
   if (!row) {
     const already = findAlreadyRebound(

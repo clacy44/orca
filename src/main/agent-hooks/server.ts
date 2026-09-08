@@ -829,6 +829,19 @@ export class AgentHookServer {
     return this.buildStatusChangeNotification().providerSessions
   }
 
+  /** [S10-21d b3, DEC-3 conjunct D GEN_ABSENCE] Read-only: true iff any pane's last-known hook
+   * report names `sessionId` as its provider session — the live-report half of the GEN_ABSENCE
+   * signal (dead-holder-adoption.ts), never wire-reachable. */
+  hasLiveReportOfSession(sessionId: string): boolean {
+    for (const entry of this.state.lastStatusByPaneKey.values()) {
+      const enriched = entry as EnrichedAgentHookEventPayload
+      if (enriched.providerSession?.id === sessionId) {
+        return true
+      }
+    }
+    return false
+  }
+
   getStatusSnapshotForPane(paneKey: string): AgentStatusIpcPayload[] {
     const entry = this.state.lastStatusByPaneKey.get(paneKey)
     return entry ? [toAgentStatusIpcPayload(entry as EnrichedAgentHookEventPayload)] : []

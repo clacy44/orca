@@ -15,7 +15,10 @@ import { isCoveredLaunchAgent } from '../../shared/covered-launch-agents'
 import { LOCAL_EXECUTION_HOST_ID } from '../../shared/execution-host'
 import { SETUP_AGENT_SEQUENCE_STARTUP_COMMAND_ENV } from '../../shared/setup-agent-sequencing'
 import { isSessionId } from '../../shared/stable-pane-id'
-import type { RecordLaunchParams } from '../runtime/orchestration/agent-launch-sessions'
+import type {
+  LaunchEvidence,
+  RecordLaunchParams
+} from '../runtime/orchestration/agent-launch-sessions'
 import { resolveResumeTranscript } from '../startup/resolve-resume-transcript'
 // [JUDGMENT CALL, see RETURN] `OrchestrationDb` (db.ts), not the raw `Database.Database` the
 // store module (agent-launch-sessions.ts) takes: `OrchestrationDb.db` is private with no public
@@ -25,6 +28,10 @@ import { resolveResumeTranscript } from '../startup/resolve-resume-transcript'
 // deleteLaunchRow delegate this commit adds to db.ts — the only one that was missing).
 import type { OrchestrationDb } from '../runtime/orchestration/db'
 import { LaunchAdmissionRefusedError } from './agent-launch-admission-errors'
+import {
+  buildHostResumeRecordLaunchParams,
+  hostResumeOnRowDeleted
+} from './agent-launch-admission-host-resume'
 import { withPaneLock } from './agent-launch-admission-lock'
 import {
   audit,
@@ -55,10 +62,15 @@ export type LaunchAdmission =
   | {
       kind: 'host-resume'
       sessionId: string
-      predecessorPaneKey: string
+      /** [S10-21d b3, DEC-2] null for a launcher-issued restore of a session no pane on this host
+       * currently holds — the sweep never sets this null. */
+      predecessorPaneKey: string | null
       executionHostId: string
       launchGeneration: string
       launchSeq?: number
+      /** [S10-21d b3, DEC-2] Which LaunchEvidence this restore records. Omitted (defaults to
+       * 'sweep_record' below) for the sweep's own restore — the only caller before this brief. */
+      evidence?: Extract<LaunchEvidence, 'sweep_record' | 'host_restore'>
       sequencedAgentLine?: string
     }
 
@@ -288,16 +300,14 @@ export async function admitAgentLaunch(
         // [S10-21a C7f, D-R114 fix 2] Resume-shaped notice so a renderer store consumer can
         // clear a pane's stale sleeping-session record (see RETURN: no such consumer exists yet).
         ctx.notice(paneKey, 'launch_host_resume', 'launch_host_resume')
-        const params: RecordLaunchParams = {
-          hostId: ctx.hostId,
+        // [S10-21d b3, DEC-2] Builders split to agent-launch-admission-host-resume.ts (max-lines).
+        const params = buildHostResumeRecordLaunchParams(
+          ctx.hostId,
           paneKey,
-          agentType: spawnOptions.launchAgent ?? 'claude',
-          sessionId: x,
-          launchGeneration: admission.launchGeneration,
-          executionHostId: admission.executionHostId,
-          evidence: 'sweep_record',
-          supersedePaneKey: admission.predecessorPaneKey
-        }
+          spawnOptions.launchAgent ?? 'claude',
+          x,
+          admission
+        )
         const result = db.recordLaunch(params)
         if (!result.ok) {
           return refuse('launch_record_write_failed')
@@ -307,7 +317,6 @@ export async function admitAgentLaunch(
         if (result.restated) {
           return passThrough(spawnOptions, 'host_resume')
         }
-        const predecessorPaneKey = admission.predecessorPaneKey
         return buildRecordedAdmission(
           db,
           ctx,
@@ -315,9 +324,7 @@ export async function admitAgentLaunch(
           result.row.seq,
           spawnOptions,
           'host_resume',
-          () => {
-            db.restoreCurrentSessionForPane(ctx.hostId, predecessorPaneKey)
-          }
+          hostResumeOnRowDeleted(db, ctx.hostId, admission.predecessorPaneKey)
         )
       }
       if (newestRow !== undefined && newestRow.session_id === x) {

@@ -2835,6 +2835,11 @@ void app.whenReady().then(async () => {
   agentHookServer.setPaneLaunchAuthorityVerifier((paneKey, launchTokenHash, connectionId) =>
     runtimeService.verifyLivePaneLaunchTokenHash(paneKey, launchTokenHash, connectionId)
   )
+  // [S10-21d b3, DEC-3 conjunct D GEN_ABSENCE] Forward wiring — the launcher's dead-holder
+  // predicate consults the hook server's live provider-session set before adopting.
+  runtimeService.setHasLiveHookReportOfSessionCheck((sessionId) =>
+    agentHookServer.hasLiveReportOfSession(sessionId)
+  )
   // Why here and not beside the other rate-limit resolvers: the pane→lane join needs the runtime,
   // which is constructed after them. A post arriving before this lands falls back to the
   // config-dir map, which is the pre-S9b behaviour (S9 §2k).

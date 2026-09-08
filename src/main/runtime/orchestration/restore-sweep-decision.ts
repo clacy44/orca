@@ -89,11 +89,15 @@ export function decideLeafHoldRows(
     // row's original `launch_generation`, so a prior-generation row rotated this generation would
     // otherwise start holding the leaf on the strength of a generation it never actually admitted
     // into.
+    // [S10-21d b3, DEC-2] 'host_restore' (the launcher's own HOST_RESUME evidence) holds the leaf
+    // exactly like 'caller_resume' — a launcher-issued restore admitted this generation is just
+    // as much a same-generation admitted launch as any other arm.
     if (
       evidence === 'sweep_record' ||
       evidence === 'host_launch' ||
       evidence === 'caller_resume' ||
-      evidence === 'self_report_bootstrap'
+      evidence === 'self_report_bootstrap' ||
+      evidence === 'host_restore'
     ) {
       if (occupantOnOwnPaneLive) {
         return {
@@ -105,7 +109,9 @@ export function decideLeafHoldRows(
                 ? `leaf_held: new_launch_admitted_this_generation seq=${seq}`
                 : evidence === 'caller_resume'
                   ? `leaf_held: caller_resume_admitted_this_generation seq=${seq}`
-                  : `leaf_held: self_report_bootstrap_this_generation seq=${seq}`
+                  : evidence === 'host_restore'
+                    ? `leaf_held: host_restore_admitted_this_generation seq=${seq}`
+                    : `leaf_held: self_report_bootstrap_this_generation seq=${seq}`
         }
       }
       return {

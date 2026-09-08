@@ -27,7 +27,10 @@ export type RestoreTicketId = string & { readonly [RESTORE_TICKET_ID_BRAND]: tru
 // the pane the ticket was minted for. Nothing wire-shaped (no providerSession, no raw hook data)
 // is carried — see design v3.2 §2.2 "What changed from v2".
 export type RestoreTicketPayload = {
-  readonly predecessorPaneKey: string
+  /** [S10-21d b3, DEC-2] null for a launcher-issued restore of an UNHELD session (no
+   * current_sessions row on this host) — the sweep never mints null here, it always names its own
+   * registered row's predecessor pane. */
+  readonly predecessorPaneKey: string | null
   readonly sessionId: string
   readonly executionHostId: string
   readonly launchGeneration: string

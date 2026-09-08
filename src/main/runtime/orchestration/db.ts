@@ -88,6 +88,7 @@ import {
   deleteLaunchRowsForAgent as deleteLaunchRowsForAgentImpl,
   launchBySessionId as launchBySessionIdImpl,
   newestLaunchForPane as newestLaunchForPaneImpl,
+  paneHoldingSession as paneHoldingSessionImpl,
   recordLaunch as recordLaunchImpl,
   recordSelfReportRotation as recordSelfReportRotationImpl,
   setLaunchAgentId as setLaunchAgentIdImpl,
@@ -5283,6 +5284,12 @@ export class OrchestrationDb {
 
   launchBySessionId(sessionId: string): AgentLaunchSessionRow | undefined {
     return launchBySessionIdImpl(this.db, sessionId)
+  }
+
+  // [S10-21d b3] Who currently holds session X, per current_sessions — the launcher's own
+  // pre-adoption read (requestChairRestore), re-read again inside the pane lock before deciding.
+  paneHoldingSession(hostId: string, sessionId: string): string | undefined {
+    return paneHoldingSessionImpl(this.db, hostId, sessionId)
   }
 
   setLaunchAgentId(

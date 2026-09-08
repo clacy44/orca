@@ -24,7 +24,12 @@ import { upsertCurrentSession } from './current-session-upsert'
  * value keeps meaning "the fork-only conjunct-4 rotation" for every row already on disk and every
  * downstream consumer can tell the two mechanisms apart. 'self_report_bootstrap' is S5's first
  * row for a registered pane that had none. Neither is written by the launch path: they are
- * written only by agent-lineage-mismatch.ts, under §2 S3's four conjuncts. */
+ * written only by agent-lineage-mismatch.ts, under §2 S3's four conjuncts.
+ *
+ * [S10-21d b3, design-r104/DEC-2] 'host_restore' is the launcher-issued restore's own evidence —
+ * `orca chairs restore`'s HOST_RESUME admission, distinct from the sweep's 'sweep_record': both a
+ * dead-holder adoption and an unheld (null-predecessor) restore record this. Written only by the
+ * launcher's own admission call (admitAgentLaunch's HOST_RESUME arm, `admission.evidence`). */
 export type LaunchEvidence =
   | 'host_launch'
   | 'sweep_record'
@@ -32,6 +37,7 @@ export type LaunchEvidence =
   | 'caller_resume'
   | 'live_report'
   | 'self_report_bootstrap'
+  | 'host_restore'
 
 export type AgentLaunchSessionRow = {
   seq: number
@@ -56,7 +62,7 @@ export type RecordLaunchParams = {
   executionHostId: string
   evidence: Extract<
     LaunchEvidence,
-    'host_launch' | 'sweep_record' | 'caller_resume' | 'self_report_bootstrap'
+    'host_launch' | 'sweep_record' | 'caller_resume' | 'self_report_bootstrap' | 'host_restore'
   >
   /** [S10-21a C1a, errata 5(p)-5 item 3] Set ONLY from a verified host-resume (Layer-2 restore)
    * admission. Deletes `supersedePaneKey`'s current_sessions row inside this same transaction,
@@ -351,6 +357,21 @@ export function newestLaunchForPaneSuffix(
          ORDER BY seq DESC LIMIT 1`
     )
     .get(hostId, suffix) as AgentLaunchSessionRow | undefined
+}
+
+/** [S10-21d b3, design-r112 D2] The launcher's own read of who currently holds session X — the
+ * SAME `current_sessions` projection `recordLaunchInTransaction`'s own collision check reads,
+ * exposed as a standalone accessor for `requestChairRestore` to resolve X's holder BEFORE
+ * deciding to adopt or refuse. Undefined when no pane on this host currently holds X. */
+export function paneHoldingSession(
+  db: Database.Database,
+  hostId: string,
+  sessionId: string
+): string | undefined {
+  const row = db
+    .prepare(`SELECT pane_key FROM current_sessions WHERE host_id = ? AND session_id = ?`)
+    .get(hostId, sessionId) as { pane_key: string } | undefined
+  return row?.pane_key
 }
 
 export function launchBySessionId(
