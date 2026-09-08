@@ -132,3 +132,170 @@ describe('R107: a pending transcript verdict gets a fixed 10s retry, not the esc
     expect(resolve).toHaveBeenCalledTimes(2)
   })
 })
+
+// [S10-21d D-R162 H-1] A `pending` verdict must not retry at the fixed 10s cadence forever: past
+// PENDING_TRANSCRIPT_MAX_CHECKS (12) consecutive pending re-walks (~2 min) it is presumed stuck
+// and falls through to the existing 60s->15min ladder as an ordinary negative, seeded fresh (not
+// carrying the pending entry's own fixed-retry timestamps forward). A positive verdict or a
+// launch-generation change resets the count.
+describe('D-R162 H-1: a pending verdict enters the escalating ladder after 12 consecutive checks', () => {
+  let db: OrchestrationDb
+
+  beforeEach(() => {
+    resetTranscriptVerdictCacheForTests()
+    db = new OrchestrationDb(':memory:')
+  })
+
+  afterEach(() => {
+    db.close()
+    vi.useRealTimers()
+  })
+
+  function rawDb() {
+    return (db as unknown as { db: Parameters<typeof checkTranscriptConjunctMemoized>[0] }).db
+  }
+
+  function params(reportedSessionId: string, launchGeneration = LAUNCH_GENERATION) {
+    return { hostId: HOST_ID, paneKey: PANE_KEY, reportedSessionId, launchGeneration }
+  }
+
+  it('stays on the fixed 10s retry for 12 pending re-walks, then takes the ladder at 60s, then 120s', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(0)
+    const resolve = vi.fn(
+      async (): Promise<LiveReportTranscriptVerdict> => ({
+        path: '/tmp/stub.jsonl',
+        hasTurn: false
+      })
+    )
+
+    // 12 consecutive pending re-walks, each exactly 10s after the previous one's own nextRetryAt.
+    for (let i = 1; i <= 12; i++) {
+      vi.setSystemTime((i - 1) * 10_000)
+      const result = await checkTranscriptConjunctMemoized(
+        rawDb(),
+        resolve,
+        AGENT_TYPE,
+        params('sess-stuck')
+      )
+      expect(result).toEqual({ ok: false, note: undefined })
+    }
+    expect(resolve).toHaveBeenCalledTimes(12)
+
+    // 13th consecutive pending re-walk, due at +120s (12 * 10s): exhausts the grace, escalates to
+    // the ladder's initial 60s backoff instead of another fixed 10s retry.
+    vi.setSystemTime(120_000)
+    const thirteenth = await checkTranscriptConjunctMemoized(
+      rawDb(),
+      resolve,
+      AGENT_TYPE,
+      params('sess-stuck')
+    )
+    expect(thirteenth).toEqual({ ok: false, note: undefined })
+    expect(resolve).toHaveBeenCalledTimes(13)
+
+    // +10s (the old fixed-retry cadence) must NOT re-walk anymore: cache hit off the 60s ladder.
+    vi.setSystemTime(130_000)
+    await checkTranscriptConjunctMemoized(rawDb(), resolve, AGENT_TYPE, params('sess-stuck'))
+    expect(resolve).toHaveBeenCalledTimes(13)
+
+    // +60s from the escalation (t=180_000): re-walks off the ladder's initial backoff, still
+    // pending, doubles to 120s — never reseeded back to the fixed 10s retry.
+    vi.setSystemTime(180_000)
+    await checkTranscriptConjunctMemoized(rawDb(), resolve, AGENT_TYPE, params('sess-stuck'))
+    expect(resolve).toHaveBeenCalledTimes(14)
+
+    // +90s (t=270_000) is inside the doubled 120s window: no re-walk yet.
+    vi.setSystemTime(270_000)
+    await checkTranscriptConjunctMemoized(rawDb(), resolve, AGENT_TYPE, params('sess-stuck'))
+    expect(resolve).toHaveBeenCalledTimes(14)
+
+    // +120s from t=180_000 (t=300_000): re-walks again, doubling.
+    vi.setSystemTime(300_000)
+    await checkTranscriptConjunctMemoized(rawDb(), resolve, AGENT_TYPE, params('sess-stuck'))
+    expect(resolve).toHaveBeenCalledTimes(15)
+  })
+
+  it('a real turn arriving mid-grace reports positive and resets the pending count', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(0)
+    let resolved: LiveReportTranscriptVerdict = { path: '/tmp/stub.jsonl', hasTurn: false }
+    const resolve = vi.fn(async () => resolved)
+
+    for (let i = 1; i <= 5; i++) {
+      vi.setSystemTime((i - 1) * 10_000)
+      await checkTranscriptConjunctMemoized(rawDb(), resolve, AGENT_TYPE, params('sess-recovers'))
+    }
+    expect(resolve).toHaveBeenCalledTimes(5)
+
+    vi.setSystemTime(50_000)
+    resolved = { path: '/tmp/real.jsonl', hasTurn: true }
+    const positive = await checkTranscriptConjunctMemoized(
+      rawDb(),
+      resolve,
+      AGENT_TYPE,
+      params('sess-recovers')
+    )
+    expect(positive).toEqual({ ok: true })
+    expect(resolve).toHaveBeenCalledTimes(6)
+  })
+
+  it('an absent transcript (resolver reports null) follows the same bounded pending path', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(0)
+    const resolve = vi.fn(async (): Promise<LiveReportTranscriptVerdict> => null)
+
+    for (let i = 1; i <= 12; i++) {
+      vi.setSystemTime((i - 1) * 10_000)
+      const result = await checkTranscriptConjunctMemoized(
+        rawDb(),
+        resolve,
+        AGENT_TYPE,
+        params('sess-absent')
+      )
+      expect(result).toEqual({ ok: false, note: undefined })
+    }
+    expect(resolve).toHaveBeenCalledTimes(12)
+
+    // 13th: escalates to the 60s ladder, same as the stub case.
+    vi.setSystemTime(120_000)
+    await checkTranscriptConjunctMemoized(rawDb(), resolve, AGENT_TYPE, params('sess-absent'))
+    expect(resolve).toHaveBeenCalledTimes(13)
+    vi.setSystemTime(130_000)
+    await checkTranscriptConjunctMemoized(rawDb(), resolve, AGENT_TYPE, params('sess-absent'))
+    expect(resolve).toHaveBeenCalledTimes(13)
+  })
+
+  it('a launch-generation change resets the pending count back to the fixed 10s retry', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(0)
+    const resolve = vi.fn(
+      async (): Promise<LiveReportTranscriptVerdict> => ({
+        path: '/tmp/stub.jsonl',
+        hasTurn: false
+      })
+    )
+
+    for (let i = 1; i <= 12; i++) {
+      vi.setSystemTime((i - 1) * 10_000)
+      await checkTranscriptConjunctMemoized(
+        rawDb(),
+        resolve,
+        AGENT_TYPE,
+        params('sess-gen', 'gen-1')
+      )
+    }
+    expect(resolve).toHaveBeenCalledTimes(12)
+
+    // A new generation clears the cache outright (D-R154 finding 1): the very next check for the
+    // same reported id is a fresh pending sighting, fixed 10s retry, not the ladder.
+    vi.setSystemTime(120_000)
+    await checkTranscriptConjunctMemoized(rawDb(), resolve, AGENT_TYPE, params('sess-gen', 'gen-2'))
+    expect(resolve).toHaveBeenCalledTimes(13)
+
+    // +10s under the new generation: still the fixed 10s retry (grace reset), not the ladder.
+    vi.setSystemTime(130_000)
+    await checkTranscriptConjunctMemoized(rawDb(), resolve, AGENT_TYPE, params('sess-gen', 'gen-2'))
+    expect(resolve).toHaveBeenCalledTimes(14)
+  })
+})
