@@ -32,6 +32,7 @@ import {
   passThrough,
   preflightResumeTranscript,
   type AdmittedLaunch,
+  type AgentLaunchAdmissionContext,
   type LaunchAdmissionClassification
 } from './agent-launch-admission-support'
 import {
@@ -63,35 +64,11 @@ export type LaunchAdmission =
       sequencedAgentLine?: string
     }
 
-export type AgentLaunchAdmissionContext = {
-  hostId: string
-  executionHostId: string
-  launchGeneration: string
-  /** [S10-21d R118, design (a)/(b)] Threaded from `createTerminal`'s own `opts.launchPreferences`
-   * (TerminalCreateOptions) down through `RuntimePtyController.spawn` and
-   * `launchAdmissionBundle` — undefined for the overwhelming majority of launches that name no
-   * preference, in which case every `recordLaunch` call below passes no `prefs` and the INSERT
-   * writes NULL (design (d), byte-identical to today). model/effort only — `mode` is a separate,
-   * unrelated preference this slice does not touch. */
-  launchPreferences?: { model?: string; effort?: string }
-  /** [D-R104 F-3] REQUIRED — every production caller (launchAdmissionBundle, pty.ts) now wires a
-   * real pane notice; a caller cannot silently omit it and have every UNRECORDED/self-resume
-   * signal go audit-only. [§2.6] Raised on SELF_RESUME(caller) into a registered pane and on
-   * every UNRECORDED. */
-  notice: (paneKey: string, verb: string, reasonCode: string) => void
-  /** [D-R104 F-3] REQUIRED, same reasoning as `notice`. [§C.4 SELF_RESUME v2.1 V1] The §2.6
-   * contested-lineage signal — [S10-21a C6b, Ruling 34 Addendum 19] audit verb 'launch', outcome
-   * 'contested', attributed to the registered row (`registeredAgentId`) — plus a pane notice.
-   * [S10-21a C6, SCOPE 3(b)] `registeredPaneKey` is the registered agent's OWN pane_key
-   * (`getAgentByPaneKey` matches by pane SUFFIX — derived-agent-rows.ts:22-34 — so it can
-   * legitimately differ from `claimantPaneKey`, the pane the caller-origin SELF_RESUME actually
-   * landed on). The runtime-side handler notices BOTH when they differ, one when they don't. */
-  contestedLineage: (
-    claimantPaneKey: string,
-    registeredPaneKey: string,
-    registeredAgentId: string
-  ) => void
-}
+// [S10-21d R118, forced deviation — see RETURN] AgentLaunchAdmissionContext itself moved to
+// agent-launch-admission-support.ts purely to keep this file under the max-lines budget after
+// adding the launchPreferences field — no behavior change, every existing import of it from THIS
+// module keeps working via this re-export.
+export type { AgentLaunchAdmissionContext }
 
 export type { AdmittedLaunch } from './agent-launch-admission-support'
 
