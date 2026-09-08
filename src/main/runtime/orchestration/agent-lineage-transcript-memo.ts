@@ -13,6 +13,16 @@
 // and can leave S3/S5 permanently dead for a legitimately churning pane until an app restart];
 // older entries age out of the window on their own. Structural params (not imported from
 // agent-lineage-mismatch.ts) so this split introduces no import cycle.
+//
+// [S10-21d R107, chair decision, diag-r106-r110-2026-09-08.md] A THIRD verdict shape, `pending`
+// (no file yet, or a zero-turn stub — never an observed negative), gets its own FIXED 10s retry
+// (PENDING_TRANSCRIPT_RETRY_MS) instead of the escalating negative ladder above: a fork stub or a
+// session seconds old may legitimately gain its first turn on the very next report, so treating
+// it as an increasingly-unlikely-to-change negative was the exact staleness this fixes. Coexists
+// with, rather than supersedes, D-R152-b4 finding 2 (a report inside the retry window still hits
+// the cache and never re-walks) and D-R156 finding 3 (the churn budget is still charged
+// unconditionally, pending or not — an id that will never produce a real transcript is exactly
+// what that bound must keep catching).
 import type Database from '../../sqlite/sync-database'
 import { writeAgentAudit } from './agent-audit-log'
 
@@ -30,6 +40,15 @@ const TRANSCRIPT_VERDICT_CACHE_MAX = 512
 /** First negative retry after 60s, doubling each re-check, capped at 15 min. */
 const NEGATIVE_TRANSCRIPT_BACKOFF_INITIAL_MS = 60_000
 const NEGATIVE_TRANSCRIPT_BACKOFF_CAP_MS = 15 * 60_000
+/** [S10-21d R107, chair decision] A `pending` verdict (stub/zero-turn/not-yet-written transcript)
+ * is cached as a negative on a FIXED 10s retry, never the escalating 60s->15min ladder above —
+ * it is not an observed negative, so it must not be treated as increasingly unlikely to change.
+ * Fixed, not doubling: a stub that stays a stub keeps retrying every 10s for as long as it is
+ * seen (bounded overall by the churn budget below, which a pending verdict still charges — D-R156
+ * finding 3 is unchanged; a new launch generation still clears the cache outright — D-R154
+ * finding 1's generation-clear half is unaffected). Chosen to keep D-R152-b4 finding 2's own test
+ * timing (an immediate re-report, elapsed 0) inside the cache window. */
+const PENDING_TRANSCRIPT_RETRY_MS = 10_000
 /** At most this many DISTINCT (reported id, agent type) PAIRS per pane may pay a walk inside the
  * rolling window below [D-R156 finding 3; S10-21c B-final, D-R158-b4d finding 2] — older pairs
  * age out on their own, so the bound refills over time instead of sitting dead for the rest of
@@ -45,7 +64,7 @@ export const ID_CHURN_REFUSAL_NOTE = 'live_report_id_churn_bounded'
 
 type CachedTranscriptVerdict =
   | { ok: true }
-  | { ok: false; note?: string; nextRetryAt: number; backoffMs: number }
+  | { ok: false; note?: string; nextRetryAt: number; backoffMs: number; pending?: boolean }
 
 let transcriptVerdictGeneration: string | undefined
 const transcriptVerdictCache = new Map<string, CachedTranscriptVerdict>()
@@ -97,18 +116,25 @@ function writeIdChurnAuditOnce(
 
 /** [S10-21c B4, design §2 S3/S5 conjunct (iii)] `{path, hasTurn:true}` is real; `{coverage}` is
  * S4's third state and REFUSES here (the sweep only notes it and proceeds; this path is deciding
- * whether to believe an id the PANE authored, so an unverifiable transcript is no check at all). */
+ * whether to believe an id the PANE authored, so an unverifiable transcript is no check at all).
+ *
+ * [S10-21d R107] `pending: true` distinguishes "no observation yet" (no file at all, or a
+ * zero-turn stub — resolveResumeTranscript never reports `hasTurn:true` until a real record
+ * lands, diag-r106-r110-2026-09-08.md) from `uncovered`'s genuine, stable negative: a fork stub
+ * or a session only seconds old will legitimately gain its first turn on the very next report, so
+ * it gets its own fixed, short retry (PENDING_TRANSCRIPT_RETRY_MS) rather than the escalating
+ * 60s->15min ladder a genuine negative earns. */
 async function checkTranscriptConjunct(
   resolveResumeTranscript: ResolveLiveReportTranscript,
   agentType: string,
   sessionId: string
-): Promise<{ ok: true } | { ok: false; note?: string }> {
+): Promise<{ ok: true } | { ok: false; note?: string; pending?: boolean }> {
   const transcript = await resolveResumeTranscript(agentType, sessionId)
   if (transcript !== null && 'coverage' in transcript) {
     return { ok: false, note: `resume_preflight_uncovered ${agentType}` }
   }
   if (!transcript || !transcript.hasTurn) {
-    return { ok: false }
+    return { ok: false, pending: true }
   }
   return { ok: true }
 }
@@ -153,6 +179,11 @@ export async function checkTranscriptConjunctMemoized(
     writeIdChurnAuditOnce(db, params)
     return { ok: false, note: ID_CHURN_REFUSAL_NOTE }
   }
+  // [D-R156 finding 3 UNCHANGED by R107] Charged unconditionally, BEFORE the verdict is known —
+  // the distinct-id churn bound exists to rate-limit how many DIFFERENT ids a pane may ever pay a
+  // walk for (an anti-churn/anti-spoof property), which a pending verdict does not exempt: an id
+  // that will NEVER produce a real transcript is exactly the case this bound must still catch, or
+  // it stops bounding anything. R107 changes ONLY the negative-cache/backoff branch below.
   if (!seenIds.has(idChurnPairKey)) {
     seenIds.set(idChurnPairKey, now)
   }
@@ -172,9 +203,24 @@ export async function checkTranscriptConjunctMemoized(
   }
   if (verdict.ok) {
     transcriptVerdictCache.set(key, { ok: true })
+  } else if (verdict.pending === true) {
+    // [S10-21d R107] Fixed 10s retry, never the escalating ladder below — see
+    // PENDING_TRANSCRIPT_RETRY_MS. Coexists with D-R152-b4 finding 2 (a report inside this
+    // window still hits the cache, so it never re-walks) and D-R154 finding 1 (a new generation
+    // still clears this entry, same as any other cache entry).
+    transcriptVerdictCache.set(key, {
+      ok: false,
+      note: verdict.note,
+      nextRetryAt: now + PENDING_TRANSCRIPT_RETRY_MS,
+      backoffMs: PENDING_TRANSCRIPT_RETRY_MS,
+      pending: true
+    })
   } else {
+    // [D-R154 finding 1] Doubling only carries forward from a PRIOR genuine negative — a cached
+    // `pending` entry's fixed 10s must never seed the escalating ladder if this pair later
+    // resolves to a genuine (non-pending) negative instead.
     const backoffMs =
-      cached && !cached.ok
+      cached && !cached.ok && cached.pending !== true
         ? Math.min(cached.backoffMs * 2, NEGATIVE_TRANSCRIPT_BACKOFF_CAP_MS)
         : NEGATIVE_TRANSCRIPT_BACKOFF_INITIAL_MS
     transcriptVerdictCache.set(key, {
@@ -184,7 +230,8 @@ export async function checkTranscriptConjunctMemoized(
       backoffMs
     })
   }
-  return verdict
+  // Never leak the internal `pending` discriminator past this function's own contract.
+  return verdict.ok ? { ok: true } : { ok: false, note: verdict.note }
 }
 
 /** Test-only: module-scoped state survives across `it()` blocks — reset between cases. */
