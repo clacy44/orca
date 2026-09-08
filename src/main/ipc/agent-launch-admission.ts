@@ -30,6 +30,7 @@ import type { OrchestrationDb } from '../runtime/orchestration/db'
 import { LaunchAdmissionRefusedError } from './agent-launch-admission-errors'
 import {
   buildHostResumeRecordLaunchParams,
+  checkHostResumeHolderUnmoved,
   hostResumeOnRowDeleted
 } from './agent-launch-admission-host-resume'
 import { withPaneLock } from './agent-launch-admission-lock'
@@ -300,6 +301,18 @@ export async function admitAgentLaunch(
         // [S10-21a C7f, D-R114 fix 2] Resume-shaped notice so a renderer store consumer can
         // clear a pane's stale sleeping-session record (see RETURN: no such consumer exists yet).
         ctx.notice(paneKey, 'launch_host_resume', 'launch_host_resume')
+        // [S10-21d b3b, D-R163 H1 fix] Re-read fresh, inside the lock — see
+        // checkHostResumeHolderUnmoved's own doc comment for the race this closes.
+        const holderMoved = checkHostResumeHolderUnmoved(
+          db,
+          ctx.hostId,
+          ctx.launchGeneration,
+          x,
+          admission
+        )
+        if (holderMoved) {
+          return refuse(holderMoved)
+        }
         // [S10-21d b3, DEC-2] Builders split to agent-launch-admission-host-resume.ts (max-lines).
         const params = buildHostResumeRecordLaunchParams(
           ctx.hostId,
@@ -310,7 +323,10 @@ export async function admitAgentLaunch(
         )
         const result = db.recordLaunch(params)
         if (!result.ok) {
-          return refuse('launch_record_write_failed')
+          // [S10-21d b3b, D-R163 H2 LOW] An unheld restore's write failure IS foreign_session_id.
+          return refuse(
+            admission.predecessorPaneKey === null ? result.reason : 'launch_record_write_failed'
+          )
         }
         // [D-R104 F-4] A restated row is not this call's to confirm/compensate over — it was
         // already there (F-12).

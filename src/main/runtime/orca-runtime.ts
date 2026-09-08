@@ -36,12 +36,7 @@ import {
 } from '../../shared/terminal-output-side-effects'
 import { getDecorativeAgentTitleSignature } from '../../shared/agent-decorative-title-signature'
 import { createCommandCodeOutputStatusDetector } from '../../shared/command-code-output-status'
-import {
-  SettleObservations,
-  resolveIncumbentDeath,
-  type IncumbentEvidence,
-  type IncumbentVerdict
-} from './incumbent-death'
+import { SettleObservations, type IncumbentEvidence } from './incumbent-death'
 import type { ControllerInventory } from './orchestration/agent-process-identity'
 import type {
   TerminalSideEffectBatch,
@@ -137,14 +132,7 @@ import {
   type RestoreTicketPayload
 } from './restore-ticket-registry'
 import { isRestoreSweepLockHeld } from './restore-sweep-lock'
-import { decideEarlyRows } from './orchestration/restore-sweep-decision'
-import { collectSweepEvidence } from './orchestration/restore-sweep-evidence'
-import {
-  resolveHolderAdoption,
-  type HolderAdoptionRefusalReason
-} from './orchestration/dead-holder-adoption'
-import { registerAgentForPane } from './rpc/methods/register-agent-for-pane'
-import { resolveResumeTranscript } from '../startup/resolve-resume-transcript'
+import { requestChairRestore as requestChairRestoreImpl } from './orchestration/chair-restore' // [S10-21d b3b, D-R163 M4]
 import { OrchestrationDb } from './orchestration/db'
 import type { LegacySweepAuditRow } from './device-registry-legacy-sweep'
 import type { RemoteDispatchAttachmentRow } from './orchestration/types'
@@ -372,10 +360,7 @@ import { getRegisteredSshState } from '../ipc/ssh'
 // [S10-21a C3-v2c, errata 5(p) v2.1 §C.5, §C.7] The in-process launch-admission descriptor and its
 // typed refusal — never on a wire schema (see `LaunchAdmission`'s own doc comment).
 import { LaunchAdmissionRefusedError, type LaunchAdmission } from '../ipc/agent-launch-admission'
-import {
-  audit as writeLaunchAdmissionAudit,
-  preflightResumeTranscript
-} from '../ipc/agent-launch-admission-support'
+import { audit as writeLaunchAdmissionAudit } from '../ipc/agent-launch-admission-support'
 import {
   isCoveredLaunchAgent,
   isForkSessionRefusalToken,
@@ -1564,28 +1549,14 @@ type RuntimePtyWorktreeRecord = {
 // parameter can carry the same shape without repeating the inline union.
 export type TerminalRestoreProvenance =
   | { kind: 'none' }
-  | {
-      kind: 'host-restore'
-      ticket: RestoreTicketId
-      /** [S10-21d b3, DEC-2] Which LaunchEvidence the redeemed ticket's HOST_RESUME admission
-       * should record. Omitted (defaults to 'sweep_record' at the admission arm) for the sweep's
-       * own restore — the ONLY caller before this brief; the launcher (`requestChairRestore`)
-       * sets 'host_restore' explicitly. */
-      evidence?: 'sweep_record' | 'host_restore'
-    }
+  | { kind: 'host-restore'; ticket: RestoreTicketId; evidence?: 'sweep_record' | 'host_restore' } // [S10-21d b3, DEC-2] omitted -> 'sweep_record'
 
 type TerminalCreateOptions = {
   // Why: required so the compiler enumerates every spawner; the funnel binds it to the pane it
   // mints and every spawn edge reads it back from there, never from the request (S9 §2a).
   credentialLane: TerminalCredentialLaneOption
-  // Why required, non-wire (INV-P-021, design v3.2 §2.2/§2.1d): every spawner must state whether
-  // this create carries host-restore provenance. `{ kind: 'none' }` is the answer for every
-  // caller-driven create; only the sweep (C7) and, since S10-21d b3, the launcher's
-  // `requestChairRestore`, both redeeming their own ticket from RestoreTicketRegistry
-  // (restore-ticket-registry.ts), may ever pass `host-restore`. No RPC/IPC
-  // params schema carries this field — the ones that could accept terminal-create/
-  // ensureAgentSession options from a caller are `.strict()` (e.g.
-  // rpc/methods/agent-session.ts:138, :184), so an injected field is rejected, not ignored.
+  // Why required, non-wire (INV-P-021, v3.2 §2.2/§2.1d): `{ kind: 'none' }` for callers; only the
+  // sweep (C7)/`requestChairRestore` (b3) may pass `host-restore` (no RPC/IPC schema; `.strict()`).
   restoreProvenance: TerminalRestoreProvenance
   // [S10-21a C3-v2c, errata 5(p) v2.1 §C.2/§C.5] Non-wire, host-set only. The literal agent line
   // this same caller handed to `createSequencedSetupAgentCommands({startupCommand})` — the ONLY
@@ -3283,9 +3254,9 @@ export class OrcaRuntimeService {
   // from the same instance later. No RPC/IPC surface ever sees a `RestoreTicketId` — it is
   // minted and redeemed entirely in-process (INV-P-021).
   private readonly restoreTickets = new RestoreTicketRegistry()
-  // [S10-21d b3, DEC-3 conjunct D GEN_ABSENCE] See setHasLiveHookReportOfSessionCheck's doc
-  // comment.
-  private hasLiveHookReportOfSessionCheck: ((sessionId: string) => boolean) | null = null
+  private hasLiveHookReportOfSessionCheck:
+    | ((sessionId: string, opts?: { excludePaneKey?: string }) => boolean)
+    | null = null // [S10-21d b3, DEC-3 D]
   // S10-16 C1 review F3: the device registry's R1.4 legacy-sweep audit rows have no sink until the
   // orchestration DB attaches (device-registry-load.ts runs before it exists) — RuntimeRpcServer
   // registers its DeviceRegistry here once pairing init succeeds, and this flushes it exactly once
@@ -14160,236 +14131,22 @@ export class OrcaRuntimeService {
     return this.restoreTickets.hasLiveTicketForPane(paneKey)
   }
 
-  /** [S10-21d b3, DEC-2] The launcher's OWN mint point, distinct from `mintRestoreTicket` (the
-   * sweep's) so that method's own doc comment ("the ONLY public entry") stays true for the
-   * sweep specifically — same registry instance, same in-process-only boundary, never
-   * wire-reachable. Called only from `requestChairRestore` below. */
-  mintLauncherRestoreTicket(payload: RestoreTicketMintArgs): RestoreTicketId {
-    return this.restoreTickets.mint(payload)
-  }
-
-  /** [S10-21d b3, DEC-3 conjunct D GEN_ABSENCE] Wired from index.ts to the hook server's
-   * `hasLiveReportOfSession` — null until wired (tests, early boot), in which case the conjunct
-   * reads "no live report" (the conservative direction: never grants adoption on missing wiring
-   * alone, since every OTHER conjunct still applies). */
-  setHasLiveHookReportOfSessionCheck(check: (sessionId: string) => boolean): void {
+  setHasLiveHookReportOfSessionCheck(
+    check: (sessionId: string, opts?: { excludePaneKey?: string }) => boolean
+  ): void {
     this.hasLiveHookReportOfSessionCheck = check
+  } // [S10-21d b3 DEC-3 D]
+  hasLiveHookReportOfSession(sessionId: string, opts?: { excludePaneKey?: string }): boolean {
+    return this.hasLiveHookReportOfSessionCheck?.(sessionId, opts) ?? false
   }
-
-  /** [S10-21d b4] Read-side of the above, for the executor's verification table's `attested`
-   * column — never wire-reachable (no RPC/IPC schema exposes this), same conservative default
-   * (unwired -> false) as the write side. */
-  hasLiveHookReportOfSession(sessionId: string): boolean {
-    return this.hasLiveHookReportOfSessionCheck?.(sessionId) ?? false
-  }
-
-  /** [S10-21d b3, DEC-2] The launcher's own restore: mints an in-process ticket for conversation
-   * `sessionId` — adopting a DEAD holder pane per DEC-3 (`resolveHolderAdoption`), or recording
-   * an unheld restore (no current_sessions row on this host) with no supersede — then opens the
-   * pane through the SAME HOST_RESUME arm the sweep uses (`ensureAgentSession` with
-   * `restoreProvenance: {kind:'host-restore', evidence:'host_restore'}`), and registers
-   * `displayName`/`role` for the new pane in-process (`registerAgentForPane`). No CLI/RPC surface
-   * calls this yet — b4 adds the executor/CLI. A LIVE holder refuses loudly, naming the pane, per
-   * DEC-2's "no fork, no stub" consequence (the manual `--fork-session` path stays the operator's
-   * own tool for that case).
-   *
-   * [S10-21d b4, DEC-9/R118] `model`/`effort`, when a manifest entry carries them, thread through
-   * as `launchPreferences` to the SAME `ensureAgentSession` call below (already supported today
-   * via `toAgentSessionOptions` — no new plumbing). Omitted -> `launchPreferences` stays unset,
-   * preserving every existing caller's behaviour byte-for-byte. Row-persisted preferences (the
-   * sweep path, after lane 1's b7) are explicitly out of scope for this method. */
-  async requestChairRestore(request: {
-    worktreeSelector: string
-    sessionId: string
-    displayName: string
-    role?: string
-    model?: string
-    effort?: string
-  }): Promise<
-    | {
-        ok: true
-        paneKey: string
-        agentId: string
-        holderPaneKey: string | null
-        adoptionSignal: 'IDENTITY' | 'D1' | 'GEN_ABSENCE' | null
-      }
-    | { ok: false; reason: 'restore_target_live_elsewhere'; holderPaneKey: string }
-    | { ok: false; reason: HolderAdoptionRefusalReason; holderPaneKey: string }
-    | { ok: false; reason: string }
-  > {
-    const db = this.getOrchestrationDb()
-    const hostId = this.getOrchestrationCompatibilityHostId()
-    const agentType = 'claude'
-    const currentLaunchGeneration = this.getLaunchGenerationId()
-
-    const holderPaneKey = db.paneHoldingSession(hostId, request.sessionId) ?? null
-    let adoptionSignal: 'IDENTITY' | 'D1' | 'GEN_ABSENCE' | null = null
-
-    if (holderPaneKey !== null) {
-      const holderLaunchRow = db.newestLaunchForPane(hostId, holderPaneKey)
-      const parsed = parsePaneKey(holderPaneKey)
-      if (!parsed) {
-        return { ok: false, reason: 'restore_target_unresolvable' }
-      }
-      const inventory = await this.takeControllerInventoryForSweep()
-      const holderRegistered = db.getAgentByPaneKey(hostId, holderPaneKey)
-      const early = decideEarlyRows(holderRegistered?.process_incarnation ?? null, inventory)
-
-      let incumbent: IncumbentVerdict
-      let d2Inventory: 'present' | 'absent' | 'unknown'
-      let inventoryRoundNonNull: boolean
-      let holderHasConnectedPty = this.findConnectedPtyForPane(holderPaneKey) !== undefined
-      if (early.kind === 'skipped_daemon_survived') {
-        incumbent = { dead: false, reason: 'live' }
-        d2Inventory = 'present'
-        inventoryRoundNonNull = true
-      } else if (early.kind === 'layer3') {
-        // [JUDGMENT CALL, see RETURN] `decideEarlyRows`'s 'layer3' covers BOTH a null inventory
-        // round and an ambiguous-pty identity (still a non-null round) — collapsed here to the
-        // conservative "insufficient evidence" reading either way, since neither sub-case can
-        // support IDENTITY/D1/GEN_ABSENCE: never wrongly grants adoption, may refuse a case a
-        // finer read would allow.
-        incumbent = { dead: false, reason: 'inventory_unknown' }
-        d2Inventory = 'unknown'
-        inventoryRoundNonNull = false
-      } else {
-        const evidenceBundle = await collectSweepEvidence(
-          this,
-          holderPaneKey,
-          parsed.tabId,
-          parsed.leafId,
-          hostId,
-          inventory,
-          early.identity,
-          early.status
-        )
-        incumbent = resolveIncumbentDeath(evidenceBundle.incumbentEvidence)
-        d2Inventory = evidenceBundle.incumbentEvidence.d2.inventory
-        inventoryRoundNonNull = true
-        holderHasConnectedPty =
-          holderHasConnectedPty || evidenceBundle.occupantLiveness === 'present'
-      }
-
-      if (!incumbent.dead && incumbent.reason === 'live') {
-        return { ok: false, reason: 'restore_target_live_elsewhere', holderPaneKey }
-      }
-
-      const holderExecutionHostId = holderLaunchRow?.execution_host_id ?? hostId
-      // [JUDGMENT CALL, see RETURN] Conjunct F ("the holder's registered row, if any, IS the row
-      // being rebound") — b3 never rebinds the holder's OLD row (registerAgentForPane always
-      // creates/re-mints the NEW pane's own row); the closest faithful reading is "the holder's
-      // live registered row, if any, names the SAME chair" — a different live name on the holder
-      // refuses, the SAME name (this restore reclaiming its own prior identity) does not.
-      const holderLiveSignals = this.getAgentDirectoryLivenessSignals(holderPaneKey)
-      const holderIsLive =
-        holderLiveSignals.terminalHandle !== null || holderLiveSignals.observedLive
-      const holderHasOtherLiveRegisteredRow =
-        holderRegistered !== undefined &&
-        holderIsLive &&
-        holderRegistered.display_name !== request.displayName
-
-      const preflight = await preflightResumeTranscript(
-        resolveResumeTranscript,
-        agentType,
-        request.sessionId
-      )
-
-      const decision = resolveHolderAdoption({
-        holderPaneKey,
-        // [JUDGMENT CALL, see RETURN] The adopting pane does not exist yet at predicate-evaluation
-        // time (ensureAgentSession below mints it) — this sentinel can never equal a real
-        // `tab:leaf` pane key, so conjunct A is vacuously satisfied for every launcher restore.
-        adoptingPaneKey: '<pending-launcher-restore>',
-        holderExecutionHostId,
-        adoptingExecutionHostId: hostId,
-        holderLaunchGeneration: holderLaunchRow?.launch_generation ?? null,
-        currentLaunchGeneration,
-        incumbent,
-        d2Inventory,
-        inventoryRoundNonNull,
-        holderHasConnectedPty,
-        liveHookReportOfSessionElsewhere:
-          this.hasLiveHookReportOfSessionCheck?.(request.sessionId) ?? false,
-        sweepLockHeld: isRestoreSweepLockHeld(),
-        sweepRestoreMarkSetForHolder: db.getSweepRestoreMark(hostId, holderPaneKey),
-        holderHasOtherLiveRegisteredRow,
-        transcriptPreflightPassed: preflight.ok
-      })
-      if (!decision.adoptable) {
-        return { ok: false, reason: decision.reason, holderPaneKey }
-      }
-      adoptionSignal = decision.signal
-    } else {
-      // No holder: unheld restore (DEC-2) — still refuse loudly rather than write down a session
-      // id with no resumable transcript.
-      const preflight = await preflightResumeTranscript(
-        resolveResumeTranscript,
-        agentType,
-        request.sessionId
-      )
-      if (!preflight.ok) {
-        return { ok: false, reason: preflight.reasonCode }
-      }
-    }
-
-    const ticket = this.mintLauncherRestoreTicket({
-      predecessorPaneKey: holderPaneKey,
-      sessionId: request.sessionId,
-      executionHostId: hostId,
-      launchGeneration: currentLaunchGeneration
-    })
-
-    let created: RuntimeEnsureAgentSessionResult
-    try {
-      created = await this.ensureAgentSession(
-        {
-          kind: 'explicit',
-          worktree: request.worktreeSelector,
-          agent: 'claude',
-          providerSession: { key: 'session_id', id: request.sessionId },
-          presentation: 'background',
-          ...(request.model || request.effort
-            ? {
-                launchPreferences: {
-                  ...(request.model ? { model: request.model } : {}),
-                  ...(request.effort ? { effort: request.effort } : {})
-                }
-              }
-            : {})
-        },
-        {},
-        { restoreProvenance: { kind: 'host-restore', ticket, evidence: 'host_restore' } }
-      )
-    } catch (err) {
-      return {
-        ok: false,
-        reason: `ensure_agent_session_failed: ${err instanceof Error ? err.message : String(err)}`
-      }
-    }
-    const newPaneKey = created.terminal.paneKey
-    if (!newPaneKey) {
-      return { ok: false, reason: 'restore_pane_key_missing' }
-    }
-    const newTerminalHandle = created.terminal.handle
-    const registration = await registerAgentForPane(db, this, {
-      paneKey: newPaneKey,
-      terminalHandle: newTerminalHandle,
-      processIncarnation: this.getTerminalProcessIncarnation(newTerminalHandle),
-      displayName: request.displayName,
-      role: request.role
-    })
-    if (!registration.ok) {
-      return { ok: false, reason: `register_failed: ${registration.reason}` }
-    }
-    return {
-      ok: true,
-      paneKey: newPaneKey,
-      agentId: registration.agent.id,
-      holderPaneKey,
-      adoptionSignal
-    }
-  }
-
+  /* [b4/b3b M1] */ isHookReportCheckWired(): boolean {
+    return this.hasLiveHookReportOfSessionCheck !== null
+  } /* [b3b M5] */
+  requestChairRestore(
+    request: Parameters<typeof requestChairRestoreImpl>[1]
+  ): ReturnType<typeof requestChairRestoreImpl> {
+    return requestChairRestoreImpl({ runtime: this }, request)
+  } // [b3b M4, chair-restore.ts]
   registerOrchestrationCompatibilitySshAttachment(
     targetId: string,
     connectionIncarnation: string
@@ -29019,13 +28776,10 @@ export class OrcaRuntimeService {
                 predecessorPaneKey: hostRestorePayload.predecessorPaneKey,
                 executionHostId: hostRestorePayload.executionHostId,
                 launchGeneration: hostRestorePayload.launchGeneration,
-                // [S10-21d b3, DEC-2] Threaded from the caller's own restoreProvenance, never the
-                // ticket payload — undefined for the sweep's restore (admission defaults it to
-                // 'sweep_record'); 'host_restore' for the launcher's `requestChairRestore`.
                 ...(opts.restoreProvenance.kind === 'host-restore' &&
                 opts.restoreProvenance.evidence
                   ? { evidence: opts.restoreProvenance.evidence }
-                  : {}),
+                  : {}), // [S10-21d b3, DEC-2]
                 ...(hostRestorePayload.launchSeq !== undefined
                   ? { launchSeq: hostRestorePayload.launchSeq }
                   : {}),
@@ -32172,7 +31926,8 @@ export class OrcaRuntimeService {
     return resolveTerminalStartupCwd(workspace.path, requestedCwd)
   }
 
-  private async resolveTerminalWorkspaceLaunchScope(
+  async resolveTerminalWorkspaceLaunchScope(
+    // [S10-21d b3b, D-R163 M4] widened from `private`
     selector: string
   ): Promise<TerminalWorkspaceLaunchScope> {
     return (await this.resolveTerminalWorkspaceLaunchTarget(selector)).scope

@@ -5,11 +5,15 @@ import { defineMethod, type RpcMethod } from '../core'
 import { OptionalString, requiredString } from '../schemas'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import { NO_PANE_IDENTITY_NEXT_STEPS } from './orchestration-caller-identity'
-import { hostIdFor, rateLimited, toPublicAgentView } from './agent-directory-rpc-view'
-import { registerAgentForPane } from './register-agent-for-pane'
+import {
+  DIRECTORY_LIVE_CAP,
+  hostIdFor,
+  rateLimited,
+  toPublicAgentView
+} from './agent-directory-rpc-view'
+import { registerAgentForPane } from '../../orchestration/register-agent-for-pane'
 
 const HOUR_MS = 60 * 60 * 1000
-const DIRECTORY_LIVE_CAP = 200
 
 const RegisterParams = z.object({
   name: requiredString('Missing --name'),

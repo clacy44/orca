@@ -46,3 +46,29 @@ export function hostResumeOnRowDeleted(
     ? undefined
     : () => db.restoreCurrentSessionForPane(hostId, predecessorPaneKey)
 }
+
+export type HostResumeHolderRefusal = 'restore_holder_moved' | 'restore_holder_current_generation'
+
+/** [S10-21d b3b, D-R163 H1 fix] Re-reads predecessor-pane holding + generation freshly INSIDE
+ * the pane lock, right before the write — a launcher restore (evidence 'host_restore') evaluated
+ * DEC-3 well before this lock, so a holder relaunch in between would otherwise let the
+ * unconditional supersede delete a LIVE pane's binding. Scoped to 'host_restore': the sweep's own
+ * restore never sets `predecessorPaneKey` to anything this re-check would catch differently. */
+export function checkHostResumeHolderUnmoved(
+  db: OrchestrationDb,
+  hostId: string,
+  launchGeneration: string,
+  sessionId: string,
+  admission: HostResumeAdmission
+): HostResumeHolderRefusal | null {
+  if (admission.evidence !== 'host_restore' || admission.predecessorPaneKey === null) {
+    return null
+  }
+  if (db.paneHoldingSession(hostId, sessionId) !== admission.predecessorPaneKey) {
+    return 'restore_holder_moved'
+  }
+  const holderRow = db.newestLaunchForPane(hostId, admission.predecessorPaneKey)
+  return holderRow?.launch_generation === launchGeneration
+    ? 'restore_holder_current_generation'
+    : null
+}

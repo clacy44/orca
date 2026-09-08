@@ -829,12 +829,24 @@ export class AgentHookServer {
     return this.buildStatusChangeNotification().providerSessions
   }
 
-  /** [S10-21d b3, DEC-3 conjunct D GEN_ABSENCE] Read-only: true iff any pane's last-known hook
-   * report names `sessionId` as its provider session — the live-report half of the GEN_ABSENCE
-   * signal (dead-holder-adoption.ts), never wire-reachable. */
-  hasLiveReportOfSession(sessionId: string): boolean {
-    for (const entry of this.state.lastStatusByPaneKey.values()) {
+  /** [S10-21d b3, DEC-3 conjunct D GEN_ABSENCE; S10-21d b3b, D-R163 M1 fix] Read-only: true iff
+   * some OTHER pane's last-known hook report names `sessionId` as its provider session — the
+   * live-report half of the GEN_ABSENCE signal (dead-holder-adoption.ts), never wire-reachable.
+   * `excludePaneKey` skips the holder's own pane: `lastStatusByPaneKey` persists/rehydrates for 7
+   * days (including across a restart), so the dying holder's OWN stale row naming X would
+   * otherwise make X permanently unreachable for GEN_ABSENCE (OD-21d-1). `restoredUnconfirmed`/
+   * `retainedForLiveness` entries are never live evidence either — the first is a
+   * not-yet-reconfirmed rehydration stamp, the second a user-hidden identity kept only for
+   * destructive liveness checks. */
+  hasLiveReportOfSession(sessionId: string, opts?: { excludePaneKey?: string }): boolean {
+    for (const [paneKey, entry] of this.state.lastStatusByPaneKey.entries()) {
+      if (opts?.excludePaneKey !== undefined && paneKey === opts.excludePaneKey) {
+        continue
+      }
       const enriched = entry as EnrichedAgentHookEventPayload
+      if (enriched.restoredUnconfirmed || enriched.retainedForLiveness) {
+        continue
+      }
       if (enriched.providerSession?.id === sessionId) {
         return true
       }

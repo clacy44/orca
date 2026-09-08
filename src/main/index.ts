@@ -2837,8 +2837,8 @@ void app.whenReady().then(async () => {
   )
   // [S10-21d b3, DEC-3 conjunct D GEN_ABSENCE] Forward wiring — the launcher's dead-holder
   // predicate consults the hook server's live provider-session set before adopting.
-  runtimeService.setHasLiveHookReportOfSessionCheck((sessionId) =>
-    agentHookServer.hasLiveReportOfSession(sessionId)
+  runtimeService.setHasLiveHookReportOfSessionCheck((sessionId, opts) =>
+    agentHookServer.hasLiveReportOfSession(sessionId, opts)
   )
   // Why here and not beside the other rate-limit resolvers: the pane→lane join needs the runtime,
   // which is constructed after them. A post arriving before this lands falls back to the

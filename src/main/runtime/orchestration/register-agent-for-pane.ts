@@ -5,19 +5,13 @@
 // identity/pane-attestation round-trip (there is none to attest: the pane was just admitted by
 // this same process). The RPC method keeps its own auth check
 // (`verifyOrchestrationCompatibilityCaller`) and both rate limits, then calls this.
-import type { AgentRow } from '../../orchestration/types'
-import type { OrchestrationDb } from '../../orchestration/db'
-import type { OrcaRuntimeService } from '../../orca-runtime'
-import {
-  sanitizeRole,
-  sanitizeTitle,
-  validateDisplayNameCandidate
-} from '../../orchestration/agent-name-sanitizer'
-import { deriveAgentLabelSlug } from '../../orchestration/agent-derivation'
-import { findLiveTerminalByHandle } from './agent-directory-rpc-liveness'
-import { hostIdFor } from './agent-directory-rpc-view'
-
-const DIRECTORY_LIVE_CAP = 200
+import type { AgentRow } from './types'
+import type { OrchestrationDb } from './db'
+import type { OrcaRuntimeService } from '../orca-runtime'
+import { sanitizeRole, sanitizeTitle, validateDisplayNameCandidate } from './agent-name-sanitizer'
+import { deriveAgentLabelSlug } from './agent-derivation'
+import { findLiveTerminalByHandle } from '../rpc/methods/agent-directory-rpc-liveness'
+import { DIRECTORY_LIVE_CAP, hostIdFor } from '../rpc/methods/agent-directory-rpc-view'
 
 export type RegisterAgentForPaneParams = {
   paneKey: string

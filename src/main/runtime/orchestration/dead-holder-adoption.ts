@@ -79,7 +79,13 @@ export function resolveHolderAdoption(input: HolderAdoptionInput): HolderAdoptio
     return { adoptable: false, reason: 'current_generation' }
   }
   // (D) resolveIncumbentDeath = dead with signal IDENTITY or D1, or GEN_ABSENCE (D2 absence over
-  // a non-null round AND no connected pty AND no live hook report elsewhere) — D3 never suffices.
+  // a non-null round AND no connected pty) — D3 never suffices. [S10-21d b3b, D-R163 M2 fix] The
+  // live-report conjunct gates ALL three signals, not only GEN_ABSENCE: a second live process
+  // reporting X elsewhere contests IDENTITY/D1 exactly as it contests GEN_ABSENCE (DEC-1's
+  // contested-state case) — checked FIRST so neither branch below needs its own copy.
+  if (input.liveHookReportOfSessionElsewhere) {
+    return { adoptable: false, reason: 'death_signal_insufficient' }
+  }
   let signal: 'IDENTITY' | 'D1' | 'GEN_ABSENCE' | null = null
   if (
     input.incumbent.dead &&
@@ -89,8 +95,7 @@ export function resolveHolderAdoption(input: HolderAdoptionInput): HolderAdoptio
   } else if (
     input.inventoryRoundNonNull &&
     input.d2Inventory === 'absent' &&
-    !input.holderHasConnectedPty &&
-    !input.liveHookReportOfSessionElsewhere
+    !input.holderHasConnectedPty
   ) {
     signal = 'GEN_ABSENCE'
   }

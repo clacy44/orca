@@ -3,9 +3,9 @@
 // authority round-trip) the way `requestChairRestore` calls it.
 import { describe, expect, it, vi } from 'vitest'
 import { registerAgentForPane } from './register-agent-for-pane'
-import { OrchestrationDb } from '../../orchestration/db'
-import { OrcaRuntimeService } from '../../orca-runtime'
-import type { RuntimeTerminalSummary } from '../../../../shared/runtime-types'
+import { OrchestrationDb } from './db'
+import { OrcaRuntimeService } from '../orca-runtime'
+import type { RuntimeTerminalSummary } from '../../../shared/runtime-types'
 
 const PANE_A = 'tabA:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const PANE_B = 'tabB:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'

@@ -37,7 +37,10 @@ const IPC_ALLOWED_FILES = new Set(
   [
     'agent-launch-admission.ts',
     'agent-launch-admission.test.ts',
-    'agent-launch-admission-host-resume-literal-fence.test.ts'
+    'agent-launch-admission-host-resume-literal-fence.test.ts',
+    // [S10-21d b3b, D-R163] split out of agent-launch-admission.test.ts (max-lines) — same
+    // in-process descriptor literal, same exemption.
+    'agent-launch-admission-host-resume-race.test.ts'
   ].map((f) => join(IPC_ROOT, f))
 )
 

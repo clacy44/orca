@@ -102,6 +102,26 @@ describe('S10-21d b3: resolveHolderAdoption', () => {
     expect(result).toEqual({ adoptable: false, reason: 'death_signal_insufficient' })
   })
 
+  it('D-R163 M2: IDENTITY with a live hook report of X elsewhere -> refused death_signal_insufficient (not just GEN_ABSENCE)', () => {
+    const result = resolveHolderAdoption(
+      baseInput({
+        incumbent: { dead: true, signal: 'IDENTITY', evidence: {} as never },
+        liveHookReportOfSessionElsewhere: true
+      })
+    )
+    expect(result).toEqual({ adoptable: false, reason: 'death_signal_insufficient' })
+  })
+
+  it('D-R163 M2: D1 with a live hook report of X elsewhere -> refused death_signal_insufficient (not just GEN_ABSENCE)', () => {
+    const result = resolveHolderAdoption(
+      baseInput({
+        incumbent: { dead: true, signal: 'D1', evidence: {} as never },
+        liveHookReportOfSessionElsewhere: true
+      })
+    )
+    expect(result).toEqual({ adoptable: false, reason: 'death_signal_insufficient' })
+  })
+
   it('GEN_ABSENCE with a live hook report of X elsewhere -> refused death_signal_insufficient', () => {
     const result = resolveHolderAdoption(
       baseInput({

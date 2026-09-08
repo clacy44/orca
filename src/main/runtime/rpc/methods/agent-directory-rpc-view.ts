@@ -5,6 +5,10 @@ import type { OrcaRuntimeService } from '../../orca-runtime'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import type { AgentRow } from '../../orchestration/types'
 
+// [S10-21d b3b, D-R163 LOW] The one shared cap — was defined separately (and identically) in
+// orchestration-agents-register.ts, register-agent-for-pane.ts, and orchestration-agents-find.ts.
+export const DIRECTORY_LIVE_CAP = 200
+
 export function hostIdFor(runtime: OrcaRuntimeService): string {
   return runtime.getOrchestrationCompatibilityHostId() ?? 'local'
 }

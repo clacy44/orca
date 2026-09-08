@@ -260,6 +260,7 @@ import {
 import type { ThreadSinceCursor } from './thread-replay-since-filter'
 import {
   getAgentByPaneKey as getAgentByPaneKeyImpl,
+  listAgentsByPaneKeySuffix as listAgentsByPaneKeySuffixImpl,
   upsertDerivedAgentForPane as upsertDerivedAgentForPaneImpl,
   pruneStaleDerivedAgents as pruneStaleDerivedAgentsImpl,
   type UpsertDerivedAgentForPaneParams
@@ -5763,6 +5764,10 @@ export class OrchestrationDb {
 
   getAgentByPaneKey(hostId: string, paneKey: string): AgentRow | undefined {
     return getAgentByPaneKeyImpl(this.db, hostId, paneKey)
+  }
+
+  listAgentsByPaneKeySuffix(hostId: string, paneKey: string): AgentRow[] {
+    return listAgentsByPaneKeySuffixImpl(this.db, hostId, paneKey)
   }
 
   upsertDerivedAgentForPane(params: UpsertDerivedAgentForPaneParams): AgentRow | undefined {
