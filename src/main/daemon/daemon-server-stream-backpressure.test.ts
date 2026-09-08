@@ -1,10 +1,15 @@
-// R117 FIX 3: the daemon pauses a session's producer once its own client stream socket is deep
-// (reusing SHALLOW_SOCKET_WRITE_GATE_BYTES), re-asserting under the session-side 5s failsafe
-// (session.ts PRODUCER_PAUSE_FAILSAFE_MS) while it stays deep, and resumes once shallow.
+// R117 FIX 3 (D-R164 H1): the daemon pauses a session's producer once its own client stream
+// socket is deep, with hysteresis (PRODUCER_PAUSE_HIGH/LOW_WATERMARK_BYTES — distinct from the
+// batcher's own SHALLOW_SOCKET_WRITE_GATE_BYTES hold-gate), re-asserting under the session-side
+// 5s failsafe (session.ts PRODUCER_PAUSE_FAILSAFE_MS) while it stays deep, and resumes once LOW —
+// either on a later write, the reassert timer, or the socket's own 'drain' event.
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Socket } from 'node:net'
 import { DaemonServer } from './daemon-server'
-import { SHALLOW_SOCKET_WRITE_GATE_BYTES } from './daemon-stream-data-batcher'
+import {
+  PRODUCER_PAUSE_HIGH_WATERMARK_BYTES,
+  PRODUCER_PAUSE_LOW_WATERMARK_BYTES
+} from './daemon-stream-data-batcher'
 
 type FakeHost = {
   pauseProducer: ReturnType<typeof vi.fn>
@@ -15,6 +20,7 @@ type DaemonServerBackpressurePrivate = {
   clients: Map<string, { clientId: string; streamSocket: Socket | null }>
   host: FakeHost
   handleAfterStreamSocketWrite(clientId: string, sessionId: string): void
+  resumeProducersPausedByClientDrain(clientId: string): void
   stopHeapObservabilitySampler: () => void
   producerPauseReassertTimers: Map<string, unknown>
   clearProducerPauseReassert(sessionId: string): void
@@ -41,7 +47,7 @@ function createServerUnderTest(): {
   return { server, fakeHost, streamSocket }
 }
 
-describe('DaemonServer stream-socket backpressure (R117 FIX 3)', () => {
+describe('DaemonServer stream-socket backpressure (R117 FIX 3, D-R164 H1)', () => {
   let cleanup: (() => void) | null = null
 
   afterEach(() => {
@@ -49,34 +55,61 @@ describe('DaemonServer stream-socket backpressure (R117 FIX 3)', () => {
     cleanup = null
   })
 
-  it('pauses the producer once the client socket reaches the shallow-gate depth', () => {
+  it('pauses the producer once the client socket reaches the HIGH watermark', () => {
     const { server, fakeHost, streamSocket } = createServerUnderTest()
     cleanup = () => {
       server.stopHeapObservabilitySampler()
       server.clearProducerPauseReassert('session-1')
     }
 
-    streamSocket.writableLength = SHALLOW_SOCKET_WRITE_GATE_BYTES
+    streamSocket.writableLength = PRODUCER_PAUSE_HIGH_WATERMARK_BYTES
     server.handleAfterStreamSocketWrite('client-1', 'session-1')
 
-    expect(fakeHost.pauseProducer).toHaveBeenCalledWith('session-1')
+    expect(fakeHost.pauseProducer).toHaveBeenCalledWith('session-1', 'socket-depth')
     expect(fakeHost.resumeProducer).not.toHaveBeenCalled()
   })
 
-  it('resumes the producer once the socket goes shallow again', () => {
+  it('resumes the producer once the socket drains below LOW', () => {
     const { server, fakeHost, streamSocket } = createServerUnderTest()
     cleanup = () => {
       server.stopHeapObservabilitySampler()
       server.clearProducerPauseReassert('session-1')
     }
 
-    streamSocket.writableLength = SHALLOW_SOCKET_WRITE_GATE_BYTES
+    streamSocket.writableLength = PRODUCER_PAUSE_HIGH_WATERMARK_BYTES
     server.handleAfterStreamSocketWrite('client-1', 'session-1')
     expect(fakeHost.pauseProducer).toHaveBeenCalledTimes(1)
 
     streamSocket.writableLength = 0
     server.handleAfterStreamSocketWrite('client-1', 'session-1')
-    expect(fakeHost.resumeProducer).toHaveBeenCalledWith('session-1')
+    expect(fakeHost.resumeProducer).toHaveBeenCalledWith('session-1', 'socket-depth')
+  })
+
+  it('hysteresis: does not pause/resume per slice while the socket sits between LOW and HIGH', () => {
+    const { server, fakeHost, streamSocket } = createServerUnderTest()
+    cleanup = () => {
+      server.stopHeapObservabilitySampler()
+      server.clearProducerPauseReassert('session-1')
+    }
+
+    // Never crossed HIGH: no pause fired at all.
+    streamSocket.writableLength = PRODUCER_PAUSE_LOW_WATERMARK_BYTES + 1
+    server.handleAfterStreamSocketWrite('client-1', 'session-1')
+    expect(fakeHost.pauseProducer).not.toHaveBeenCalled()
+
+    streamSocket.writableLength = PRODUCER_PAUSE_HIGH_WATERMARK_BYTES
+    server.handleAfterStreamSocketWrite('client-1', 'session-1')
+    expect(fakeHost.pauseProducer).toHaveBeenCalledTimes(1)
+
+    // Drains partway (still above LOW) around the gate a few slices in a row: must not flap.
+    for (let i = 0; i < 5; i++) {
+      streamSocket.writableLength = PRODUCER_PAUSE_LOW_WATERMARK_BYTES + 1
+      server.handleAfterStreamSocketWrite('client-1', 'session-1')
+      streamSocket.writableLength = PRODUCER_PAUSE_HIGH_WATERMARK_BYTES - 1
+      server.handleAfterStreamSocketWrite('client-1', 'session-1')
+    }
+    expect(fakeHost.pauseProducer).toHaveBeenCalledTimes(1)
+    expect(fakeHost.resumeProducer).not.toHaveBeenCalled()
   })
 
   it('re-asserts the pause on a timer under the 5s session-side failsafe while the socket stays deep', () => {
@@ -88,7 +121,7 @@ describe('DaemonServer stream-socket backpressure (R117 FIX 3)', () => {
         server.clearProducerPauseReassert('session-1')
       }
 
-      streamSocket.writableLength = SHALLOW_SOCKET_WRITE_GATE_BYTES
+      streamSocket.writableLength = PRODUCER_PAUSE_HIGH_WATERMARK_BYTES
       server.handleAfterStreamSocketWrite('client-1', 'session-1')
       expect(fakeHost.pauseProducer).toHaveBeenCalledTimes(1)
 
@@ -101,7 +134,7 @@ describe('DaemonServer stream-socket backpressure (R117 FIX 3)', () => {
     }
   })
 
-  it('stops reasserting and resumes once the reassert timer observes a shallow socket', () => {
+  it('stops reasserting and resumes once the reassert timer observes a socket below LOW', () => {
     vi.useFakeTimers()
     try {
       const { server, fakeHost, streamSocket } = createServerUnderTest()
@@ -110,17 +143,63 @@ describe('DaemonServer stream-socket backpressure (R117 FIX 3)', () => {
         server.clearProducerPauseReassert('session-1')
       }
 
-      streamSocket.writableLength = SHALLOW_SOCKET_WRITE_GATE_BYTES
+      streamSocket.writableLength = PRODUCER_PAUSE_HIGH_WATERMARK_BYTES
       server.handleAfterStreamSocketWrite('client-1', 'session-1')
       expect(server.producerPauseReassertTimers.has('session-1')).toBe(true)
 
       streamSocket.writableLength = 0
       vi.advanceTimersByTime(4_000)
 
-      expect(fakeHost.resumeProducer).toHaveBeenCalledWith('session-1')
+      expect(fakeHost.resumeProducer).toHaveBeenCalledWith('session-1', 'socket-depth')
       expect(server.producerPauseReassertTimers.has('session-1')).toBe(false)
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('D-R164 L2: resumes (not just stops reasserting) once the reassert timer observes the client gone', () => {
+    vi.useFakeTimers()
+    try {
+      const { server, fakeHost, streamSocket } = createServerUnderTest()
+      cleanup = () => {
+        server.stopHeapObservabilitySampler()
+        server.clearProducerPauseReassert('session-1')
+      }
+
+      streamSocket.writableLength = PRODUCER_PAUSE_HIGH_WATERMARK_BYTES
+      server.handleAfterStreamSocketWrite('client-1', 'session-1')
+      expect(server.producerPauseReassertTimers.has('session-1')).toBe(true)
+
+      // The vanished client can never drain — a disconnect must resume, not leave the producer
+      // paused until the session-side 5s failsafe.
+      streamSocket.destroyed = true
+      vi.advanceTimersByTime(4_000)
+
+      expect(fakeHost.resumeProducer).toHaveBeenCalledWith('session-1', 'socket-depth')
+      expect(server.producerPauseReassertTimers.has('session-1')).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('resumes on the socket drain event within one tick, without waiting for the 4s reassert', () => {
+    const { server, fakeHost, streamSocket } = createServerUnderTest()
+    cleanup = () => {
+      server.stopHeapObservabilitySampler()
+      server.clearProducerPauseReassert('session-1')
+    }
+
+    // The pause-crossing write is the last entry of the batcher's pass: nothing else calls
+    // handleAfterStreamSocketWrite again, so only the socket's own 'drain' can resume it.
+    streamSocket.writableLength = PRODUCER_PAUSE_HIGH_WATERMARK_BYTES
+    server.handleAfterStreamSocketWrite('client-1', 'session-1')
+    expect(fakeHost.pauseProducer).toHaveBeenCalledTimes(1)
+    expect(fakeHost.resumeProducer).not.toHaveBeenCalled()
+
+    streamSocket.writableLength = 0
+    server.resumeProducersPausedByClientDrain('client-1')
+
+    expect(fakeHost.resumeProducer).toHaveBeenCalledWith('session-1', 'socket-depth')
+    expect(server.producerPauseReassertTimers.has('session-1')).toBe(false)
   })
 })

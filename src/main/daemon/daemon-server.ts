@@ -8,7 +8,8 @@ import { encodeNdjson, createNdjsonParser } from './ndjson'
 import { TerminalHost } from './terminal-host'
 import {
   DaemonStreamDataBatcher,
-  SHALLOW_SOCKET_WRITE_GATE_BYTES
+  PRODUCER_PAUSE_HIGH_WATERMARK_BYTES,
+  PRODUCER_PAUSE_LOW_WATERMARK_BYTES
 } from './daemon-stream-data-batcher'
 import { startDaemonHeapObservabilitySampler } from './daemon-heap-observability-sampler'
 import {
@@ -114,6 +115,10 @@ type PendingShutdownReply = {
 // R117 FIX 3: below session.ts PRODUCER_PAUSE_FAILSAFE_MS (5s) so a deep-socket producer pause is
 // always re-asserted before the session's own failsafe self-resumes it.
 const PRODUCER_PAUSE_REASSERT_MS = 4_000
+// D-R164 H2: this daemon-side pacer's own reason key into Session's reason-keyed pause Set —
+// distinct from the RPC pausePty/resumePty path's 'main', so one controller's resume can never
+// release the other's pause.
+const SOCKET_DEPTH_PAUSE_REASON = 'socket-depth'
 
 export class DaemonServer {
   // Why: survive long enough to adopt a first client pair, but don't orphan forever if the parent crashes first.
@@ -200,9 +205,13 @@ export class DaemonServer {
   private historySeedTransfers = new TerminalHistorySeedTransferRegistry()
   private stopStreamBacklogProbe: () => void = () => {}
   private stopHeapObservabilitySampler: () => void = () => {}
-  // R117 FIX 3: sessionId -> reassert interval while that session's producer is paused off its own
-  // client socket's depth; re-fires below the session-side PRODUCER_PAUSE_FAILSAFE_MS (5s) self-resume.
-  private producerPauseReassertTimers = new Map<string, ReturnType<typeof setInterval>>()
+  // R117 FIX 3: sessionId -> {clientId, reassert interval} while that session's producer is paused
+  // off its own client socket's depth; re-fires below the session-side PRODUCER_PAUSE_FAILSAFE_MS
+  // (5s) self-resume. clientId lets a 'drain' on that client resume every session it paused (H1).
+  private producerPauseReassertTimers = new Map<
+    string,
+    { clientId: string; timer: ReturnType<typeof setInterval> }
+  >()
 
   // Why: bypass batching within this window so keystroke echo/redraws skip the daemon's fixed batch delay.
   private static readonly INTERACTIVE_OUTPUT_WINDOW_MS = 100
@@ -280,20 +289,44 @@ export class DaemonServer {
     )
   }
 
-  // R117 FIX 3: pause this session's producer while its client socket is deep (reuses the
-  // batcher's own SHALLOW_SOCKET_WRITE_GATE_BYTES gate); reassert below the daemon's 5s
-  // self-resume failsafe (session.ts PRODUCER_PAUSE_FAILSAFE_MS) until the socket drains.
+  // R117 FIX 3 (D-R164 H1): pause this session's producer while its client socket is deep, with
+  // hysteresis (PRODUCER_PAUSE_HIGH/LOW_WATERMARK_BYTES, distinct from the batcher's own
+  // SHALLOW_SOCKET_WRITE_GATE_BYTES hold-gate) so a draining queue cannot flap pause/resume once
+  // per flush slice; reassert below the daemon's 5s self-resume failsafe (session.ts
+  // PRODUCER_PAUSE_FAILSAFE_MS) until the socket drains BELOW LOW. The 'drain' handler below also
+  // resumes directly — this per-write path alone misses the case where the pause-crossing write is
+  // the pass's last entry (no later write to observe the drop).
   private handleAfterStreamSocketWrite(clientId: string, sessionId: string): void {
     const client = this.clients.get(clientId)
     const socketBufferedBytes = client?.streamSocket?.writableLength ?? 0
-    if (socketBufferedBytes >= SHALLOW_SOCKET_WRITE_GATE_BYTES) {
-      this.host.pauseProducer(sessionId)
+    const alreadyPaused = this.producerPauseReassertTimers.has(sessionId)
+    if (!alreadyPaused && socketBufferedBytes >= PRODUCER_PAUSE_HIGH_WATERMARK_BYTES) {
+      this.host.pauseProducer(sessionId, SOCKET_DEPTH_PAUSE_REASON)
       this.armProducerPauseReassert(clientId, sessionId)
       return
     }
-    if (this.producerPauseReassertTimers.has(sessionId)) {
+    if (alreadyPaused && socketBufferedBytes <= PRODUCER_PAUSE_LOW_WATERMARK_BYTES) {
       this.clearProducerPauseReassert(sessionId)
-      this.host.resumeProducer(sessionId)
+      this.host.resumeProducer(sessionId, SOCKET_DEPTH_PAUSE_REASON)
+    }
+  }
+
+  /** 'drain' wake-up (H1): resume every session this client's socket depth paused, once the
+   *  socket itself — not just the next write — reports below LOW. Covers the last-entry-of-pass
+   *  case handleAfterStreamSocketWrite cannot: after that write the batch is empty, so no later
+   *  onAfterSocketWrite call ever re-checks this session. */
+  private resumeProducersPausedByClientDrain(clientId: string): void {
+    const client = this.clients.get(clientId)
+    const socketBufferedBytes = client?.streamSocket?.writableLength ?? 0
+    if (socketBufferedBytes > PRODUCER_PAUSE_LOW_WATERMARK_BYTES) {
+      return
+    }
+    for (const [sessionId, entry] of Array.from(this.producerPauseReassertTimers)) {
+      if (entry.clientId !== clientId) {
+        continue
+      }
+      this.clearProducerPauseReassert(sessionId)
+      this.host.resumeProducer(sessionId, SOCKET_DEPTH_PAUSE_REASON)
     }
   }
 
@@ -305,24 +338,28 @@ export class DaemonServer {
       const client = this.clients.get(clientId)
       const socketBufferedBytes = client?.streamSocket?.writableLength ?? 0
       if (!client?.streamSocket || client.streamSocket.destroyed) {
+        // D-R164 L2: the vanished client can never drain, so leaving the producer paused would
+        // wedge it until the session-side 5s failsafe — resume immediately instead of just
+        // stopping the reassert.
         this.clearProducerPauseReassert(sessionId)
+        this.host.resumeProducer(sessionId, SOCKET_DEPTH_PAUSE_REASON)
         return
       }
-      if (socketBufferedBytes < SHALLOW_SOCKET_WRITE_GATE_BYTES) {
+      if (socketBufferedBytes <= PRODUCER_PAUSE_LOW_WATERMARK_BYTES) {
         this.clearProducerPauseReassert(sessionId)
-        this.host.resumeProducer(sessionId)
+        this.host.resumeProducer(sessionId, SOCKET_DEPTH_PAUSE_REASON)
         return
       }
-      this.host.pauseProducer(sessionId)
+      this.host.pauseProducer(sessionId, SOCKET_DEPTH_PAUSE_REASON)
     }, PRODUCER_PAUSE_REASSERT_MS)
     timer.unref?.()
-    this.producerPauseReassertTimers.set(sessionId, timer)
+    this.producerPauseReassertTimers.set(sessionId, { clientId, timer })
   }
 
   private clearProducerPauseReassert(sessionId: string): void {
-    const timer = this.producerPauseReassertTimers.get(sessionId)
-    if (timer) {
-      clearInterval(timer)
+    const entry = this.producerPauseReassertTimers.get(sessionId)
+    if (entry) {
+      clearInterval(entry.timer)
       this.producerPauseReassertTimers.delete(sessionId)
     }
   }
@@ -890,6 +927,9 @@ export class DaemonServer {
     // Why: 'drain' is the wake-up for the batcher's shallow-gate held bulk.
     socket.on('drain', () => {
       this.streamDataBatcher.flush(client.clientId)
+      // D-R164 H1: flush() alone misses a session paused by its own last-entry-of-pass write
+      // (batch already empty, no onAfterSocketWrite left to fire) — resume it here instead.
+      this.resumeProducersPausedByClientDrain(client.clientId)
     })
 
     const cleanup = (): void => {
@@ -1274,11 +1314,11 @@ export class DaemonServer {
         return {}
 
       case 'pausePty':
-        this.host.pauseProducer(request.payload.sessionId)
+        this.host.pauseProducer(request.payload.sessionId, 'main')
         return {}
 
       case 'resumePty':
-        this.host.resumeProducer(request.payload.sessionId)
+        this.host.resumeProducer(request.payload.sessionId, 'main')
         return {}
 
       case 'setSessionBackground': {

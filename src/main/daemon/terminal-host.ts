@@ -89,17 +89,19 @@ export class TerminalHost {
     this.getAliveSession(sessionId).resize(cols, rows)
   }
 
-  // Why null-not-throw (unlike write/resize): pause/resume are best-effort hints against a session that may have exited.
-  pauseProducer(sessionId: string): void {
+  // Why null-not-throw (unlike write/resize): pause/resume are best-effort hints against a session
+  // that may have exited. D-R164 H2: reason threads through to Session's Set<string> — 'main' for
+  // the RPC pausePty/resumePty path, 'socket-depth' for the daemon's own socket pacer.
+  pauseProducer(sessionId: string, reason: string): void {
     const session = this.sessions.get(sessionId)
     if (!session || !session.isAlive) {
       return
     }
-    session.pauseProducer()
+    session.pauseProducer(reason)
   }
 
-  resumeProducer(sessionId: string): void {
-    this.sessions.get(sessionId)?.resumeProducer()
+  resumeProducer(sessionId: string, reason: string): void {
+    this.sessions.get(sessionId)?.resumeProducer(reason)
   }
 
   kill(sessionId: string, opts: { immediate?: boolean } = {}): Promise<void> {

@@ -18,9 +18,22 @@ import {
 } from './daemon-stream-keep-tail-drop'
 
 export const SOCKET_WRITE_CEILING_BYTES = 64 * 1024 * 1024
-// Same size as the background session's minimum keep-tail (daemon-stream-keep-tail-drop.ts
-// BACKGROUND_SESSION_MIN_KEEP_TAIL_CHARS) — comfortably covers a full TUI repaint.
-export const SOCKET_WRITE_CEILING_KEEP_TAIL_CHARS = 64 * 1024
+// D-R164 L3: a full TUI repaint is ~cols×rows×SGR ≈ 100KB (daemon-stream-keep-tail-drop.ts:45-50);
+// the background session's own 64KB MIN_KEEP_TAIL_CHARS is that comment's own squeezed floor
+// (only reached once many sessions are backgrounded), not a repaint-covering size on its own.
+export const SOCKET_WRITE_CEILING_KEEP_TAIL_CHARS = 128 * 1024
+
+// D-R164 L1: control entries bypassed the ceiling entirely; hold the rest too — except 'exit'
+// (nothing else will ever deliver it once the session is gone) and 'dataGap' (the ceiling's own
+// loud-degradation signal — coalesced to one entry per session, so it's already bounded, and must
+// reach the client promptly, not wait behind the very flood it's reporting).
+export function shouldHoldControlEntryOverCeiling(
+  eventName: string,
+  writableLength: number,
+  ceilingBytes: number
+): boolean {
+  return eventName !== 'exit' && eventName !== 'dataGap' && writableLength > ceilingBytes
+}
 
 export type SocketWriteCeilingHold = (
   batch: PendingStreamDataBatch,

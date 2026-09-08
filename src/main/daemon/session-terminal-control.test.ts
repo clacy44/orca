@@ -175,7 +175,7 @@ describe('Session terminal control', () => {
   describe('producer flow control', () => {
     it('auto-resumes when the owner loses the resume signal', () => {
       createSession()
-      session.pauseProducer()
+      session.pauseProducer('main')
       expect(subprocess.pauseCalls).toBe(1)
       vi.advanceTimersByTime(PRODUCER_PAUSE_FAILSAFE_MS - 1)
       expect(subprocess.resumeCalls).toBe(0)
@@ -185,8 +185,8 @@ describe('Session terminal control', () => {
 
     it('resumeProducer resumes once and cancels the failsafe', () => {
       createSession()
-      session.pauseProducer()
-      session.resumeProducer()
+      session.pauseProducer('main')
+      session.resumeProducer('main')
       expect(subprocess.resumeCalls).toBe(1)
       vi.advanceTimersByTime(PRODUCER_PAUSE_FAILSAFE_MS * 2)
       expect(subprocess.resumeCalls).toBe(1)
@@ -194,15 +194,40 @@ describe('Session terminal control', () => {
 
     it('ignores resumeProducer without a matching pause', () => {
       createSession()
-      session.resumeProducer()
+      session.resumeProducer('main')
       expect(subprocess.resumeCalls).toBe(0)
+    })
+
+    it('D-R164 H2: a second reason keeps the pause after the first reason resumes', () => {
+      createSession()
+      session.pauseProducer('main')
+      session.pauseProducer('socket-depth')
+      session.resumeProducer('socket-depth')
+      expect(subprocess.resumeCalls).toBe(0)
+      session.resumeProducer('main')
+      expect(subprocess.resumeCalls).toBe(1)
+    })
+
+    it('D-R164 H2: the daemon socket-pacer resume never releases the RPC pause it did not set', () => {
+      createSession()
+      session.pauseProducer('main')
+      session.resumeProducer('socket-depth')
+      expect(subprocess.resumeCalls).toBe(0)
+    })
+
+    it('D-R164 H2: the failsafe still releases every reason at once', () => {
+      createSession()
+      session.pauseProducer('main')
+      session.pauseProducer('socket-depth')
+      vi.advanceTimersByTime(PRODUCER_PAUSE_FAILSAFE_MS)
+      expect(subprocess.resumeCalls).toBe(1)
     })
 
     it('re-pausing re-arms the failsafe window', () => {
       createSession()
-      session.pauseProducer()
+      session.pauseProducer('main')
       vi.advanceTimersByTime(PRODUCER_PAUSE_FAILSAFE_MS - 1_000)
-      session.pauseProducer()
+      session.pauseProducer('main')
       vi.advanceTimersByTime(PRODUCER_PAUSE_FAILSAFE_MS - 1)
       expect(subprocess.resumeCalls).toBe(0)
       vi.advanceTimersByTime(1)
@@ -211,7 +236,7 @@ describe('Session terminal control', () => {
 
     it('resumes a paused producer before kill signals the child', () => {
       createSession()
-      session.pauseProducer()
+      session.pauseProducer('main')
       session.kill()
       expect(subprocess.resumeCalls).toBe(1)
       expect(subprocess.killed).toBe(true)
@@ -219,7 +244,7 @@ describe('Session terminal control', () => {
 
     it('dispose resumes a paused producer and clears the failsafe', () => {
       createSession()
-      session.pauseProducer()
+      session.pauseProducer('main')
       session.dispose()
       expect(subprocess.resumeCalls).toBe(1)
       expect(vi.getTimerCount()).toBe(0)
@@ -227,7 +252,7 @@ describe('Session terminal control', () => {
 
     it('subprocess exit clears the failsafe without resuming a reaped child', () => {
       createSession()
-      session.pauseProducer()
+      session.pauseProducer('main')
       subprocess.simulateExit(0)
       vi.advanceTimersByTime(PRODUCER_PAUSE_FAILSAFE_MS * 2)
       expect(subprocess.resumeCalls).toBe(0)
@@ -236,7 +261,7 @@ describe('Session terminal control', () => {
     it('ignores pauseProducer on an exited session', () => {
       createSession()
       subprocess.simulateExit(0)
-      session.pauseProducer()
+      session.pauseProducer('main')
       expect(subprocess.pauseCalls).toBe(0)
       expect(vi.getTimerCount()).toBe(0)
     })
@@ -244,7 +269,7 @@ describe('Session terminal control', () => {
     it('detaching the last client resumes a paused producer', () => {
       createSession()
       const token = session.attachClient({ onData: () => {}, onExit: () => {} })
-      session.pauseProducer()
+      session.pauseProducer('main')
       session.detachClient(token)
       expect(subprocess.resumeCalls).toBe(1)
     })
@@ -253,7 +278,7 @@ describe('Session terminal control', () => {
       createSession()
       const token = session.attachClient({ onData: () => {}, onExit: () => {} })
       session.attachClient({ onData: () => {}, onExit: () => {} })
-      session.pauseProducer()
+      session.pauseProducer('main')
       session.detachClient(token)
       expect(subprocess.resumeCalls).toBe(0)
     })
@@ -261,7 +286,7 @@ describe('Session terminal control', () => {
     it('detachAllClients resumes a paused producer', () => {
       createSession()
       session.attachClient({ onData: () => {}, onExit: () => {} })
-      session.pauseProducer()
+      session.pauseProducer('main')
       session.detachAllClients()
       expect(subprocess.resumeCalls).toBe(1)
     })
