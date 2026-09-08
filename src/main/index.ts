@@ -171,6 +171,11 @@ import {
   captureSelfResumeWatermarkSurvivingStoreFailure
 } from './startup/self-resume-watermark-capture'
 import { runStartupRestoreSweepBodyIfLockHeld } from './startup/restore-sweep-lock-release-guard'
+import {
+  createDesktopMaterializeHydrationGateState,
+  markRendererHydratedForMaterialize,
+  shouldDrainAtEndOfSweep
+} from './startup/desktop-materialize-hydration-gate'
 import { maybeRedirectAppImageCliLaunch } from './startup/appimage-cli-redirect'
 import { maybeRedirectPackagedCliEntryLaunch } from './startup/packaged-cli-entry-redirect'
 import { startFirstWindowStartupServices } from './startup/first-window-startup-services'
@@ -385,6 +390,8 @@ let codexSessionMigration: ReturnType<typeof createCodexSessionMigrationSchedule
 let claudeAccounts: ClaudeAccountService | null = null
 let claudeRuntimeAuth: ClaudeRuntimeAuthService | null = null
 let runtime: OrcaRuntimeService | null = null
+// [S10-21c B6c, D-R155-b6b finding 1] see desktop-materialize-hydration-gate.ts's own doc comment.
+const desktopMaterializeHydrationGate = createDesktopMaterializeHydrationGateState()
 let rateLimits: RateLimitService | null = null
 let runtimeRpc: OrcaRuntimeRpcServer | null = null
 const serveReadinessPublisher = new ServeReadinessPublisher()
@@ -890,8 +897,13 @@ ipcMain.handle('app:awaitFirstWindowStartupServices', async () => {
   await Promise.all([firstWindowStartupServicesReady, managedWslCliStartupBarrierReady])
 })
 
-ipcMain.handle('app:recoverLegacyWorkerTerminalsForRendererStartup', () =>
-  recoverLegacyWorkerTerminalsForRendererStartup({
+ipcMain.handle('app:recoverLegacyWorkerTerminalsForRendererStartup', () => {
+  // [S10-21c B6c, D-R155-b6b finding 1] The renderer only calls this handler strictly after
+  // `hydrateWorkspaceSession` (App.tsx :1027 -> :1133) — marking on invocation, not inside
+  // `reconcile` (which fires twice per IPC, see below), gates the end-of-sweep drain trigger
+  // (~:3483) so it never reveals into a pre-hydration renderer.
+  markRendererHydratedForMaterialize(desktopMaterializeHydrationGate)
+  return recoverLegacyWorkerTerminalsForRendererStartup({
     firstWindowStartupServicesReady,
     managedWslCliStartupBarrierReady,
     localPtyProviderStartupReady,
@@ -914,7 +926,7 @@ ipcMain.handle('app:recoverLegacyWorkerTerminalsForRendererStartup', () =>
       console.warn('[orchestration] legacy worker provider-ready recovery failed', error)
     }
   })
-)
+})
 
 // Why: the renderer pulls this once its ui:openSettings listener attaches, so a Settings request queued before mount isn't lost.
 ipcMain.handle('ui:consumePendingOpenSettings', (event) =>
@@ -3476,11 +3488,15 @@ void app.whenReady().then(async () => {
       await runStartupRestoreSweepBody(runtime)
       releaseRestoreSweepLock()
       desktopSweepLockReleased = true
-      // [S10-21c B6, design §2 S9; D-R153-b6 F8] Second drain trigger — the renderer-startup
-      // handler's own hydration wait has a 30s bound; a sweep resuming several panes is not
-      // obviously under that. No-op without a notifier installed yet, and free if the
-      // renderer-startup trigger already drained everything.
-      await runtime.materializeRestoredAgentPanes()
+      // [S10-21c B6, design §2 S9; D-R153-b6 F8; D-R155-b6b finding 1] Second drain trigger — the
+      // renderer-startup handler's own hydration wait has a 30s bound; a sweep resuming several
+      // panes is not obviously under that. Gated on `shouldDrainAtEndOfSweep`: draining here
+      // before the renderer has hydrated would reveal a tab hydration then discards wholesale.
+      // When not yet set, this is a genuine no-op — the renderer-startup handler (which cannot
+      // fire before hydration) drains when it arrives.
+      if (shouldDrainAtEndOfSweep(desktopMaterializeHydrationGate)) {
+        await runtime.materializeRestoredAgentPanes()
+      }
     }
     const runtimeRpcStartResult = await shellPathReady
       .then(() => desktopRuntimeRpc.start())

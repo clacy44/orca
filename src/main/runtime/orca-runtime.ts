@@ -35952,12 +35952,30 @@ export class OrcaRuntimeService {
     if (!this.notifier?.revealTerminalSession) {
       return
     }
+    // [D-R155-b6b finding 2] getOrchestrationDb() is a lazy constructor (opens sqlite, arms four
+    // subsystems) that can throw — never let that take the drain down with it: skip audits (db:
+    // null), still drain.
+    let db: OrchestrationDb | null
+    try {
+      db = this.getOrchestrationDb()
+    } catch (error) {
+      console.warn(
+        '[restore-sweep] desktop materialize: getOrchestrationDb() failed; draining without audit rows',
+        error
+      )
+      db = null
+    }
     const run = this.desktopMaterializeDrainQueue.then(() =>
       drainDesktopMaterializeQueue(
         this.desktopRestoredPaneMaterializeQueue,
         this.notifier,
         (ptyId) => this.ptysById.has(ptyId),
-        this.getOrchestrationDb(),
+        // [D-R155-b6b finding 4] Fallback only — the recorded surface.title still wins.
+        (ptyId) => {
+          const pty = this.ptysById.get(ptyId)
+          return pty ? (getLatestPtyTitle(pty) ?? pty.controllerTitle) : null
+        },
+        db,
         this.getOrchestrationCompatibilityHostId()
       )
     )

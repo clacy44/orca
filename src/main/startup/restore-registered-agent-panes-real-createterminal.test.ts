@@ -367,11 +367,19 @@ describe('S10-21c B6, design §2 S9: index.ts wiring', () => {
     expect(source.slice(handlerStart, handlerEnd)).toContain(
       'await runtime?.materializeRestoredAgentPanes()'
     )
+    // [S10-21c B6c, D-R155-b6b finding 1] Marks hydration BEFORE reconcile — must be the first
+    // thing the handler body does, not buried inside the (twice-firing) reconcile closure.
+    expect(source.slice(handlerStart, handlerStart + 500)).toContain(
+      'markRendererHydratedForMaterialize(desktopMaterializeHydrationGate)'
+    )
 
     const sweepBodyStart = source.indexOf('await runStartupRestoreSweepBody(runtime)')
     expect(sweepBodyStart).toBeGreaterThanOrEqual(0)
-    const sweepBodyWindow = source.slice(sweepBodyStart, sweepBodyStart + 600)
+    // [S10-21c B6c, D-R155-b6b finding 1] Window widened from 600: the trigger is now gated on
+    // shouldDrainAtEndOfSweep (renderer-hydration proof), pushing the call further from the anchor.
+    const sweepBodyWindow = source.slice(sweepBodyStart, sweepBodyStart + 900)
     expect(sweepBodyWindow).toContain('releaseRestoreSweepLock()')
+    expect(sweepBodyWindow).toContain('shouldDrainAtEndOfSweep(desktopMaterializeHydrationGate)')
     expect(sweepBodyWindow).toContain('await runtime.materializeRestoredAgentPanes()')
   })
 })

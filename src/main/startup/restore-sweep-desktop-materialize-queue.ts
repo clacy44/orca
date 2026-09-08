@@ -172,16 +172,49 @@ export type DesktopMaterializeNotifier = {
     | void
 }
 
+/** [D-R155-b6b finding 2] Every audit write the drain makes is best-effort: neither a throwing
+ * `db.writeAgentAudit` nor an absent `db` (the caller's `getOrchestrationDb()` failed — see
+ * `orca-runtime.ts#materializeRestoredAgentPanes`) may take the drain down with it, since
+ * `index.ts`'s end-of-sweep call site has no catch of its own around it. `db === null` means
+ * "skip audits, still drain" — never a thrown error. */
+function auditSweepNoteSafe(
+  db: OrchestrationDb | null,
+  hostId: string,
+  paneKey: string,
+  agentId: string,
+  reasonCode: string
+): void {
+  if (!db) {
+    return
+  }
+  try {
+    auditSweepNote(db, hostId, paneKey, agentId, reasonCode)
+  } catch (error) {
+    console.warn('[restore-sweep] desktop materialize audit write failed', {
+      paneKey,
+      reasonCode,
+      error: error instanceof Error ? error.message : String(error)
+    })
+  }
+}
+
 /** Reveals one pane. On success, deletes the queue entry [D-R153-b6 F1] and audits
- * `desktop_materialize: revealed tab=<tabId>`. On a rejection or an identity mismatch, the entry
- * stays queued (retried on the next drain) and is audited
- * `desktop_materialize_refused: identity_mismatch` — one code for both, matching the pre-existing
- * `console.warn` site this replaces, which already treated a rejection (the real primitive's own
- * "Terminal reveal timed out"/`runtime_unavailable`) and a mismatch identically. */
+ * `desktop_materialize: revealed tab=<tabId>` — [D-R155-b6b finding 5] OUTSIDE the reveal `try`,
+ * so a db write failure on this path is never misclassified by the `catch` below as a refusal for
+ * a pane that was, in fact, revealed. On a rejection or an identity mismatch the entry stays
+ * queued (retried on the next drain) and is audited with one of three distinct codes
+ * [D-R155-b6b finding 3]: `identity_mismatch` for a genuine mismatch (this function's own local
+ * check, or the primitive's own `terminal_reveal_identity_mismatch`), `reveal_timeout` for the
+ * primitive's 10s timeout — the EXPECTED outcome when the end-of-sweep trigger races a renderer
+ * that has not hydrated yet — and `reveal_error <message>` for anything else (`runtime_unavailable`,
+ * a renderer-side reply error, ...), so a durable record never reads "identity mismatch" for a
+ * defect that was not one. `resolveTitle` [D-R155-b6b finding 4] is used ONLY when the recorded
+ * `surface.title` is null — the record-time value still wins. */
 async function materializeOnePane(
   state: DesktopMaterializeQueueState,
   notifier: DesktopMaterializeNotifier,
-  db: OrchestrationDb,
+  resolveTitle: (ptyId: string) => string | null,
+  db: OrchestrationDb | null,
   hostId: string,
   paneKey: string,
   surface: RestoredPaneMaterializeSurface
@@ -189,7 +222,7 @@ async function materializeOnePane(
   try {
     const reveal = await notifier.revealTerminalSession!(surface.worktreeId, {
       ptyId: surface.ptyId,
-      title: surface.title,
+      title: surface.title ?? resolveTitle(surface.ptyId),
       launchAgent: surface.launchAgent,
       tabId: surface.tabId,
       leafId: surface.leafId,
@@ -206,15 +239,6 @@ async function materializeOnePane(
     ) {
       throw new Error('terminal_reveal_identity_mismatch')
     }
-    state.queue.delete(paneKey)
-    auditSweepNote(
-      db,
-      hostId,
-      paneKey,
-      surface.agentId,
-      `desktop_materialize: revealed tab=${surface.tabId}`
-    )
-    return 'revealed'
   } catch (error) {
     // Loud, never silent — the pane stays queued so the NEXT drain (the renderer-startup handler
     // fires more than once per cold start) retries it.
@@ -222,34 +246,50 @@ async function materializeOnePane(
       '[restore-sweep] desktop materialize reveal did not complete; pane remains queued',
       { paneKey, error: error instanceof Error ? error.message : String(error) }
     )
-    auditSweepNote(
-      db,
-      hostId,
-      paneKey,
-      surface.agentId,
-      'desktop_materialize_refused: identity_mismatch'
-    )
+    const message = error instanceof Error ? error.message : String(error)
+    const reasonCode =
+      message === 'terminal_reveal_identity_mismatch'
+        ? 'desktop_materialize_refused: identity_mismatch'
+        : message === 'Terminal reveal timed out'
+          ? 'desktop_materialize_refused: reveal_timeout'
+          : `desktop_materialize_refused: reveal_error ${message}`
+    auditSweepNoteSafe(db, hostId, paneKey, surface.agentId, reasonCode)
     return 'refused'
   }
+  state.queue.delete(paneKey)
+  auditSweepNoteSafe(
+    db,
+    hostId,
+    paneKey,
+    surface.agentId,
+    `desktop_materialize: revealed tab=${surface.tabId}`
+  )
+  return 'revealed'
 }
 
-/** [S10-21c B6, design §2 S9; D-R153-b6 F1/F2] Drains every still-queued pane. No notifier
- * installed (serve) -> no-op, returns cleanly: serve has no renderer to reveal into and this
- * module must never assume one. A pane whose pty `isPtyLive` reports gone is skipped and deleted
- * without ever attempting a reveal. Called from `orca-runtime.ts#materializeRestoredAgentPanes`
- * (itself serialized through a single in-flight promise, [D-R153-b6 F6] — see that method's own
- * doc comment), from the SAME main-process handler the legacy-worker-terminal recovery drain uses
+/** [S10-21c B6, design §2 S9; D-R153-b6 F1/F2; D-R155-b6b finding 2] Drains every still-queued
+ * pane. No notifier installed (serve) -> no-op, returns cleanly: serve has no renderer to reveal
+ * into and this module must never assume one. A pane whose pty `isPtyLive` reports gone is
+ * skipped and deleted without ever attempting a reveal. Called from
+ * `orca-runtime.ts#materializeRestoredAgentPanes` (itself serialized through a single in-flight
+ * promise, [D-R153-b6 F6] — see that method's own doc comment), from the SAME main-process
+ * handler the legacy-worker-terminal recovery drain uses
  * (`app:recoverLegacyWorkerTerminalsForRendererStartup`, `index.ts:893`) and now also from the
- * end of the desktop sweep body itself (`index.ts` ~3475, [D-R153-b6 F8]) so a slow sweep is not
- * left waiting on the renderer-startup handler's own 30s hydration bound. Firing more than once
- * is safe: every entry this call resolves (reveals or drops) is deleted, so a redundant later
- * call simply finds nothing left to do for it. Logs one summary line per call — Field Drill B1
- * (design §5) captures this even in a packaged build where nothing forwards `console`. */
+ * end of the desktop sweep body itself (`index.ts` ~3483, [D-R153-b6 F8], gated on renderer
+ * hydration — [D-R155-b6b finding 1] — by `desktop-materialize-hydration-gate.ts`). Firing more
+ * than once is safe: every entry this call resolves (reveals or drops) is deleted, so a redundant
+ * later call simply finds nothing left to do for it. Provably non-rejecting: every audit write
+ * goes through `auditSweepNoteSafe`, so neither a throwing/absent `db` nor a reveal failure can
+ * propagate out of this function. Logs one summary line per call — Field Drill B1 (design §5)
+ * captures this even in a packaged build where nothing forwards `console`; the `agent_audit`
+ * `sweep_note` rows are the evidence that survives that build (design §5 amendment, D-R155-b6b
+ * finding 6). */
 export async function drainDesktopMaterializeQueue(
   state: DesktopMaterializeQueueState,
   notifier: DesktopMaterializeNotifier | null,
   isPtyLive: (ptyId: string) => boolean,
-  db: OrchestrationDb,
+  resolveTitle: (ptyId: string) => string | null,
+  db: OrchestrationDb | null,
   hostId: string
 ): Promise<void> {
   if (!notifier?.revealTerminalSession) {
@@ -264,7 +304,7 @@ export async function drainDesktopMaterializeQueue(
       if (!isPtyLive(surface.ptyId)) {
         state.queue.delete(paneKey)
         skipped += 1
-        auditSweepNote(
+        auditSweepNoteSafe(
           db,
           hostId,
           paneKey,
@@ -273,7 +313,15 @@ export async function drainDesktopMaterializeQueue(
         )
         return
       }
-      const outcome = await materializeOnePane(state, notifier, db, hostId, paneKey, surface)
+      const outcome = await materializeOnePane(
+        state,
+        notifier,
+        resolveTitle,
+        db,
+        hostId,
+        paneKey,
+        surface
+      )
       if (outcome === 'revealed') {
         revealed += 1
       } else {
