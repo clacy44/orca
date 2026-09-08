@@ -379,17 +379,15 @@ export async function admitAgentLaunch(
       // here, before recording: a miss, an empty/stub-only transcript, or an agent type S4 does
       // not cover yet all refuse loudly (`unrecorded`, spawn still proceeds) rather than writing
       // an id that the sweep's own preflight would only tear back out later.
-      const resumeTranscript = await resolveResumeTranscript(
-        spawnOptions.launchAgent ?? 'claude',
-        x
-      )
+      const agentType = spawnOptions.launchAgent ?? 'claude'
+      const resumeTranscript = await resolveResumeTranscript(agentType, x)
       if (!resumeTranscript || 'coverage' in resumeTranscript || !resumeTranscript.hasTurn) {
         return unrecorded('resume_target_absent')
       }
       const recorded = db.recordLaunch({
         hostId: ctx.hostId,
         paneKey,
-        agentType: spawnOptions.launchAgent ?? 'claude',
+        agentType,
         sessionId: x,
         launchGeneration: ctx.launchGeneration,
         executionHostId: ctx.executionHostId,
@@ -419,12 +417,10 @@ export async function admitAgentLaunch(
       // admission surface still must not supersede a derived row's recorded session silently).
       // A distinct outcome, never `contestedLineage` (which is reserved for the non-derived,
       // registered-owner signal), so a supersession here is never traceless either way.
-      if (registeredRow !== undefined) {
-        if (registeredRow.derived === 0) {
-          ctx.contestedLineage(paneKey, registeredRow.pane_key ?? paneKey, registeredRow.id)
-        } else {
-          audit(db, paneKey, ctx.hostId, 'launch_recorded', 'admitted', 'derived_row_superseded')
-        }
+      if (registeredRow !== undefined && registeredRow.derived === 0) {
+        ctx.contestedLineage(paneKey, registeredRow.pane_key ?? paneKey, registeredRow.id)
+      } else if (registeredRow !== undefined) {
+        audit(db, paneKey, ctx.hostId, 'launch_recorded', 'admitted', 'derived_row_superseded')
       }
       // [forced deviation from HOST_MINTED's shape, deliberate] HOST_MINTED/HOST_RESUME notice
       // BEFORE their `recordLaunch`; this notices AFTER it, so a refused resume never emits a
@@ -509,12 +505,10 @@ export async function admitAgentLaunch(
     // plus a pty text notice — no `agent_audit` row at all.
     // [S10-21c B-final F5, D-R159 finding 5] Same derived-row fix as the caller_resume arm above:
     // a DERIVED registered row gets its own distinct audit outcome instead of silence.
-    if (registeredRow !== undefined) {
-      if (registeredRow.derived === 0) {
-        ctx.contestedLineage(paneKey, registeredRow.pane_key ?? paneKey, registeredRow.id)
-      } else {
-        audit(db, paneKey, ctx.hostId, 'launch_recorded', 'admitted', 'derived_row_superseded')
-      }
+    if (registeredRow !== undefined && registeredRow.derived === 0) {
+      ctx.contestedLineage(paneKey, registeredRow.pane_key ?? paneKey, registeredRow.id)
+    } else if (registeredRow !== undefined) {
+      audit(db, paneKey, ctx.hostId, 'launch_recorded', 'admitted', 'derived_row_superseded')
     }
     // [D-R104 F-12] A restated row is not this call's to confirm/compensate over.
     if (result.restated) {

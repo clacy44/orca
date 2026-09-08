@@ -782,10 +782,7 @@ describe('S10-21a C7i: decision-table rows (Ruling 34 Addendum 27)', () => {
     const inventory = emptyInventory({
       allLivePtyIds: new Set(['pty-same2']),
       terminalIdentityByPtyId: new Map([
-        [
-          'pty-same2',
-          { handle: 'term_same2', incarnationId: 'ffffffff-ffff-4fff-8fff-fffffffffff7' }
-        ]
+        ['pty-same2', { handle: 'term_s2', incarnationId: 'ffffffff-ffff-4fff-8fff-fffffffffff7' }]
       ])
     })
     const outcome = await restoreOneRegisteredPane(
