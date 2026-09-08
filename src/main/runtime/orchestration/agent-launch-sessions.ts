@@ -32,6 +32,14 @@ import { upsertCurrentSession } from './current-session-upsert'
  * `sessionLaunchKnown` does not go stale after a desktop relaunch for a pane the daemon kept
  * alive across the restart (diag-r106-r110-2026-09-08.md). Holds the leaf exactly like
  * 'sweep_record' (decideLeafHoldRows, restore-sweep-decision.ts). */
+/** [S10-21d R118, design (a)] Which mechanism last wrote a pane's pref_model/pref_effort:
+ * 'launch' from the launch-time request.launchPreferences (agent-launch-admission.ts),
+ * 'observed' from a live statusline report (server.ts's onClaudeSessionPrefs sink). DEC-9:
+ * newest observed wins over launch, EXCEPT a launch pref_effort of 'ultracode' is never
+ * downgraded by an observed 'xhigh' (the statusline cannot distinguish the two — ultracode
+ * renders as xhigh — so an observed report is never allowed to overwrite a stored 'ultracode'). */
+export type LaunchPrefSource = 'launch' | 'observed'
+
 export type LaunchEvidence =
   | 'host_launch'
   | 'sweep_record'
@@ -53,6 +61,10 @@ export type AgentLaunchSessionRow = {
   execution_host_id: string
   evidence: LaunchEvidence
   recorded_at: string
+  /** [S10-21d R118, v43] NULL until a launch or a live statusline report supplies one. */
+  pref_model: string | null
+  pref_effort: string | null
+  pref_source: LaunchPrefSource | null
 }
 
 export type RecordLaunchParams = {
@@ -75,6 +87,11 @@ export type RecordLaunchParams = {
    * launch leaves it unset, so the cross-pane UNIQUE stays the successor fence for everything
    * except this one sanctioned pane-to-pane move. */
   supersedePaneKey?: string
+  /** [S10-21d R118, design (a)/(b)] Set ONLY by the launch-time writer (agent-launch-admission.ts
+   * sites), source always 'launch' here — the 'observed' source is written exclusively by
+   * updateLaunchPrefsForPane below, never through this INSERT path. Undefined model/effort ->
+   * NULL columns, matching today's byte-identical no-prefs command (design (d)). */
+  prefs?: { model?: string; effort?: string; source: LaunchPrefSource }
 }
 
 export type RecordSelfReportRotationParams = {
@@ -171,8 +188,8 @@ export function recordLaunchInTransaction(
   db.prepare(
     `INSERT INTO agent_launch_sessions
        (host_id, pane_key, agent_type, session_id, previous_session_id, launch_generation,
-        agent_id, execution_host_id, evidence)
-     VALUES (?, ?, ?, ?, NULL, ?, NULL, ?, ?)`
+        agent_id, execution_host_id, evidence, pref_model, pref_effort, pref_source)
+     VALUES (?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, ?, ?)`
   ).run(
     params.hostId,
     params.paneKey,
@@ -180,7 +197,10 @@ export function recordLaunchInTransaction(
     params.sessionId,
     params.launchGeneration,
     params.executionHostId,
-    params.evidence
+    params.evidence,
+    params.prefs?.model ?? null,
+    params.prefs?.effort ?? null,
+    params.prefs ? params.prefs.source : null
   )
   const insertedSeq = (
     db
@@ -389,6 +409,42 @@ export function setLaunchAgentId(
            ORDER BY seq DESC LIMIT 1
        )`
   ).run(agentId, by.hostId, by.paneKey)
+}
+
+/** [S10-21d R118, design (a)/(b), DEC-9] Writes the NEWEST row's pref_model/pref_effort/
+ * pref_source ONLY — no INSERT, no other column touched, the launch ledger stays append-only.
+ * A no-op when the pane has no launch row yet (nothing to attach a preference to). DEC-9: an
+ * 'observed' report of effort 'xhigh' never downgrades an existing 'launch'-sourced 'ultracode'
+ * — the statusline cannot distinguish the two (ultracode renders as xhigh in the payload), so
+ * this is an echo of already-known state, not new information; both pref_effort and pref_source
+ * are left untouched in that one case so the protection survives repeated xhigh echoes (a
+ * one-shot pref_source flip to 'observed' would silently disarm DEC-9 on the very next report).
+ * Model is independent of the DEC-9 guard and always takes the incoming value when supplied. */
+export function updateLaunchPrefsForPane(
+  db: Database.Database,
+  hostId: string,
+  paneKey: string,
+  prefs: { model?: string; effort?: string; source: LaunchPrefSource }
+): void {
+  const existing = newestLaunchForPane(db, hostId, paneKey)
+  if (!existing) {
+    return
+  }
+  const preserveUltracode =
+    prefs.source === 'observed' &&
+    prefs.effort === 'xhigh' &&
+    existing.pref_effort === 'ultracode' &&
+    existing.pref_source === 'launch'
+  const effort = preserveUltracode ? existing.pref_effort : (prefs.effort ?? existing.pref_effort)
+  const source = preserveUltracode ? existing.pref_source : prefs.source
+  const model = prefs.model ?? existing.pref_model
+  db.prepare(
+    `UPDATE agent_launch_sessions SET pref_model = ?, pref_effort = ?, pref_source = ?
+       WHERE seq = (
+         SELECT seq FROM agent_launch_sessions WHERE host_id = ? AND pane_key = ?
+           ORDER BY seq DESC LIMIT 1
+       )`
+  ).run(model, effort, source, hostId, paneKey)
 }
 
 /** [§7, §2.11 N4] Used by retireAgent inside its own new transaction — never called standalone

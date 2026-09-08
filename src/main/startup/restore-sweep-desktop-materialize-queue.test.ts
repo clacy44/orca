@@ -518,7 +518,10 @@ describe('S10-21c B-final, D-R157-b6c finding 3: recordDesktopMaterialize', () =
       agent_id: 'agent-30',
       execution_host_id: 'local',
       evidence: 'sweep_record',
-      recorded_at: new Date().toISOString()
+      recorded_at: new Date().toISOString(),
+      pref_model: null,
+      pref_effort: null,
+      pref_source: null
     }
   }
 
