@@ -7,24 +7,33 @@ import {
   parseProcessIncarnation,
   type ControllerInventory
 } from '../runtime/orchestration/agent-process-identity'
+import type { EarlyRowsDecision } from '../runtime/orchestration/restore-sweep-decision'
 import { auditSweepSkip, auditSweepNote } from '../runtime/orchestration/restore-sweep-audit'
 import type { RestoreSweepDeps, RestoreOneOutcome } from './restore-sweep-types'
 
 /** [S10-21c B5, design §2 S7] The daemon kept this pane's pty alive across the restart — the
- * PROCESS needs nothing, but mail already queued against `agent:<id>` is still parked (R5).
+ * PROCESS needs nothing, but mail already queued against `agent:<id>` is still parked (R5), and
+ * a pact paused `counterpart_gone` against this agent is still stuck (D-R150 F1; the same
+ * un-pause the successful-restore arm performs, restore-registered-agent-panes.ts:276-280).
  * Audits the skip, then refreshes `terminal_handle` from the SAME controller-inventory identity
  * `decideEarlyRows` already used to reach 'alive' (`inventory.terminalIdentityByPtyId`, never a
- * redundant lookup) and arms delivery — both bound to THIS candidate's own `agentId` (never
- * re-derived by pane suffix, which two rows can share). A throw from either becomes a sweep note,
- * never a failed skip — mirrors how a throw from `notifyRebindDelivery` is handled on the
- * successful-restore arm (restore-registered-agent-panes.ts's own `notifyRebindDelivery` call). */
+ * redundant lookup), resumes any pacts the refresh reports post-commit, and arms delivery — all
+ * bound to THIS candidate's own `agentId` (never re-derived by pane suffix, which two rows can
+ * share). [D-R150 low 1] Two separate try/catches, not one: a throw from the refresh (or the
+ * post-commit pact resume it gates) becomes `daemon_survived_refresh_failed:`; a throw from
+ * `notifyRebindDelivery` becomes `delivery_notify_failed:` — the SAME code the successful-restore
+ * arm uses for that same call, so one throw is never labelled two different ways depending on
+ * which arm hit it. A typed `ok:false` refusal from the refresh (row already derived/tombstoned/
+ * quarantined, or no longer registered) is not a throw — it is loudly noted too, carrying the
+ * refusal's own `reason`, rather than silently arming delivery for a row the refresh declined to
+ * touch. Neither half's failure is ever a failed skip — the skip itself already committed. */
 export function handleDaemonSurvivedSkip(
   db: OrchestrationDb,
   deps: RestoreSweepDeps,
   hostId: string,
   launchRow: AgentLaunchSessionRow,
   agentId: string,
-  early: { reasonCode: string },
+  early: Extract<EarlyRowsDecision, { kind: 'skipped_daemon_survived' }>,
   processIncarnation: string | null,
   inventory: ControllerInventory | null
 ): RestoreOneOutcome {
@@ -41,14 +50,26 @@ export function handleDaemonSurvivedSkip(
       // that invariant is ever violated by a future change.
       throw new Error('controller_identity_unavailable_for_survived_agent')
     }
-    db.refreshAgentHandleAfterRespawn({
+    const res = db.refreshAgentHandleAfterRespawn({
       hostId,
       paneKey: launchRow.pane_key,
       newTerminalHandle: controllerIdentity.handle,
       processIncarnation,
       agentId
     })
-    deps.notifyRebindDelivery(agentId)
+    if (res.ok) {
+      // Post-commit — refreshAgentHandleAfterRespawn's own BEGIN IMMEDIATE/COMMIT already
+      // closed above; resumePactsForRestoredAgent opens its own transaction per pact (D-R150 F1).
+      db.resumePactsForRestoredAgent(agentId, res.pactsToUnpause, deps.federatedPactEmitRuntime)
+    } else {
+      auditSweepNote(
+        db,
+        hostId,
+        launchRow.pane_key,
+        agentId,
+        `daemon_survived_refresh_refused: ${res.reason}`
+      )
+    }
   } catch (err) {
     auditSweepNote(
       db,
@@ -56,6 +77,20 @@ export function handleDaemonSurvivedSkip(
       launchRow.pane_key,
       agentId,
       `daemon_survived_refresh_failed: ${err instanceof Error ? err.message : String(err)}`
+    )
+    // A throw from the refresh means its own outcome is unknown — never proceed to arm delivery
+    // on an uncertain refresh, mirroring the successful-restore arm's early return on `!ok`.
+    return { kind: 'skipped_daemon_survived' }
+  }
+  try {
+    deps.notifyRebindDelivery(agentId)
+  } catch (err) {
+    auditSweepNote(
+      db,
+      hostId,
+      launchRow.pane_key,
+      agentId,
+      `delivery_notify_failed: ${err instanceof Error ? err.message : String(err)}`
     )
   }
   return { kind: 'skipped_daemon_survived' }

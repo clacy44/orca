@@ -31,6 +31,54 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
     return (orchestrationDb as unknown as { db: Database.Database }).db
   }
 
+  // [D-R150 F1] A pact paused 'counterpart_gone' for `agentId` — mirrors pty.test.ts's own
+  // `seedPausedPact` fixture (agent-pact-resume-after-restore.test.ts's own shape too).
+  function seedPausedPact(db: OrchestrationDb, agentId: string, paneKey: string): string {
+    const peer = db.upsertAgentByPaneSuffix({
+      displayName: `peer-${paneKey}`,
+      role: null,
+      hostId: HOST_ID,
+      paneKey: `peer-tab-${paneKey}:peer-leaf-${paneKey}`,
+      terminalHandle: `term_peer_${paneKey}`,
+      processIncarnation: null,
+      worktreeId: null,
+      worktreePath: null,
+      branch: null,
+      title: null,
+      agentLabel: null,
+      originHandle: `term_peer_${paneKey}`,
+      originHostId: HOST_ID
+    })
+    if (peer.outcome !== 'created') {
+      throw new Error('seedPausedPact: peer seed failed')
+    }
+    const peerId = peer.agent.id
+    const { thread } = db.createThread({
+      subject: `pact-${paneKey}`,
+      createdByAgentId: agentId,
+      participants: [
+        { participantKey: agentId, agentId },
+        { participantKey: peerId, agentId: peerId }
+      ]
+    })
+    db.proposePact({
+      callerAgentId: agentId,
+      callerPaneKey: paneKey,
+      callerHostId: HOST_ID,
+      threadId: thread.id,
+      peerAgentId: peerId,
+      stepsTotal: null
+    })
+    db.acceptPact({
+      callerAgentId: peerId,
+      callerPaneKey: `peer-tab-${paneKey}:peer-leaf-${paneKey}`,
+      callerHostId: HOST_ID,
+      threadId: thread.id
+    })
+    db.autoPausePactsForAgent(agentId, 'counterpart_gone')
+    return thread.id
+  }
+
   it("calls refreshAgentHandleAfterRespawn with the candidate's own agentId, then notifyRebindDelivery once", async () => {
     const db = rawDb()
     const paneKey = 'tab1:00000000-0000-4000-8000-00000000a7a0'
@@ -169,10 +217,112 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
     )
     expect(outcome.kind).toBe('skipped_daemon_survived')
     expect(refreshSpy).toHaveBeenCalledTimes(1)
+    // [D-R150 low 1] The notify half's own catch, NOT the refresh half's — the refresh already
+    // succeeded (and committed) before notifyRebindDelivery threw, so this must never be
+    // mislabelled `daemon_survived_refresh_failed:` (the defect the two-catch split fixes).
     const rows = db
       .prepare(
         `SELECT * FROM agent_audit WHERE verb = 'sweep_note'
+           AND reason_code = 'delivery_notify_failed: notify boom'`
+      )
+      .all()
+    expect(rows).toHaveLength(1)
+    const mislabelled = db
+      .prepare(
+        `SELECT * FROM agent_audit WHERE verb = 'sweep_note'
            AND reason_code = 'daemon_survived_refresh_failed: notify boom'`
+      )
+      .all()
+    expect(mislabelled).toHaveLength(0)
+  })
+
+  it('[D-R150 F1] resumes a counterpart_gone-paused pact for the restored agent, post-commit', async () => {
+    const db = rawDb()
+    const paneKey = 'tab1:00000000-0000-4000-8000-00000000a7f0'
+    insertAgent(db, {
+      id: 'agent-s7e',
+      display_name: 'chair-s7e',
+      pane_key: paneKey,
+      process_incarnation: 'pty-s7e:inc-s7e'
+    })
+    recordLaunch(db, {
+      hostId: HOST_ID,
+      paneKey,
+      agentType: 'claude',
+      sessionId: 'sess-s7e',
+      launchGeneration: PRIOR_GEN,
+      executionHostId: EXEC_HOST_ID,
+      evidence: 'host_launch'
+    })
+    const threadId = seedPausedPact(orchestrationDb!, 'agent-s7e', paneKey)
+    const inventory = emptyInventory({
+      allLivePtyIds: new Set(['pty-s7e']),
+      terminalIdentityByPtyId: new Map([
+        ['pty-s7e', { handle: 'term_fresh_s7e', incarnationId: 'inc-s7e' }]
+      ])
+    })
+    const outcome = await restoreOneRegisteredPane(
+      baseDeps(orchestrationDb!, { notifyRebindDelivery: vi.fn() }),
+      orchestrationDb!,
+      HOST_ID,
+      'agent-s7e',
+      'pty-s7e:inc-s7e',
+      'wt-1',
+      orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!,
+      inventory
+    )
+    expect(outcome.kind).toBe('skipped_daemon_survived')
+    expect(orchestrationDb!.getThread(threadId)?.pact_paused_at).toBeNull()
+    expect(orchestrationDb!.getThread(threadId)?.pact_state).toBe('engaged')
+  })
+
+  it('[D-R150 low 1] a typed ok:false refusal from refreshAgentHandleAfterRespawn is a loud sweep note, never silently arms delivery unlogged', async () => {
+    const db = rawDb()
+    const paneKey = 'tab1:00000000-0000-4000-8000-00000000a7f1'
+    insertAgent(db, {
+      id: 'agent-s7f',
+      display_name: 'chair-s7f',
+      pane_key: paneKey,
+      process_incarnation: 'pty-s7f:inc-s7f'
+    })
+    recordLaunch(db, {
+      hostId: HOST_ID,
+      paneKey,
+      agentType: 'claude',
+      sessionId: 'sess-s7f',
+      launchGeneration: PRIOR_GEN,
+      executionHostId: EXEC_HOST_ID,
+      evidence: 'host_launch'
+    })
+    const inventory = emptyInventory({
+      allLivePtyIds: new Set(['pty-s7f']),
+      terminalIdentityByPtyId: new Map([
+        ['pty-s7f', { handle: 'term_fresh_s7f', incarnationId: 'inc-s7f' }]
+      ])
+    })
+    const notifyRebindDelivery = vi.fn()
+    vi.spyOn(orchestrationDb!, 'refreshAgentHandleAfterRespawn').mockReturnValue({
+      ok: false,
+      reason: 'row_quarantined'
+    })
+    const outcome = await restoreOneRegisteredPane(
+      baseDeps(orchestrationDb!, { notifyRebindDelivery }),
+      orchestrationDb!,
+      HOST_ID,
+      'agent-s7f',
+      'pty-s7f:inc-s7f',
+      'wt-1',
+      orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!,
+      inventory
+    )
+    expect(outcome.kind).toBe('skipped_daemon_survived')
+    // Delivery is still armed (unchanged from base for this arm) — only the refusal itself must
+    // be loud, per D-R150 low 1's fix (a sweep_note, not a silent no-op).
+    expect(notifyRebindDelivery).toHaveBeenCalledTimes(1)
+    const rows = db
+      .prepare(
+        `SELECT * FROM agent_audit WHERE verb = 'sweep_note'
+           AND reason_code = 'daemon_survived_refresh_refused: row_quarantined'`
       )
       .all()
     expect(rows).toHaveLength(1)
