@@ -268,10 +268,6 @@ export async function restoreOneRegisteredPane(
   // discarding a same-pane restore's counterpart_gone-paused pacts (D-R118 F7).
   if (result.rebound) {
     db.resumePactsForRestoredAgent(agentId, result.pactsToUnpause, deps.federatedPactEmitRuntime)
-    // [S10-21c B6, design §2 S9] Layer 2 only — the renderer lost this pane's tab, so desktop
-    // needs to materialize it via the reveal primitive once hydrated. See
-    // restore-sweep-desktop-materialize-queue.ts's own doc comment.
-    recordDesktopMaterialize(deps, created, newPaneKey, newTerminalHandle, newProcessIncarnation)
   } else if (result.pactsToUnpause && result.pactsToUnpause.length > 0) {
     db.resumePactsForRestoredAgent(agentId, result.pactsToUnpause, deps.federatedPactEmitRuntime)
   }
@@ -288,6 +284,15 @@ export async function restoreOneRegisteredPane(
       agentId,
       `delivery_notify_failed: ${err instanceof Error ? err.message : String(err)}`
     )
+  }
+  if (result.rebound) {
+    // [S10-21c B6, design §2 S9; D-R153-b6 F6] Layer 2 only — the renderer lost this pane's tab,
+    // so desktop needs to materialize it via the reveal primitive once hydrated. Sits below
+    // notifyRebindDelivery, same reasoning: the restore already committed above, so a failure
+    // here is only ever an audited note (wrapped INSIDE recordDesktopMaterialize itself — see
+    // restore-sweep-desktop-materialize-queue.ts's own doc comment — to keep this call site
+    // minimal under the max-lines ratchet).
+    recordDesktopMaterialize(deps, agentId, created, launchRow)
   }
   return { kind: result.rebound ? 'layer2' : 'layer1', result }
 }

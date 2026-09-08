@@ -897,14 +897,16 @@ ipcMain.handle('app:recoverLegacyWorkerTerminalsForRendererStartup', () =>
     localPtyProviderStartupReady,
     reconcile: async () => {
       await runtime?.refreshRestoredOrchestrationAuthority()
-      // [S10-21c B6, design §2 S9] Same reconcile closure the legacy-worker drain uses — no
-      // discriminator distinguishes this handler's pre- from post-reconnect invocation (App.tsx
-      // calls it with no argument either time), so this fires on both; the epoch guard inside
-      // materializeRestoredAgentPanes makes every call after the first successful reveal a
-      // no-op. On serve this is unreachable (no renderer round-trip there at all); on desktop
-      // with no notifier installed yet, it is a clean no-op (see the method's own doc comment).
-      // Never throws (every failure inside is caught and logged), so awaiting it here adds no
-      // new failure mode to this reconcile closure.
+      // [S10-21c B6, design §2 S9; D-R153-b6 F1/F8] Same reconcile closure the legacy-worker
+      // drain uses — no discriminator distinguishes this handler's pre- from post-reconnect
+      // invocation (App.tsx calls it with no argument either time), so this fires on both, and
+      // now also from the end of the desktop sweep body itself (index.ts, this file, ~3475).
+      // Firing on all three is safe: every resolved pane (revealed, or dropped as dead) is
+      // deleted from the queue, so a redundant call simply finds nothing left pending. On serve
+      // this is unreachable (no renderer round-trip there at all); on desktop with no notifier
+      // installed yet, it is a clean no-op (see the method's own doc comment). Never throws
+      // (every failure inside is caught and logged), so awaiting it here adds no new failure mode
+      // to this reconcile closure.
       await runtime?.materializeRestoredAgentPanes()
       return runtime?.reconcileLegacyWorkerTerminals({ materializeRenderer: true })
     },
@@ -3474,6 +3476,11 @@ void app.whenReady().then(async () => {
       await runStartupRestoreSweepBody(runtime)
       releaseRestoreSweepLock()
       desktopSweepLockReleased = true
+      // [S10-21c B6, design §2 S9; D-R153-b6 F8] Second drain trigger — the renderer-startup
+      // handler's own hydration wait has a 30s bound; a sweep resuming several panes is not
+      // obviously under that. No-op without a notifier installed yet, and free if the
+      // renderer-startup trigger already drained everything.
+      await runtime.materializeRestoredAgentPanes()
     }
     const runtimeRpcStartResult = await shellPathReady
       .then(() => desktopRuntimeRpc.start())

@@ -7,6 +7,8 @@
 // `pendingOnOldHandle` against `rebindRestoredPane` directly.
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import type Database from '../sqlite/sync-database'
 import { OrchestrationDb } from '../runtime/orchestration/db'
 import { OrcaRuntimeService } from '../runtime/orca-runtime'
@@ -262,5 +264,114 @@ describe('S10-21a C7b, T2: Layer 2 rebind against a real createTerminal', () => 
       .prepare(`SELECT * FROM agent_audit WHERE verb = 'rebind' AND outcome = 'reminted'`)
       .all()
     expect(remintedAudit).toHaveLength(1)
+  })
+
+  // [S10-21c B6, design §2 S9; D-R153-b6 F3] Drives the real `materializeRestoredAgentPanes`
+  // wiring the sweep-side test (restore-registered-agent-panes-s9-desktop-materialize.test.ts)
+  // never exercises — `this.notifier` and `this.ptysById` are the runtime's own state, not deps.
+  it('S10-21c B6, design §2 S9: materializeRestoredAgentPanes reveals the recorded surface exactly once; a second call issues none', async () => {
+    db = new OrchestrationDb(':memory:')
+    const runtime = new OrcaRuntimeService({
+      getSettings: () => ({
+        disabledTuiAgents: [],
+        agentCmdOverrides: {},
+        agentDefaultArgs: {},
+        agentDefaultEnv: {}
+      })
+    } as never)
+    runtime.setOrchestrationDb(db)
+    stubLaunchScope(runtime)
+    const spawnedPtyId = randomUUID()
+    runtime.setPtyController({
+      spawn: async () => ({ id: spawnedPtyId, incarnationId: 'inc-s9', isReattach: false }),
+      write: () => true,
+      kill: () => true,
+      getForegroundProcess: async () => null
+    })
+
+    const predPaneKey = `tab-old:${randomUUID()}`
+    const created = db.upsertAgentByPaneSuffix({
+      displayName: 'chair-s9',
+      role: null,
+      hostId: HOST_ID,
+      paneKey: predPaneKey,
+      terminalHandle: 'term_old_s9',
+      processIncarnation: 'inc-old-s9',
+      worktreeId: 'wt-1',
+      worktreePath: null,
+      branch: null,
+      title: null,
+      agentLabel: null,
+      originHandle: 'term_old_s9',
+      originHostId: HOST_ID
+    })
+    if (created.outcome === 'name_taken') {
+      throw new Error('fixture setup failed')
+    }
+    const launched = db.recordLaunch({
+      hostId: HOST_ID,
+      paneKey: predPaneKey,
+      agentType: 'claude',
+      sessionId: 'sess-s9',
+      launchGeneration: PRIOR_GEN,
+      executionHostId: EXEC_HOST_ID,
+      evidence: 'host_launch'
+    })
+    if (!launched.ok) {
+      throw new Error('fixture launch row failed')
+    }
+    const deps = buildDeps(runtime)
+    deps.collectIncumbentEvidence = async (paneKey) => ({
+      paneKey,
+      d1: { ptyKnownToRuntime: false, exitObservedThisGeneration: true },
+      d2: { inventory: 'unknown' },
+      d3: { liveNow: false, firstObservedNotLiveAt: null, now: 0 }
+    })
+    deps.takeControllerInventoryForSweep = async () => ({
+      allLivePtyIds: new Set(),
+      terminalIdentityByPtyId: new Map()
+    })
+    const summary = await runRestoreSweep(deps)
+    expect(summary.layer2).toBe(1)
+
+    // Echoes back whatever identity the drain asked for — this proves the WIRING (the recorded
+    // surface reaches the real reveal call with a matching identity), not the mismatch-refusal
+    // logic already covered by restore-sweep-desktop-materialize-queue.test.ts.
+    const revealTerminalSession = vi.fn((worktreeId: string, opts: Record<string, unknown>) =>
+      Promise.resolve({
+        tabId: opts.tabId,
+        identity: { worktreeId, tabId: opts.tabId, leafId: opts.leafId, ptyId: opts.ptyId }
+      })
+    )
+    runtime.setNotifier({ revealTerminalSession } as never)
+
+    await runtime.materializeRestoredAgentPanes()
+    expect(revealTerminalSession).toHaveBeenCalledTimes(1)
+
+    await runtime.materializeRestoredAgentPanes()
+    expect(revealTerminalSession).toHaveBeenCalledTimes(1)
+  })
+})
+
+// Own describe (no `db`/afterEach) — a source-grep assertion, not a runtime test.
+describe('S10-21c B6, design §2 S9: index.ts wiring', () => {
+  it('calls materializeRestoredAgentPanes from the renderer-startup handler and the end of the desktop sweep body', () => {
+    const source = readFileSync(join(process.cwd(), 'src/main/index.ts'), 'utf8')
+
+    const handlerStart = source.indexOf(
+      "ipcMain.handle('app:recoverLegacyWorkerTerminalsForRendererStartup'"
+    )
+    const handlerEnd = source.indexOf('onDeferredRecoveryError', handlerStart)
+    expect(handlerStart).toBeGreaterThanOrEqual(0)
+    expect(handlerEnd).toBeGreaterThan(handlerStart)
+    expect(source.slice(handlerStart, handlerEnd)).toContain(
+      'await runtime?.materializeRestoredAgentPanes()'
+    )
+
+    const sweepBodyStart = source.indexOf('await runStartupRestoreSweepBody(runtime)')
+    expect(sweepBodyStart).toBeGreaterThanOrEqual(0)
+    const sweepBodyWindow = source.slice(sweepBodyStart, sweepBodyStart + 600)
+    expect(sweepBodyWindow).toContain('releaseRestoreSweepLock()')
+    expect(sweepBodyWindow).toContain('await runtime.materializeRestoredAgentPanes()')
   })
 })

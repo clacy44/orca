@@ -3718,6 +3718,9 @@ export class OrcaRuntimeService {
   // [S10-21c B6, design §2 S9] Desktop materialization queue — populated by the restore sweep
   // (recordRestoredPaneForDesktopMaterialization), drained by materializeRestoredAgentPanes.
   private desktopRestoredPaneMaterializeQueue = createDesktopMaterializeQueueState()
+  // [S10-21c B6, D-R153-b6 F6] Serializes concurrent drain callers, mirroring
+  // legacyWorkerTerminalRecoveryQueue (:4762-4769).
+  private desktopMaterializeDrainQueue: Promise<void> = Promise.resolve()
   private restoredOrchestrationAuthorityByPtyId = new Map<
     string,
     RestoredOrchestrationAuthorityReceipt
@@ -35936,19 +35939,30 @@ export class OrcaRuntimeService {
     enqueueRestoredPaneForMaterialization(this.desktopRestoredPaneMaterializeQueue, surface)
   }
 
-  // [S10-21c B6, design §2 S9] Drains the desktop-materialization queue through the existing
-  // `notifier.revealTerminalSession` primitive — no-op on serve (no notifier installed). Called
-  // from the SAME main-process handler the legacy-worker-terminal recovery drain uses
-  // (`app:recoverLegacyWorkerTerminalsForRendererStartup`); see
-  // restore-sweep-desktop-materialize-queue.ts's own doc comment for why firing on both that
-  // handler's pre- and post-reconnect invocations is safe (the epoch guard). T2 is CODE here —
-  // NOT claimed met until Field Drill B1's readout (design doc §5, OD-E).
+  // [S10-21c B6, design §2 S9; D-R153-b6 F1/F6] Drains the desktop-materialization queue through
+  // the existing `notifier.revealTerminalSession` primitive — no-op on serve (no notifier
+  // installed). Called from the SAME main-process handler the legacy-worker-terminal recovery
+  // drain uses (`app:recoverLegacyWorkerTerminalsForRendererStartup`) and now also from the end
+  // of the desktop sweep body (index.ts); safe to fire from all of them since a resolved entry
+  // (revealed, or dropped as dead) is deleted, never re-revealed. Serialized through a single
+  // in-flight promise (`desktopMaterializeDrainQueue`), mirroring `reconcileLegacyWorkerTerminals`
+  // (:4762-4769), so two near-simultaneous callers cannot both reveal the same pane. T2 is CODE
+  // here — NOT claimed met until Field Drill B1's readout (design doc §5, OD-E).
   async materializeRestoredAgentPanes(): Promise<void> {
-    await drainDesktopMaterializeQueue(
-      this.desktopRestoredPaneMaterializeQueue,
-      this.notifier,
-      this.rendererGraphEpoch
+    if (!this.notifier?.revealTerminalSession) {
+      return
+    }
+    const run = this.desktopMaterializeDrainQueue.then(() =>
+      drainDesktopMaterializeQueue(
+        this.desktopRestoredPaneMaterializeQueue,
+        this.notifier,
+        (ptyId) => this.ptysById.has(ptyId),
+        this.getOrchestrationDb(),
+        this.getOrchestrationCompatibilityHostId()
+      )
     )
+    this.desktopMaterializeDrainQueue = run.catch(() => undefined)
+    return run
   }
 
   // Why split from deliverPendingMessagesForHandle: R1+R2 both need an await, so this can only

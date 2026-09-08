@@ -81,11 +81,16 @@ describe('S10-21c B6, design §2 S9: Layer-2 restore records the desktop-materia
     expect(recordRestoredPaneForDesktopMaterialization).toHaveBeenCalledTimes(1)
     expect(recordRestoredPaneForDesktopMaterialization).toHaveBeenCalledWith({
       paneKey: freshPaneKey,
+      agentId: 'agent-20',
       worktreeId: 'wt-1',
       tabId: 'tab2',
       leafId: '00000000-0000-4000-8000-00000000f020',
       ptyId: 'pty-20',
-      expectedProcessIdentity: { terminalHandle: 'handle-20', incarnationId: 'pty-20:inc-20' }
+      title: null,
+      launchAgent: 'claude',
+      // [D-R153-b6 F5] The BARE incarnation, never the composite `agents.process_incarnation`
+      // form `getTerminalProcessIncarnation` returns.
+      expectedProcessIdentity: { terminalHandle: 'handle-20', incarnationId: 'inc-20' }
     })
   })
 
@@ -132,7 +137,7 @@ describe('S10-21c B6, design §2 S9: Layer-2 restore records the desktop-materia
     expect(recordRestoredPaneForDesktopMaterialization).not.toHaveBeenCalled()
   })
 
-  it('an incomplete surface (no ptyId from ensureAgentSession) is logged and dropped, not queued half-built', async () => {
+  it('an incomplete surface (no ptyId from ensureAgentSession) is audited and dropped, not queued half-built', async () => {
     const db = rawDb()
     const predPaneKey = 'tab1:00000000-0000-4000-8000-000000000022'
     const freshPaneKey = 'tab2:00000000-0000-4000-8000-00000000f022'
@@ -158,7 +163,6 @@ describe('S10-21c B6, design §2 S9: Layer-2 restore records the desktop-materia
       disposition: 'created'
     })
     const recordRestoredPaneForDesktopMaterialization = vi.fn()
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const outcome = await restoreOneRegisteredPane(
       baseDeps(orchestrationDb!, {
         ensureAgentSession,
@@ -176,10 +180,15 @@ describe('S10-21c B6, design §2 S9: Layer-2 restore records the desktop-materia
     )
     expect(outcome.kind).toBe('layer2')
     expect(recordRestoredPaneForDesktopMaterialization).not.toHaveBeenCalled()
-    expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining('desktop materialize queue skipped: incomplete surface'),
-      expect.objectContaining({ newPaneKey: freshPaneKey })
-    )
-    warn.mockRestore()
+    // [not asserting total sweep_note count for this agent — other, unrelated sweep_note rows
+    // (e.g. early-rows notes) can legitimately land alongside this one]
+    const auditRows = db
+      .prepare(
+        `SELECT * FROM agent_audit WHERE agent_id = ? AND verb = 'sweep_note' AND reason_code = ?`
+      )
+      .all('agent-22', 'desktop_materialize_refused: incomplete_surface') as {
+      reason_code: string
+    }[]
+    expect(auditRows).toHaveLength(1)
   })
 })
