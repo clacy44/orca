@@ -16,8 +16,10 @@
 //
 // [D-R153-b6 F2] Every drain outcome is EVIDENCE, not just a console line: each resolution writes
 // an `agent_audit` `sweep_note` row for that pane (`auditSweepNote`, the sweep's own existing
-// evidence primitive), and each drain call logs one summary line Field Drill B1 (design §5) can
-// capture even in a packaged build where nothing forwards `console`.
+// evidence primitive). [S10-21c B-final, D-R157-b6c finding 6] Those rows are the evidence that
+// SURVIVES a packaged build, where nothing forwards `console` — the one summary line each drain
+// call also logs (below) is a convenience view for a dev/journal-forwarded run, not itself the
+// evidence Field Drill B1 (design §5) relies on.
 //
 // Split into its own module (queue + drain both), mirroring restore-sweep-daemon-survived-
 // delivery.ts's split, so restore-registered-agent-panes.ts's own recording call site stays a
@@ -87,41 +89,47 @@ export function enqueueRestoredPaneForMaterialization(
  * incomplete surface (missing ptyId or a process incarnation that doesn't parse — not expected
  * given a successful rebind, but not proven unreachable) is audited
  * (`desktop_materialize_refused: incomplete_surface`, [D-R153-b6 F2] no longer console-only) and
- * dropped rather than queued half-built. */
+ * dropped rather than queued half-built. [S10-21c B-final, D-R157-b6c finding 3] The WHOLE body
+ * below `newPaneKey` is now inside the try: a throwing accessor (`getOrchestrationDb`,
+ * `getOrchestrationCompatibilityHostId`, `getTerminalProcessIncarnation`) used to escape
+ * uncaught into the caller's own per-candidate catch (restore-registered-agent-panes.ts), which
+ * writes a Layer-3 `sweep_row_threw` audit for a Layer-2 restore that had ALREADY COMMITTED —
+ * this function's own doc comment already promised that never happens. `db`/`hostId` are read
+ * via `auditSweepNoteSafe` (never-throws) so the catch below can still leave an evidenced note
+ * even when the accessor that threw is the very one that would have supplied `db`. */
 export function recordDesktopMaterialize(
   deps: RestoreSweepDeps,
   agentId: string,
   created: RuntimeEnsureAgentSessionResult,
   launchRow: AgentLaunchSessionRow
 ): void {
-  // db/hostId, newPaneKey/newTerminalHandle/newProcessIncarnation, and launchAgent are all
-  // RE-DERIVED here from `deps`/`created`/`launchRow` — the same values the caller
-  // (`restoreOneRegisteredPane`) already computed for `rebindRestoredPane`'s own call, just above
-  // this one — rather than threading five more positional params, to keep this module's own call
-  // site (restore-registered-agent-panes.ts's max-lines budget is the tight one) minimal.
-  const db = deps.getOrchestrationDb()
-  const hostId = deps.getOrchestrationCompatibilityHostId()
+  // Pure property access on already-validated inputs — never throws — so it stays available to
+  // the catch below even when an accessor that runs after it throws.
   const newPaneKey = created.terminal.paneKey ?? launchRow.pane_key
-  const newTerminalHandle = created.terminal.handle
-  const newProcessIncarnation = deps.getTerminalProcessIncarnation(newTerminalHandle)
-  const launchAgent = launchRow.agent_type as ResumableTuiAgent
-  const parsed = parsePaneKey(newPaneKey)
-  const ptyId = created.terminal.ptyId
-  const parsedIdentity = parseProcessIncarnation(newProcessIncarnation)
-  if (!parsed || !ptyId || !parsedIdentity) {
-    auditSweepNote(
-      db,
-      hostId,
-      newPaneKey,
-      agentId,
-      'desktop_materialize_refused: incomplete_surface'
-    )
-    return
-  }
-  // [D-R153-b6 F6] The restore already committed above (`db.rebindRestoredPane`) — a throw here
-  // is an audited note, never a failed restore, same shape as `notifyRebindDelivery`'s own
-  // wrapping (restore-registered-agent-panes.ts, the call site just above this one).
+  let db: OrchestrationDb | null = null
+  let hostId = ''
   try {
+    db = deps.getOrchestrationDb()
+    hostId = deps.getOrchestrationCompatibilityHostId()
+    const newTerminalHandle = created.terminal.handle
+    const newProcessIncarnation = deps.getTerminalProcessIncarnation(newTerminalHandle)
+    const launchAgent = launchRow.agent_type as ResumableTuiAgent
+    const parsed = parsePaneKey(newPaneKey)
+    const ptyId = created.terminal.ptyId
+    const parsedIdentity = parseProcessIncarnation(newProcessIncarnation)
+    if (!parsed || !ptyId || !parsedIdentity) {
+      auditSweepNoteSafe(
+        db,
+        hostId,
+        newPaneKey,
+        agentId,
+        'desktop_materialize_refused: incomplete_surface'
+      )
+      return
+    }
+    // [D-R153-b6 F6] The restore already committed above (`db.rebindRestoredPane`) — a throw here
+    // is an audited note, never a failed restore, same shape as `notifyRebindDelivery`'s own
+    // wrapping (restore-registered-agent-panes.ts, the call site just above this one).
     deps.recordRestoredPaneForDesktopMaterialization({
       paneKey: newPaneKey,
       agentId,
@@ -137,7 +145,7 @@ export function recordDesktopMaterialize(
       }
     })
   } catch (err) {
-    auditSweepNote(
+    auditSweepNoteSafe(
       db,
       hostId,
       newPaneKey,
@@ -208,8 +216,12 @@ function auditSweepNoteSafe(
  * primitive's 10s timeout — the EXPECTED outcome when the end-of-sweep trigger races a renderer
  * that has not hydrated yet — and `reveal_error <message>` for anything else (`runtime_unavailable`,
  * a renderer-side reply error, ...), so a durable record never reads "identity mismatch" for a
- * defect that was not one. `resolveTitle` [D-R155-b6b finding 4] is used ONLY when the recorded
- * `surface.title` is null — the record-time value still wins. */
+ * defect that was not one. [S10-21c B-final, D-R157-b6c finding 4] `<message>` is bounded to 200
+ * chars: the primitive wraps the renderer's own reply verbatim (`reject(new Error(reply.error))`),
+ * and `agent_audit.reason_code` is unbounded TEXT in an append-only table (no DELETE/UPDATE path)
+ * — a pathological or very large renderer error must not mint a row that can never be removed.
+ * `resolveTitle` [D-R155-b6b finding 4] is used ONLY when the recorded `surface.title` is null —
+ * the record-time value still wins. */
 async function materializeOnePane(
   state: DesktopMaterializeQueueState,
   notifier: DesktopMaterializeNotifier,
@@ -252,7 +264,7 @@ async function materializeOnePane(
         ? 'desktop_materialize_refused: identity_mismatch'
         : message === 'Terminal reveal timed out'
           ? 'desktop_materialize_refused: reveal_timeout'
-          : `desktop_materialize_refused: reveal_error ${message}`
+          : `desktop_materialize_refused: reveal_error ${message.slice(0, 200)}`
     auditSweepNoteSafe(db, hostId, paneKey, surface.agentId, reasonCode)
     return 'refused'
   }
@@ -280,10 +292,10 @@ async function materializeOnePane(
  * than once is safe: every entry this call resolves (reveals or drops) is deleted, so a redundant
  * later call simply finds nothing left to do for it. Provably non-rejecting: every audit write
  * goes through `auditSweepNoteSafe`, so neither a throwing/absent `db` nor a reveal failure can
- * propagate out of this function. Logs one summary line per call — Field Drill B1 (design §5)
- * captures this even in a packaged build where nothing forwards `console`; the `agent_audit`
- * `sweep_note` rows are the evidence that survives that build (design §5 amendment, D-R155-b6b
- * finding 6). */
+ * propagate out of this function. [S10-21c B-final, D-R157-b6c finding 6] Also logs one summary
+ * line per call, but that line is a convenience view only: the `agent_audit` `sweep_note` rows
+ * (above) are the evidence that SURVIVES a packaged build, where nothing forwards `console` —
+ * Field Drill B1 (design §5 amendment, D-R155-b6b finding 6) reads those rows, not the console. */
 export async function drainDesktopMaterializeQueue(
   state: DesktopMaterializeQueueState,
   notifier: DesktopMaterializeNotifier | null,

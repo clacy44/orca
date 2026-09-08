@@ -366,7 +366,14 @@ function isBootstrappableAgentRow(
 /** [S10-21c B4] Deduped exactly as `raiseMismatchAlarm` dedupes (Ruling 34 Addendum 20): identical
  * noise is silenced, any NEW fact still audits. Needed here specifically because a REFUSED
  * bootstrap repeats for as long as the pane keeps reporting — unlike the mismatch alarm, which
- * stops once the row agrees — so an unconditional row per hook report would flood the ledger. */
+ * stops once the row agrees — so an unconditional row per hook report would flood the ledger.
+ * [S10-21c B-final, D-R158-b4d finding 2] `reasonCode === ID_CHURN_REFUSAL_NOTE` is the SAME
+ * signal `raiseMismatchAlarm` (agent-lineage-contest-audit.ts) uses to skip its own INSERT: the
+ * transcript memo's per-pane distinct-(id,agentType) walk budget is exhausted for this window, so
+ * a report under a different agentType is a memo-key MISS that would otherwise write one
+ * unbounded row per (id, agentType) pair straight into the append-only ledger — the memo's own
+ * once-per-generation churn row already carries the fact. console.warn stays unconditional, same
+ * as the sibling alarm, so a churn-bounded pane is never silent. */
 function writeBootstrapAudit(
   db: Database.Database,
   params: LiveHookReportMismatchParams,
@@ -383,15 +390,25 @@ function writeBootstrapAudit(
     .get(params.paneKey, BOOTSTRAP_AUDIT_VERB) as
     | { outcome: string; reason_code: string | null }
     | undefined
-  if (newest?.outcome === outcome && newest.reason_code === reasonCode) {
-    return
+  const isDuplicateOfNewest = newest?.outcome === outcome && newest.reason_code === reasonCode
+  const churnBounded = reasonCode === ID_CHURN_REFUSAL_NOTE
+  if (!isDuplicateOfNewest && !churnBounded) {
+    writeAgentAudit(db, {
+      agentId,
+      actorPaneKey: params.paneKey,
+      actorHostId: params.hostId,
+      verb: BOOTSTRAP_AUDIT_VERB,
+      outcome,
+      reasonCode
+    })
   }
-  writeAgentAudit(db, {
+  console.warn('[S10-21c] session_identity_bootstrap', {
+    hostId: params.hostId,
+    paneKey: params.paneKey,
     agentId,
-    actorPaneKey: params.paneKey,
-    actorHostId: params.hostId,
-    verb: BOOTSTRAP_AUDIT_VERB,
     outcome,
-    reasonCode
+    reasonCode,
+    deduped: isDuplicateOfNewest,
+    churnBounded
   })
 }

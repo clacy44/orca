@@ -6,10 +6,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type Database from '../sqlite/sync-database'
 import { OrchestrationDb } from '../runtime/orchestration/db'
+import type { RuntimeEnsureAgentSessionResult } from '../../shared/agent-session-host-authority'
+import type { AgentLaunchSessionRow } from '../runtime/orchestration/agent-launch-sessions'
+import type { RestoreSweepDeps } from './restore-sweep-types'
 import {
   createDesktopMaterializeQueueState,
   enqueueRestoredPaneForMaterialization,
   drainDesktopMaterializeQueue,
+  recordDesktopMaterialize,
   type DesktopMaterializeNotifier,
   type RestoredPaneMaterializeSurface
 } from './restore-sweep-desktop-materialize-queue'
@@ -236,6 +240,28 @@ describe('S10-21c B6, design §2 S9, D-R153-b6: drainDesktopMaterializeQueue', (
     warn.mockRestore()
   })
 
+  // [S10-21c B-final, D-R157-b6c finding 4] The primitive wraps the renderer's own reply
+  // verbatim; agent_audit.reason_code is unbounded TEXT in an append-only table, so a
+  // pathological/large renderer error must not mint a row nothing can ever remove.
+  it('a very large (5 KB) reveal error message is bounded to 200 chars in the audit row', async () => {
+    rawDb()
+    const state = createDesktopMaterializeQueueState()
+    enqueueRestoredPaneForMaterialization(state, surface())
+    const hugeMessage = 'x'.repeat(5000)
+    const revealTerminalSession = vi.fn().mockRejectedValue(new Error(hugeMessage))
+    const notifier: DesktopMaterializeNotifier = { revealTerminalSession }
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    await drainDesktopMaterializeQueue(state, notifier, alwaysLive, noTitleFallback, db, HOST_ID)
+    const rows = auditRows('sweep_note', 'agent-30')
+    expect(rows).toHaveLength(1)
+    expect(rows[0].reason_code).toBe(`desktop_materialize_refused: reveal_error ${'x'.repeat(200)}`)
+    expect(rows[0].reason_code.length).toBe(
+      'desktop_materialize_refused: reveal_error '.length + 200
+    )
+    warn.mockRestore()
+  })
+
   it('a dead pty is skipped without a reveal attempt, deleted, and audited pty_gone', async () => {
     rawDb()
     const state = createDesktopMaterializeQueueState()
@@ -431,5 +457,124 @@ describe('S10-21c B6, design §2 S9, D-R153-b6: drainDesktopMaterializeQueue', (
     expect(okRows).toHaveLength(1)
     expect(okRows[0].reason_code).toBe('desktop_materialize: revealed tab=tab1')
     warn.mockRestore()
+  })
+})
+
+describe('S10-21c B-final, D-R157-b6c finding 3: recordDesktopMaterialize', () => {
+  let db: OrchestrationDb
+
+  afterEach(() => {
+    db?.close()
+  })
+
+  function rawDbForRecord(): Database.Database {
+    db = new OrchestrationDb(':memory:')
+    return (db as unknown as { db: Database.Database }).db
+  }
+
+  function auditRowsForRecord(agentId: string): { reason_code: string }[] {
+    const rawDbHandle = (db as unknown as { db: Database.Database }).db
+    return rawDbHandle
+      .prepare(`SELECT * FROM agent_audit WHERE verb = 'sweep_note' AND agent_id = ?`)
+      .all(agentId) as { reason_code: string }[]
+  }
+
+  function fakeDeps(over: Partial<RestoreSweepDeps> = {}): RestoreSweepDeps {
+    return {
+      getOrchestrationDb: () => db,
+      getOrchestrationCompatibilityHostId: () => HOST_ID,
+      getTerminalProcessIncarnation: () => 'pty-30:inc-30',
+      recordRestoredPaneForDesktopMaterialization: () => {},
+      ...over
+    } as unknown as RestoreSweepDeps
+  }
+
+  function createdResult(): RuntimeEnsureAgentSessionResult {
+    return {
+      terminal: {
+        handle: 'handle-30',
+        paneKey: 'tab1:00000000-0000-4000-8000-000000000030',
+        ptyId: 'pty-30',
+        worktreeId: 'wt-1',
+        title: 'chair-30'
+      },
+      disposition: 'adopted'
+    }
+  }
+
+  function fakeLaunchRow(): AgentLaunchSessionRow {
+    return {
+      seq: 1,
+      host_id: HOST_ID,
+      pane_key: 'tab1:00000000-0000-4000-8000-000000000030',
+      agent_type: 'claude',
+      session_id: 'sess-1',
+      previous_session_id: null,
+      launch_generation: 'gen-1',
+      agent_id: 'agent-30',
+      execution_host_id: 'local',
+      evidence: 'sweep_record',
+      recorded_at: new Date().toISOString()
+    }
+  }
+
+  // [D-R157-b6c finding 3] The Layer-2 restore already committed by the time this function runs
+  // (its own call-site comment promises a throw here is only ever an audited note) — but before
+  // this fix, `getTerminalProcessIncarnation` sat OUTSIDE the try, so a throwing accessor escaped
+  // uncaught into the caller's own per-candidate catch, which misclassifies an already-succeeded
+  // restore as `sweep_row_threw`.
+  it('a throwing accessor (getTerminalProcessIncarnation) never propagates — the failure is an audited note, never a failed restore', () => {
+    rawDbForRecord()
+    const deps = fakeDeps({
+      getTerminalProcessIncarnation: () => {
+        throw new Error('incarnation lookup exploded')
+      }
+    })
+    expect(() =>
+      recordDesktopMaterialize(deps, 'agent-30', createdResult(), fakeLaunchRow())
+    ).not.toThrow()
+    const rows = auditRowsForRecord('agent-30')
+    expect(rows).toHaveLength(1)
+    expect(rows[0].reason_code).toBe('desktop_materialize_note_failed: incarnation lookup exploded')
+  })
+
+  // The accessor that throws is the one that would have supplied `db` itself — no db means the
+  // catch's own audit write safely no-ops (via `auditSweepNoteSafe`) rather than throwing again.
+  it('a throwing getOrchestrationDb accessor never propagates, and writes no audit row (no db was ever available)', () => {
+    rawDbForRecord() // only so `afterEach` has a real (unused) db to close
+    const deps = fakeDeps({
+      getOrchestrationDb: () => {
+        throw new Error('db unavailable')
+      }
+    })
+    expect(() =>
+      recordDesktopMaterialize(deps, 'agent-30', createdResult(), fakeLaunchRow())
+    ).not.toThrow()
+  })
+
+  it('a throwing enqueue call (recordRestoredPaneForDesktopMaterialization) is still an audited note, unchanged from before this fix', () => {
+    rawDbForRecord()
+    const deps = fakeDeps({
+      recordRestoredPaneForDesktopMaterialization: () => {
+        throw new Error('queue full')
+      }
+    })
+    expect(() =>
+      recordDesktopMaterialize(deps, 'agent-30', createdResult(), fakeLaunchRow())
+    ).not.toThrow()
+    const rows = auditRowsForRecord('agent-30')
+    expect(rows).toHaveLength(1)
+    expect(rows[0].reason_code).toBe('desktop_materialize_note_failed: queue full')
+  })
+
+  it('an incomplete surface (no ptyId) is still audited incomplete_surface via the safe helper', () => {
+    rawDbForRecord()
+    const deps = fakeDeps()
+    const created = createdResult()
+    created.terminal.ptyId = null
+    recordDesktopMaterialize(deps, 'agent-30', created, fakeLaunchRow())
+    const rows = auditRowsForRecord('agent-30')
+    expect(rows).toHaveLength(1)
+    expect(rows[0].reason_code).toBe('desktop_materialize_refused: incomplete_surface')
   })
 })

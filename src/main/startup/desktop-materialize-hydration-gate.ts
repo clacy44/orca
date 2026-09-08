@@ -3,11 +3,15 @@
 // (index.ts ~3483) could fire BEFORE `hydrateWorkspaceSession` (App.tsx) replaces
 // `tabsByWorktree` wholesale — a reveal handled in that window creates a tab hydration then
 // discards, while the queue entry is already deleted and audited `revealed`: permanent silent
-// loss, no retry (D-R155-b6b finding 1). The renderer only invokes the
-// `app:recoverLegacyWorkerTerminalsForRendererStartup` IPC handler strictly after hydration
-// (App.tsx calls it at :1133, after hydration at :1027), so marking this flag on that handler's
-// first invocation is a sound proxy for "the renderer has hydrated" — and does not require
-// threading any renderer-side signal back into main.
+// loss, no retry (D-R155-b6b finding 1). App.tsx has FOUR call sites for the
+// `app:recoverLegacyWorkerTerminalsForRendererStartup` IPC handler this flag is set from: :1134
+// and :1146 on the normal path, both strictly after hydration (App.tsx :1027); :1236 and :1241
+// inside the startup-error catch, reached only when hydration itself THREW and never ran — safe
+// to mark there too, since that path never re-hydrates afterward (see the handler's own comment
+// in index.ts), so there is no later wholesale replacement left to wipe a reveal. [S10-21c
+// B-final, D-R157-b6c finding 2] So marking this flag on that handler's first invocation, on
+// EITHER path, is a sound proxy for "the renderer has hydrated, or degraded-mode-mounted with
+// nothing left to wipe" — and does not require threading any renderer-side signal back into main.
 //
 // Mirrors `restore-sweep-lock-release-guard.ts`'s split: a tiny mutable state object plus pure
 // functions over it, so the decision is testable without Electron or `index.ts`'s own startup

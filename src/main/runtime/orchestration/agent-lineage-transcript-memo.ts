@@ -30,9 +30,12 @@ const TRANSCRIPT_VERDICT_CACHE_MAX = 512
 /** First negative retry after 60s, doubling each re-check, capped at 15 min. */
 const NEGATIVE_TRANSCRIPT_BACKOFF_INITIAL_MS = 60_000
 const NEGATIVE_TRANSCRIPT_BACKOFF_CAP_MS = 15 * 60_000
-/** At most this many DISTINCT reported ids per pane may pay a walk inside the rolling window
- * below [D-R156 finding 3] — older ids age out on their own, so the bound refills over time
- * instead of sitting dead for the rest of the generation. */
+/** At most this many DISTINCT (reported id, agent type) PAIRS per pane may pay a walk inside the
+ * rolling window below [D-R156 finding 3; S10-21c B-final, D-R158-b4d finding 2] — older pairs
+ * age out on their own, so the bound refills over time instead of sitting dead for the rest of
+ * the generation. Keyed on the PAIR, not the id alone: agentType selects the file search inside
+ * the resolver (same reason the verdict-cache key covers it, D-R156 finding 1), so the same id
+ * reported under a second agent type is a genuinely new walk, not a re-walk of the first. */
 const DISTINCT_REPORTED_ID_CHURN_LIMIT = 8
 /** [D-R156 finding 3] The rolling window matches the negative backoff cap: a churn-refused id is
  * always retryable again within the same span a stuck negative verdict would recover on its own. */
@@ -46,15 +49,18 @@ type CachedTranscriptVerdict =
 
 let transcriptVerdictGeneration: string | undefined
 const transcriptVerdictCache = new Map<string, CachedTranscriptVerdict>()
-/** pane churn key -> (reported id -> when it first paid a walk, this window). */
+/** pane churn key -> (`<reported id>:<agent type>` pair -> when it FIRST paid a walk, this
+ * window — [S10-21c B-final, D-R158-b4d finding 4] never refreshed on a later re-walk of the
+ * same pair, so this is a rate window ("N new pairs per window"), not an occupancy gauge that
+ * a pane can hold full forever by keeping the same pairs hot). */
 const distinctReportedIdsSeenByPane = new Map<string, Map<string, number>>()
 
 /** [D-R156 finding 3] Drops entries older than the rolling window in place — called before every
- * size check so an aged-out id no longer counts against the budget. */
+ * size check so an aged-out pair no longer counts against the budget. */
 function pruneAgedOutChurnEntries(seenIds: Map<string, number>, now: number): void {
-  for (const [id, seenAt] of seenIds) {
+  for (const [pairKey, seenAt] of seenIds) {
     if (now - seenAt >= DISTINCT_REPORTED_ID_CHURN_WINDOW_MS) {
-      seenIds.delete(id)
+      seenIds.delete(pairKey)
     }
   }
 }
@@ -137,11 +143,19 @@ export async function checkTranscriptConjunctMemoized(
     distinctReportedIdsSeenByPane.set(paneChurnKey, seenIds)
   }
   pruneAgedOutChurnEntries(seenIds, now)
-  if (!seenIds.has(params.reportedSessionId) && seenIds.size >= DISTINCT_REPORTED_ID_CHURN_LIMIT) {
+  // [S10-21c B-final, D-R158-b4d findings 2/4] Keyed on the (id, agentType) PAIR — the same
+  // reported id under a different agent type is a new entry — and the timestamp is set ONLY the
+  // FIRST time a pair is seen: a later re-walk of the same pair (e.g. a negative retrying off its
+  // backoff) must not push its age-out further away, or a pane cycling the same handful of pairs
+  // could hold the budget full indefinitely instead of the window actually refilling.
+  const idChurnPairKey = `${params.reportedSessionId}:${agentType}`
+  if (!seenIds.has(idChurnPairKey) && seenIds.size >= DISTINCT_REPORTED_ID_CHURN_LIMIT) {
     writeIdChurnAuditOnce(db, params)
     return { ok: false, note: ID_CHURN_REFUSAL_NOTE }
   }
-  seenIds.set(params.reportedSessionId, now)
+  if (!seenIds.has(idChurnPairKey)) {
+    seenIds.set(idChurnPairKey, now)
+  }
   const verdict = await checkTranscriptConjunct(
     resolveResumeTranscript,
     agentType,

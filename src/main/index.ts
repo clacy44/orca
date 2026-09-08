@@ -898,10 +898,9 @@ ipcMain.handle('app:awaitFirstWindowStartupServices', async () => {
 })
 
 ipcMain.handle('app:recoverLegacyWorkerTerminalsForRendererStartup', () => {
-  // [S10-21c B6c, D-R155-b6b finding 1] The renderer only calls this handler strictly after
-  // `hydrateWorkspaceSession` (App.tsx :1027 -> :1133) — marking on invocation, not inside
-  // `reconcile` (which fires twice per IPC, see below), gates the end-of-sweep drain trigger
-  // (~:3483) so it never reveals into a pre-hydration renderer.
+  // [D-R155-b6b F1; D-R157-b6c F2] FOUR App.tsx call sites: :1134/:1146 (post-hydration) and
+  // :1236/:1241 (error catch, hydration never ran — safe: sets workspaceSessionReady directly,
+  // App.tsx :1250-1256, no re-hydrate to wipe a reveal). Gates the end-of-sweep trigger.
   markRendererHydratedForMaterialize(desktopMaterializeHydrationGate)
   return recoverLegacyWorkerTerminalsForRendererStartup({
     firstWindowStartupServicesReady,
@@ -3488,14 +3487,18 @@ void app.whenReady().then(async () => {
       await runStartupRestoreSweepBody(runtime)
       releaseRestoreSweepLock()
       desktopSweepLockReleased = true
-      // [S10-21c B6, design §2 S9; D-R153-b6 F8; D-R155-b6b finding 1] Second drain trigger — the
-      // renderer-startup handler's own hydration wait has a 30s bound; a sweep resuming several
-      // panes is not obviously under that. Gated on `shouldDrainAtEndOfSweep`: draining here
-      // before the renderer has hydrated would reveal a tab hydration then discards wholesale.
-      // When not yet set, this is a genuine no-op — the renderer-startup handler (which cannot
-      // fire before hydration) drains when it arrives.
+      // [D-R153-b6 F8; D-R155-b6b finding 1] Second drain trigger — the renderer-startup
+      // handler's 30s hydration wait may not cover a sweep resuming several panes. Gated on
+      // `shouldDrainAtEndOfSweep`, set by that handler (index.ts ~:900) from App.tsx :1134/:1146
+      // (post-hydration) or :1236/:1241 (error catch, safe — see that handler's own comment).
+      // [D-R157-b6c finding 1] Deferral is logged, not silent, so Field Drill B1 can tell
+      // "correctly deferred" apart from "never ran".
       if (shouldDrainAtEndOfSweep(desktopMaterializeHydrationGate)) {
         await runtime.materializeRestoredAgentPanes()
+      } else {
+        console.log(
+          '[restore-sweep] desktop materialize: end-of-sweep trigger deferred (renderer not hydrated yet)'
+        )
       }
     }
     const runtimeRpcStartResult = await shellPathReady

@@ -18,7 +18,14 @@ function paneSuffix(paneKey: string): string {
 }
 
 /** Exact pane-suffix lookup, any derived value — used to attribute a message's
- * sender to a directory row (send) and to find the caller's own row (check). */
+ * sender to a directory row (send) and to find the caller's own row (check).
+ * [S10-21c B-final, D-R158-b4d finding 7] `ORDER BY` prefers an EXACT `pane_key` match over a
+ * same-suffix sibling. Defense-in-depth, not a live-bug fix: `idx_agents_pane_suffix` (db.ts) is
+ * a UNIQUE index on `(host_id, suffix) WHERE tombstoned_at IS NULL`, so at most one non-
+ * tombstoned row can ever match a given suffix on one host today — the "arbitrary pick among
+ * siblings" scenario the finding inferred cannot occur while that index stands. Keeping the
+ * tie-break anyway means a future relaxation of that constraint degrades to "prefer the caller's
+ * own pane" rather than reintroducing silent ambiguity. */
 export function getAgentByPaneKey(
   db: Database.Database,
   hostId: string,
@@ -28,9 +35,11 @@ export function getAgentByPaneKey(
     .prepare(
       `SELECT * FROM agents
        WHERE host_id = ? AND tombstoned_at IS NULL
-         AND pane_key IS NOT NULL AND substr(pane_key, instr(pane_key, ':') + 1) = ?`
+         AND pane_key IS NOT NULL AND substr(pane_key, instr(pane_key, ':') + 1) = ?
+       ORDER BY (pane_key = ?) DESC
+       LIMIT 1`
     )
-    .get(hostId, paneSuffix(paneKey)) as AgentRow | undefined
+    .get(hostId, paneSuffix(paneKey), paneKey) as AgentRow | undefined
 }
 
 export type UpsertDerivedAgentForPaneParams = {

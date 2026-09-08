@@ -768,4 +768,115 @@ describe('S10-21c B4: live-report reconciliation (S3) and row bootstrap (S5)', (
     expect(result.kind).toBe('bootstrapped')
     expect(newestLaunchForPane(db, HOST_ID, PANE)?.execution_host_id).toBe('ssh:conn-1')
   })
+
+  it('S10-21c B-final, D-R158-b4d finding 2: the distinct-id churn budget counts (id, agentType) PAIRS — the SAME id under a SECOND agent type is a new entry against the budget', async () => {
+    const db = rawDb()
+    insertAgent(db, { id: 'agt_1', display_name: 'vps-services', pane_key: PANE })
+    const resolver = vi.fn(STUB_ONLY)
+    for (let i = 0; i < 8; i++) {
+      await evaluateLiveHookReportMismatch(
+        db,
+        params({ reportedSessionId: `sess-${i}`, reportedAgentType: 'claude' }),
+        resolver
+      )
+    }
+    expect(resolver).toHaveBeenCalledTimes(8)
+
+    // sess-0 already paid a walk under 'claude' — reporting it again under a DIFFERENT type is a
+    // NEW (id, agentType) pair. The budget is already full: churn-refused, no walk. Before this
+    // fix (id-only key) this would have been treated as an ALREADY-SEEN id and walked anyway.
+    const result = await evaluateLiveHookReportMismatch(
+      db,
+      params({ reportedSessionId: 'sess-0', reportedAgentType: 'codex' }),
+      resolver
+    )
+    expect(resolver).toHaveBeenCalledTimes(8)
+    expect(result).toEqual({ kind: 'bootstrap_refused', reason: 'live_report_id_churn_bounded' })
+  })
+
+  it('S10-21c B-final, D-R158-b4d finding 4: a churn-budget entry ages out 15 min after it FIRST entered, even when continuously RE-WALKED in between (a rate window, not an occupancy gauge) (fake timers)', async () => {
+    vi.useFakeTimers()
+    try {
+      const db = rawDb()
+      insertAgent(db, { id: 'agt_1', display_name: 'vps-services', pane_key: PANE })
+      const resolver = vi.fn(STUB_ONLY)
+      // Fill the budget with 8 distinct pairs, all first-walked at t=0.
+      for (let i = 0; i < 8; i++) {
+        await evaluateLiveHookReportMismatch(
+          db,
+          params({ reportedSessionId: `sess-${i}` }),
+          resolver
+        )
+      }
+      expect(resolver).toHaveBeenCalledTimes(8)
+
+      // t=10min: each negative's backoff has long elapsed — re-walk all 8 to keep them "hot". If
+      // a re-walk refreshed the churn-budget timestamp (occupancy semantics), this would push
+      // every entry's age-out out to t=25min.
+      vi.advanceTimersByTime(10 * 60_000)
+      for (let i = 0; i < 8; i++) {
+        await evaluateLiveHookReportMismatch(
+          db,
+          params({ reportedSessionId: `sess-${i}` }),
+          resolver
+        )
+      }
+      expect(resolver).toHaveBeenCalledTimes(16)
+
+      // t=14min: still inside the ORIGINAL 15-min window from t=0 — a 9th, brand-new pair is
+      // still refused.
+      vi.advanceTimersByTime(4 * 60_000)
+      const stillBlocked = await evaluateLiveHookReportMismatch(
+        db,
+        params({ reportedSessionId: 'sess-9' }),
+        resolver
+      )
+      expect(stillBlocked).toEqual({
+        kind: 'bootstrap_refused',
+        reason: 'live_report_id_churn_bounded'
+      })
+      expect(resolver).toHaveBeenCalledTimes(16)
+
+      // t=16min: past 15 min since the FIRST walk (t=0) — every original entry ages out despite
+      // having been re-walked at t=10min. Under the occupancy bug they would not free up until
+      // t=25min and the 9th pair would still be refused here.
+      vi.advanceTimersByTime(2 * 60_000)
+      const nowWalks = await evaluateLiveHookReportMismatch(
+        db,
+        params({ reportedSessionId: 'sess-9' }),
+        resolver
+      )
+      expect(resolver).toHaveBeenCalledTimes(17)
+      expect(nowWalks).toEqual({
+        kind: 'bootstrap_refused',
+        reason: 'resume_target_absent session sess-9'
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('S10-21c B-final, D-R158-b4d finding 2: once the churn bound is hit, the BOOTSTRAP ledger stops growing for further distinct (id, agentType) pairs in that window — at most 9 agent_audit rows for 20 distinct pairs, console.warn still fires unconditionally', async () => {
+    const db = rawDb()
+    insertAgent(db, { id: 'agt_1', display_name: 'vps-services', pane_key: PANE })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      for (let i = 0; i < 20; i++) {
+        const result = await evaluateLiveHookReportMismatch(
+          db,
+          params({ reportedSessionId: `boot-${i}`, reportedAgentType: 'claude' }),
+          STUB_ONLY
+        )
+        expect(result.kind).toBe('bootstrap_refused')
+      }
+      const refusedRows = audits(db, PANE, 'session_identity_bootstrap')
+      expect(refusedRows.length).toBeLessThanOrEqual(9)
+      expect(refusedRows).toHaveLength(8)
+      // console.warn keeps firing for every report, even once the ledger stops growing.
+      expect(warn).toHaveBeenCalledTimes(20)
+      expect(warn.mock.calls[19][1]).toMatchObject({ churnBounded: true })
+    } finally {
+      warn.mockRestore()
+    }
+  })
 })
