@@ -6,7 +6,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AgentHookServer } from './server'
 import {
   getWindowsManagedLifecycleHook,
@@ -14,10 +14,12 @@ import {
 } from '../claude/hook-settings'
 import { makePaneKey } from '../../shared/stable-pane-id'
 import { HOOK_REQUEST_MAX_BYTES } from '../../shared/agent-hook-listener'
+import { cancelTrackingResponse } from '../lib/unread-response-body.test-fixtures'
 import {
   buildWindowsHookHostFormBody,
   parseWindowsHookHostDescriptor,
   parseWindowsHookHostEndpointFile,
+  postWindowsHookHostPayload,
   readWindowsHookHostStdin,
   resolveWindowsHookHostContext,
   runWindowsHookHostOnce,
@@ -174,6 +176,56 @@ describe('readWindowsHookHostStdin', () => {
     const result = await readWindowsHookHostStdin(stream, { deadlineMs: 20, capBytes: 1_000_000 })
     expect(result).toBe('partial')
     stream.end()
+  })
+})
+
+describe('postWindowsHookHostPayload', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  // Regression: postWindowsHookHostPayload awaited fetch and never touched the response,
+  // the crash pattern global-fetch-call-site-audit.test.ts guards (nodejs/undici#5360,
+  // orca#8695). Same shape as every other cancelUnreadResponseBody call site's test
+  // (e.g. gitea/client.test.ts) — a response whose body reports cancellation.
+  it('cancels the unread response body so bundled undici cannot crash on socket close', async () => {
+    let cancelledBodies = 0
+    const fetchMock = vi.fn(async () =>
+      cancelTrackingResponse(200, () => {
+        cancelledBodies += 1
+      })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await postWindowsHookHostPayload({
+      port: '9', // discarded; fetch itself is stubbed
+      token: 'test-token',
+      pathname: '/hook/claude',
+      body: 'hook_event_name=SessionStart'
+    })
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(cancelledBodies).toBe(1)
+  })
+
+  it('cancels the unread body on the !ok path too', async () => {
+    let cancelledBodies = 0
+    const fetchMock = vi.fn(async () =>
+      cancelTrackingResponse(500, () => {
+        cancelledBodies += 1
+      })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await postWindowsHookHostPayload({
+      port: '9',
+      token: 'test-token',
+      pathname: '/hook/claude',
+      body: 'hook_event_name=SessionStart'
+    })
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(cancelledBodies).toBe(1)
   })
 })
 
