@@ -89,17 +89,19 @@ export class TerminalHost {
     this.getAliveSession(sessionId).resize(cols, rows)
   }
 
-  // Why null-not-throw (unlike write/resize): pause/resume are best-effort hints against a session that may have exited.
-  pauseProducer(sessionId: string): void {
+  // Why null-not-throw (unlike write/resize): pause/resume are best-effort hints against a session
+  // that may have exited. D-R164 H2: reason threads through to Session's Set<string> — 'main' for
+  // the RPC pausePty/resumePty path, 'socket-depth' for the daemon's own socket pacer.
+  pauseProducer(sessionId: string, reason: string): void {
     const session = this.sessions.get(sessionId)
     if (!session || !session.isAlive) {
       return
     }
-    session.pauseProducer()
+    session.pauseProducer(reason)
   }
 
-  resumeProducer(sessionId: string): void {
-    this.sessions.get(sessionId)?.resumeProducer()
+  resumeProducer(sessionId: string, reason: string): void {
+    this.sessions.get(sessionId)?.resumeProducer(reason)
   }
 
   kill(sessionId: string, opts: { immediate?: boolean } = {}): Promise<void> {
@@ -222,6 +224,22 @@ export class TerminalHost {
 
   listSessions(): SessionInfo[] {
     return listLiveTerminalHostSessions(this.sessions, this.agentSessionOwners)
+  }
+
+  /** R117 FIX 5: per-session pendingOutputBytes for the 60s heap/backlog self-report — bypasses
+   *  SessionInfo/listSessions on purpose so the log line stays off the RPC wire contract. */
+  listPendingOutputByteCounts(): { sessionId: string; pendingOutputBytes: number }[] {
+    const result: { sessionId: string; pendingOutputBytes: number }[] = []
+    for (const session of this.sessions.values()) {
+      if (!session.isAlive) {
+        continue
+      }
+      result.push({
+        sessionId: session.sessionId,
+        pendingOutputBytes: session.pendingOutputByteCount
+      })
+    }
+    return result
   }
 
   dispose(): Promise<void> {

@@ -141,7 +141,8 @@ export class Session {
   private pendingOutputOverflowed = false
   private pendingOutputSeq = 0
   private outputSequence = 0
-  private producerPaused = false
+  // D-R164 H2: reason-keyed (Set<string>) — see pauseProducer/resumeProducer.
+  private producerPauseReasons = new Set<string>()
   private producerPauseFailsafeTimer: ReturnType<typeof setTimeout> | null = null
   private readonly _historySeeded: boolean | undefined
   private forceKillSent = false
@@ -237,6 +238,11 @@ export class Session {
     return this._state !== 'exited'
   }
 
+  /** R117 FIX 5: exposes the private pendingOutputBytes total for the 60s heap/backlog self-report. */
+  get pendingOutputByteCount(): number {
+    return this.pendingOutputBytes
+  }
+
   /** A viewing client is attached; a dropped transport must clear this or pause/resume semantics leak. */
   get hasAttachedClients(): boolean {
     return this.attachedClients.length > 0
@@ -299,36 +305,55 @@ export class Session {
   }
 
   /** Producer-side flow control: stop reading the PTY fd so a flooding child blocks on write.
-   *  Arms the lost-resume failsafe; re-pausing re-arms it. */
-  pauseProducer(): void {
+   *  D-R164 H2: reason-keyed over a Set — two independent controllers (main's RPC pausePty/
+   *  resumePty 'main', the daemon's own socket-depth pacer 'socket-depth') each hold their own
+   *  reason; paused while the set is non-empty, so one controller's resume cannot release a pause
+   *  the other still wants. Arms the lost-resume failsafe (shared across reasons, not per-reason);
+   *  re-pausing (any reason) re-arms it. */
+  pauseProducer(reason: string): void {
     if (this._state === 'exited' || this._disposed) {
       return
     }
-    this.producerPaused = true
+    this.producerPauseReasons.add(reason)
     this.subprocess.pause?.()
     if (this.producerPauseFailsafeTimer) {
       clearTimeout(this.producerPauseFailsafeTimer)
     }
     this.producerPauseFailsafeTimer = setTimeout(() => {
       this.producerPauseFailsafeTimer = null
-      this.producerPaused = false
+      // Why all reasons: the failsafe exists to guarantee a lost resume never wedges the PTY
+      // forever — that guarantee must hold regardless of how many controllers still think they're
+      // pausing it.
+      this.producerPauseReasons.clear()
       this.subprocess.resume?.()
     }, PRODUCER_PAUSE_FAILSAFE_MS)
   }
 
-  resumeProducer(): void {
-    this.releaseProducerPause({ resume: true })
+  /** Releases this reason's hold; resumes only once no reason remains. */
+  resumeProducer(reason: string): void {
+    if (!this.producerPauseReasons.delete(reason)) {
+      return
+    }
+    if (this.producerPauseReasons.size > 0) {
+      return
+    }
+    if (this.producerPauseFailsafeTimer) {
+      clearTimeout(this.producerPauseFailsafeTimer)
+      this.producerPauseFailsafeTimer = null
+    }
+    this.subprocess.resume?.()
   }
 
+  /** Hard reset for teardown/lifecycle paths: clears every reason unconditionally. */
   private releaseProducerPause(opts: { resume: boolean }): void {
     if (this.producerPauseFailsafeTimer) {
       clearTimeout(this.producerPauseFailsafeTimer)
       this.producerPauseFailsafeTimer = null
     }
-    if (!this.producerPaused) {
+    if (this.producerPauseReasons.size === 0) {
       return
     }
-    this.producerPaused = false
+    this.producerPauseReasons.clear()
     if (opts.resume) {
       this.subprocess.resume?.()
     }

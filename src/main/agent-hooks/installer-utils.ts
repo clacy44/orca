@@ -70,13 +70,10 @@ export function createManagedCommandMatcher(
   scriptFileName: string
 ): (command: string | undefined) => boolean {
   const scriptStem = scriptFileName.replace(/\.(?:cmd|ps1|sh)$/, '')
-  // Why: installs use .cmd/.ps1 (Windows) or .sh (SSH/POSIX); match all so a platform switch still sweeps stale hooks.
-  const needles = [
-    `agent-hooks/${scriptFileName}`,
-    `agent-hooks/${scriptStem}.cmd`,
-    `agent-hooks/${scriptStem}.ps1`,
-    `agent-hooks/${scriptStem}.sh`
-  ]
+  // Why (R105-b D4): extension-less needle is a superset of .cmd/.ps1/.sh AND the winexe hook
+  // host's `--descriptor <path>.json` arg, so one substring check sweeps every generation —
+  // legacy conhost/cmd.exe-direct entries (which still carry the script filename in args) included.
+  const needle = `agent-hooks/${scriptStem}`
   return (command) => {
     if (!command) {
       return false
@@ -84,7 +81,7 @@ export function createManagedCommandMatcher(
     const decodedCommand = decodePowerShellEncodedCommand(command)
     const searchText = decodedCommand ? `${command}\n${decodedCommand}` : command
     const normalizedCommand = searchText.replaceAll('\\', '/')
-    return needles.some((needle) => normalizedCommand.includes(needle))
+    return normalizedCommand.includes(needle)
   }
 }
 

@@ -244,7 +244,20 @@ describe('Windows managed hook stdin structure', () => {
     try {
       withPlatform('win32', () => {
         for (const entry of LOCAL_INSTALLERS) {
-          expect(entry.install().state, `${entry.agent} install status`).toBe('installed')
+          const status = entry.install()
+          // SCENARIO_CORRECTION (M3, D-R166-lane3-b1c-review.md): on simulated win32 with no
+          // packaged orca-hook-host.exe, Claude's install() now reports the loud
+          // 'windows_hook_host_unavailable' skip rather than a false 'installed' — it still
+          // writes claude-hook.cmd below (the OpenClaude/rollback path), which is what this
+          // test's script-shape assertions exercise.
+          if (entry.agent === 'claude') {
+            expect(status.state, `${entry.agent} install status`).toBe('skipped')
+            expect(status.skipReason, `${entry.agent} skip reason`).toBe(
+              'windows_hook_host_unavailable'
+            )
+          } else {
+            expect(status.state, `${entry.agent} install status`).toBe('installed')
+          }
         }
       })
       const hooksDir = join(home, '.orca', 'agent-hooks')

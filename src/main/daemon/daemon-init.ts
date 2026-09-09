@@ -69,6 +69,7 @@ import {
 } from '../claude-accounts/live-pty-gate'
 import { parseDaemonReadyIdentity, readDaemonProcessIncarnation } from './daemon-ready-identity'
 import type { DaemonEndpointIdentity } from './daemon-hello-protocol'
+import { resolveDaemonHeapCeilingMb } from './daemon-heap-headroom'
 
 // Why: daemon init runs concurrent with window load, so an in-process t timestamp (not harness stderr timing) measures cold-start.
 function logDaemonMilestone(event: string, details: Record<string, unknown> = {}): void {
@@ -83,6 +84,11 @@ function logDaemonMilestone(event: string, details: Record<string, unknown> = {}
 // Why: extra hello+listSessions probes (~5s each) giving a wedged-but-connectable daemon ~60s grace to answer and keep its live sessions before a permanent wedge (#8689) is replaced; raise only alongside the fail-open cap.
 export const WEDGED_DAEMON_GRACE_RETRIES = 11
 const DAEMON_SELF_SHUTDOWN_WAIT_MS = 5_000
+// R117 FIX 4: the daemon fork previously ran at V8's unset default (~4GB on a 64-bit host) — the
+// field cliff (two OOM deaths, diag-r117-2026-09-08.md). Pinning it moves the cliff to a
+// predictable point far above SOCKET_WRITE_CEILING_BYTES (64MB, daemon-stream-data-batcher.ts) on
+// both platforms. D-R164 M1: sized RAM-aware (floor 3072 / cap 4096 / ORCA_DAEMON_HEAP_MB
+// override) instead of a fixed, unmeasured 2048 — see daemon-heap-headroom.ts.
 const DAEMON_CHILD_TERMINATION_GRACE_MS = 5_000
 const DAEMON_CHILD_FORCE_EXIT_WAIT_MS = 1_000
 
@@ -900,6 +906,12 @@ function createOutOfProcessLauncher(
             // the fd failed to open.
             detached: true,
             stdio: ['ignore', 'ignore', stderrFd ?? 'ignore', 'ipc'],
+            // R117 FIX 4 (D-R164 M1 comment correction): this flag only moves WHERE V8 aborts —
+            // from its unset ~4GB-field-cliff default to a predictable, RAM-aware bound. It does
+            // NOT itself produce loud degradation; the dataGap signal comes from the separate
+            // socket-write ceiling (daemon-stream-socket-write-ceiling.ts), which stays well
+            // under this heap bound so the ceiling trips before the heap ever does.
+            execArgv: [`--max-old-space-size=${resolveDaemonHeapCeilingMb()}`],
             // Why: run the byte-identical relocated Orca.exe so the image path sits outside the updater's kill zone.
             ...(relocatedHost ? { execPath: relocatedHost.execPath } : {}),
             // Why: run the fork as plain Node so Electron's GPU/display init can't interfere with node-pty's posix_spawn of the spawn-helper.

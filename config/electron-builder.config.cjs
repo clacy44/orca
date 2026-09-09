@@ -319,6 +319,10 @@ module.exports = {
         to: 'bin/orca.exe'
       },
       {
+        from: 'native/windows-hook-host/.build/orca-hook-host.exe',
+        to: 'bin/orca-hook-host.exe'
+      },
+      {
         from: 'node_modules/agent-browser/bin/agent-browser-win32-x64.exe',
         to: 'agent-browser-win32-x64.exe'
       },

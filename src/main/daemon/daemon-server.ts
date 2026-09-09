@@ -6,7 +6,12 @@ import { writeFileSync, chmodSync, unlinkSync } from 'node:fs'
 import { StringDecoder } from 'node:string_decoder'
 import { encodeNdjson, createNdjsonParser } from './ndjson'
 import { TerminalHost } from './terminal-host'
-import { DaemonStreamDataBatcher } from './daemon-stream-data-batcher'
+import {
+  DaemonStreamDataBatcher,
+  PRODUCER_PAUSE_HIGH_WATERMARK_BYTES,
+  PRODUCER_PAUSE_LOW_WATERMARK_BYTES
+} from './daemon-stream-data-batcher'
+import { startDaemonHeapObservabilitySampler } from './daemon-heap-observability-sampler'
 import {
   BackgroundTransientFactRelay,
   BACKGROUND_STREAM_DROP_ENABLED
@@ -17,7 +22,7 @@ import {
   startDaemonStreamBacklogProbe
 } from './daemon-stream-backlog-probe'
 import { readCurrentProcessMacSystemResolverHealth } from '../network/macos-system-resolver-health'
-import type { SubprocessHandle } from './session'
+import { PRODUCER_PAUSE_FAILSAFE_MS, type SubprocessHandle } from './session'
 import { checkPtySpawnHealth } from './pty-subprocess'
 import { createNoopDaemonFileLog, type DaemonFileLog } from './daemon-file-log'
 import { isTuiAgent } from '../../shared/tui-agent-config'
@@ -107,6 +112,17 @@ type PendingShutdownReply = {
   start: () => void
 }
 
+// R117 FIX 3 (D-R167 M-3): derived from session.ts PRODUCER_PAUSE_FAILSAFE_MS, not hand-copied —
+// a deep-socket producer pause must always re-assert before the session's own failsafe clears it.
+const PRODUCER_PAUSE_REASSERT_FRACTION = 0.8
+export const PRODUCER_PAUSE_REASSERT_MS = Math.round(
+  PRODUCER_PAUSE_FAILSAFE_MS * PRODUCER_PAUSE_REASSERT_FRACTION
+)
+// D-R164 H2: this daemon-side pacer's own reason key into Session's reason-keyed pause Set —
+// distinct from the RPC pausePty/resumePty path's 'main', so one controller's resume can never
+// release the other's pause.
+const SOCKET_DEPTH_PAUSE_REASON = 'socket-depth'
+
 export class DaemonServer {
   // Why: survive long enough to adopt a first client pair, but don't orphan forever if the parent crashes first.
   private static readonly INITIAL_ADOPTION_TIMEOUT_MS = 2 * 60 * 1000
@@ -160,6 +176,8 @@ export class DaemonServer {
     {
       isSessionDroppable: (sessionId) =>
         BACKGROUND_STREAM_DROP_ENABLED && this.transientFactRelay.isBackgrounded(sessionId),
+      onAfterSocketWrite: (clientId, sessionId) =>
+        this.handleAfterStreamSocketWrite(clientId, sessionId),
       salvageDroppedData: (dropped) => {
         if (!dropped.includes('\x1b')) {
           return ''
@@ -189,6 +207,14 @@ export class DaemonServer {
   private pendingPtySpawnPreparations = new Map<string, Set<PendingPtySpawnPreparation>>()
   private historySeedTransfers = new TerminalHistorySeedTransferRegistry()
   private stopStreamBacklogProbe: () => void = () => {}
+  private stopHeapObservabilitySampler: () => void = () => {}
+  // R117 FIX 3: sessionId -> {clientId, reassert interval} while that session's producer is paused
+  // off its own client socket's depth; re-fires below the session-side PRODUCER_PAUSE_FAILSAFE_MS
+  // (5s) self-resume. clientId lets a 'drain' on that client resume every session it paused (H1).
+  private producerPauseReassertTimers = new Map<
+    string,
+    { clientId: string; timer: ReturnType<typeof setInterval> }
+  >()
 
   // Why: bypass batching within this window so keystroke echo/redraws skip the daemon's fixed batch delay.
   private static readonly INTERACTIVE_OUTPUT_WINDOW_MS = 100
@@ -236,6 +262,7 @@ export class DaemonServer {
         this.lastInputAtBySessionId.delete(sessionId)
         this.transientFactRelay.onSessionExit(sessionId)
         this.streamDataBatcher.refreshSessionDroppability(sessionId)
+        this.clearProducerPauseReassert(sessionId)
         opts.onPtySessionExit?.(sessionId)
         this.reevaluateIdleShutdown()
       }
@@ -251,6 +278,96 @@ export class DaemonServer {
       backgroundedSessionIdSuffixes: this.transientFactRelay.backgroundedSessionIdSuffixes()
     }))
     this.log = opts.log ?? createNoopDaemonFileLog()
+    // R117 FIX 5: unconditional (no env gate), unlike startDaemonStreamBacklogProbe above.
+    this.stopHeapObservabilitySampler = startDaemonHeapObservabilitySampler(
+      () => ({
+        clients: Array.from(this.clients.values(), (client) => ({
+          clientId: client.clientId,
+          socketBufferedBytes: client.streamSocket?.writableLength ?? 0,
+          batcherQueuedChars: this.streamDataBatcher.queuedCharsForClient(client.clientId)
+        })),
+        sessions: this.host.listPendingOutputByteCounts()
+      }),
+      this.log
+    )
+  }
+
+  // R117 FIX 3 (D-R164 H1): pause this session's producer while its client socket is deep, with
+  // hysteresis (PRODUCER_PAUSE_HIGH/LOW_WATERMARK_BYTES) so a draining queue cannot flap
+  // pause/resume once per flush slice; reassert below the daemon's 5s self-resume failsafe
+  // (session.ts PRODUCER_PAUSE_FAILSAFE_MS) until the socket drains BELOW LOW. The 'drain' handler
+  // below also resumes directly — this per-write path alone misses the case where the
+  // pause-crossing write is the pass's last entry (no later write to observe the drop).
+  // D-R167 M-1: HIGH (256KB) is composed UNREACHABLE — the batcher's own shallow-echo hold-gate
+  // (128KB) plus its 64KB write slice cap the client socket around ~192KB, so this pacer only ever
+  // fires as the BACKSTOP behind the batcher's 32MB write-through valve, never off raw socket
+  // depth alone. See daemon-stream-data-batcher.ts's watermark comment for the full accounting.
+  private handleAfterStreamSocketWrite(clientId: string, sessionId: string): void {
+    const client = this.clients.get(clientId)
+    const socketBufferedBytes = client?.streamSocket?.writableLength ?? 0
+    const alreadyPaused = this.producerPauseReassertTimers.has(sessionId)
+    if (!alreadyPaused && socketBufferedBytes >= PRODUCER_PAUSE_HIGH_WATERMARK_BYTES) {
+      this.host.pauseProducer(sessionId, SOCKET_DEPTH_PAUSE_REASON)
+      this.armProducerPauseReassert(clientId, sessionId)
+      return
+    }
+    if (alreadyPaused && socketBufferedBytes <= PRODUCER_PAUSE_LOW_WATERMARK_BYTES) {
+      this.clearProducerPauseReassert(sessionId)
+      this.host.resumeProducer(sessionId, SOCKET_DEPTH_PAUSE_REASON)
+    }
+  }
+
+  /** 'drain' wake-up (H1): resume every session this client's socket depth paused, once the
+   *  socket itself — not just the next write — reports below LOW. Covers the last-entry-of-pass
+   *  case handleAfterStreamSocketWrite cannot: after that write the batch is empty, so no later
+   *  onAfterSocketWrite call ever re-checks this session. */
+  private resumeProducersPausedByClientDrain(clientId: string): void {
+    const client = this.clients.get(clientId)
+    const socketBufferedBytes = client?.streamSocket?.writableLength ?? 0
+    if (socketBufferedBytes > PRODUCER_PAUSE_LOW_WATERMARK_BYTES) {
+      return
+    }
+    for (const [sessionId, entry] of Array.from(this.producerPauseReassertTimers)) {
+      if (entry.clientId !== clientId) {
+        continue
+      }
+      this.clearProducerPauseReassert(sessionId)
+      this.host.resumeProducer(sessionId, SOCKET_DEPTH_PAUSE_REASON)
+    }
+  }
+
+  private armProducerPauseReassert(clientId: string, sessionId: string): void {
+    if (this.producerPauseReassertTimers.has(sessionId)) {
+      return
+    }
+    const timer = setInterval(() => {
+      const client = this.clients.get(clientId)
+      const socketBufferedBytes = client?.streamSocket?.writableLength ?? 0
+      if (!client?.streamSocket || client.streamSocket.destroyed) {
+        // D-R164 L2: the vanished client can never drain, so leaving the producer paused would
+        // wedge it until the session-side 5s failsafe — resume immediately instead of just
+        // stopping the reassert.
+        this.clearProducerPauseReassert(sessionId)
+        this.host.resumeProducer(sessionId, SOCKET_DEPTH_PAUSE_REASON)
+        return
+      }
+      if (socketBufferedBytes <= PRODUCER_PAUSE_LOW_WATERMARK_BYTES) {
+        this.clearProducerPauseReassert(sessionId)
+        this.host.resumeProducer(sessionId, SOCKET_DEPTH_PAUSE_REASON)
+        return
+      }
+      this.host.pauseProducer(sessionId, SOCKET_DEPTH_PAUSE_REASON)
+    }, PRODUCER_PAUSE_REASSERT_MS)
+    timer.unref?.()
+    this.producerPauseReassertTimers.set(sessionId, { clientId, timer })
+  }
+
+  private clearProducerPauseReassert(sessionId: string): void {
+    const entry = this.producerPauseReassertTimers.get(sessionId)
+    if (entry) {
+      clearInterval(entry.timer)
+      this.producerPauseReassertTimers.delete(sessionId)
+    }
   }
 
   async start(): Promise<void> {
@@ -496,6 +613,10 @@ export class DaemonServer {
   private async disposeDaemonResources(): Promise<void> {
     this.stopEndpointOwnershipWatch()
     this.stopStreamBacklogProbe()
+    this.stopHeapObservabilitySampler()
+    for (const sessionId of Array.from(this.producerPauseReassertTimers.keys())) {
+      this.clearProducerPauseReassert(sessionId)
+    }
     this.transientFactRelay.dispose()
     this.cancelAllPendingPtySpawnPreparations()
     try {
@@ -812,6 +933,9 @@ export class DaemonServer {
     // Why: 'drain' is the wake-up for the batcher's shallow-gate held bulk.
     socket.on('drain', () => {
       this.streamDataBatcher.flush(client.clientId)
+      // D-R164 H1: flush() alone misses a session paused by its own last-entry-of-pass write
+      // (batch already empty, no onAfterSocketWrite left to fire) — resume it here instead.
+      this.resumeProducersPausedByClientDrain(client.clientId)
     })
 
     const cleanup = (): void => {
@@ -1196,11 +1320,11 @@ export class DaemonServer {
         return {}
 
       case 'pausePty':
-        this.host.pauseProducer(request.payload.sessionId)
+        this.host.pauseProducer(request.payload.sessionId, 'main')
         return {}
 
       case 'resumePty':
-        this.host.resumeProducer(request.payload.sessionId)
+        this.host.resumeProducer(request.payload.sessionId, 'main')
         return {}
 
       case 'setSessionBackground': {
