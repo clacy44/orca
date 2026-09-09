@@ -91,12 +91,16 @@ export type AgentLaunchAdmissionContext = {
    * (`getAgentByPaneKey` matches by pane SUFFIX — derived-agent-rows.ts:22-34 — so it can
    * legitimately differ from `claimantPaneKey`, the pane the caller-origin SELF_RESUME actually
    * landed on). The runtime-side handler notices BOTH when they differ, one when they don't. */
+  // [S10-21d b3c, chair ruling on b6's open question] `arm` names the arm that produced the
+  // row — a field reader can then tell a false 'self_resume' contest from a real one (R119 fix
+  // 2's own point), rather than every arm sharing one label.
   contestedLineage: (
     claimantPaneKey: string,
     registeredPaneKey: string,
     registeredAgentId: string,
     recordedSessionId: string,
-    reportedSessionId: string
+    reportedSessionId: string,
+    arm: 'self_resume' | 'caller_resume' | 'host_minted'
   ) => void
 }
 
@@ -428,7 +432,15 @@ export async function admitAgentLaunch(
       // [S10-21d b6, R119 fix 2] Shared contest-or-supersede helper — now threads both session
       // ids through to `contestedLineage`.
       const priorSessionId = newestRow?.session_id ?? 'none'
-      contestOrSupersedeDerivedRow(db, ctx, paneKey, registeredRow, priorSessionId, x)
+      contestOrSupersedeDerivedRow(
+        db,
+        ctx,
+        paneKey,
+        registeredRow,
+        priorSessionId,
+        x,
+        'caller_resume'
+      )
       // [forced deviation from HOST_MINTED's shape, deliberate] HOST_MINTED/HOST_RESUME notice
       // BEFORE their `recordLaunch`; this notices AFTER it, so a refused resume never emits a
       // notice claiming a resume that did not happen.
@@ -514,7 +526,15 @@ export async function admitAgentLaunch(
     // a DERIVED registered row gets its own distinct audit outcome instead of silence.
     // [S10-21d b6, R119 fix 2] Shared contest-or-supersede helper — both session ids threaded.
     const priorSessionId = newestRow?.session_id ?? 'none'
-    contestOrSupersedeDerivedRow(db, ctx, paneKey, registeredRow, priorSessionId, sessionId)
+    contestOrSupersedeDerivedRow(
+      db,
+      ctx,
+      paneKey,
+      registeredRow,
+      priorSessionId,
+      sessionId,
+      'host_minted'
+    )
     // [D-R104 F-12] A restated row is not this call's to confirm/compensate over.
     if (result.restated) {
       return passThrough(nextSpawnOptions, 'host_minted')

@@ -14,12 +14,15 @@ import {
 export type SelfResumeCtx = {
   hostId: string
   notice: (paneKey: string, verb: string, reasonCode: string) => void
+  // [S10-21d b3c, chair ruling on b6's open question] `arm` names the arm that produced the
+  // row — see agent-launch-admission.ts's own copy of this doc comment.
   contestedLineage: (
     claimantPaneKey: string,
     registeredPaneKey: string,
     registeredAgentId: string,
     recordedSessionId: string,
-    reportedSessionId: string
+    reportedSessionId: string,
+    arm: 'self_resume' | 'caller_resume' | 'host_minted'
   ) => void
 }
 
@@ -61,7 +64,8 @@ export function auditSelfResume(
     registeredPaneKey,
     registeredRow.id,
     recordedSessionId,
-    reportedSessionId
+    reportedSessionId,
+    'self_resume'
   )
 }
 
@@ -75,7 +79,8 @@ export function contestOrSupersedeDerivedRow(
   paneKey: string,
   registeredRow: RegisteredRowRef | undefined,
   recordedSessionId: string,
-  reportedSessionId: string
+  reportedSessionId: string,
+  arm: 'caller_resume' | 'host_minted'
 ): void {
   if (registeredRow === undefined) {
     return
@@ -86,7 +91,8 @@ export function contestOrSupersedeDerivedRow(
       registeredRow.pane_key ?? paneKey,
       registeredRow.id,
       recordedSessionId,
-      reportedSessionId
+      reportedSessionId,
+      arm
     )
     return
   }

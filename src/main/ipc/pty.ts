@@ -901,12 +901,17 @@ export function launchAdmissionBundle(
       // [S10-21d b6, R119 fix 2] reasonCode is now composed, not the literal `null` it used to
       // be — `agent_audit.reason_code` is append-only, so it is capped at 200 chars rather than
       // trusting either session id (or the registered pane suffix) to stay short forever.
+      // [S10-21d b3c, chair ruling on b6's open question] The leading token now names the ARM
+      // that produced the row (`self_resume`/`caller_resume`/`host_minted`), not a literal
+      // `'self_resume'` for all three — a row labelled self_resume that did not come from a
+      // self resume would defeat R119 fix 2's own point (telling a false contest from a real one).
       contestedLineage: (
         claimantPaneKey,
         registeredPaneKey,
         registeredAgentId,
         recordedSessionId,
-        reportedSessionId
+        reportedSessionId,
+        arm
       ) => {
         const contestDb =
           typeof runtime?.getOrchestrationDb === 'function'
@@ -916,7 +921,7 @@ export function launchAdmissionBundle(
         const registeredPaneSuffix =
           registeredPaneKey !== claimantPaneKey ? ` registered_pane=${registeredPaneKey}` : ''
         const reasonCode =
-          `self_resume recorded=${recordedSessionId} reported=${reportedSessionId} holder=${claimantPaneKey}${registeredPaneSuffix}`.slice(
+          `${arm} recorded=${recordedSessionId} reported=${reportedSessionId} holder=${claimantPaneKey}${registeredPaneSuffix}`.slice(
             0,
             200
           )

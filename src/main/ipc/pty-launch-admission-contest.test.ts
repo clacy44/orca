@@ -17,7 +17,14 @@ describe('S10-21a C6b: launchAdmissionBundle contestedLineage', () => {
     } as unknown as OrcaRuntimeService
 
     const { ctx } = launchAdmissionBundle(runtimeStub, null)
-    ctx.contestedLineage('tab1:leaf-a', 'tabOLD:leaf-a', 'agent-registered-1', 'rec-1', 'rep-1')
+    ctx.contestedLineage(
+      'tab1:leaf-a',
+      'tabOLD:leaf-a',
+      'agent-registered-1',
+      'rec-1',
+      'rep-1',
+      'caller_resume'
+    )
 
     expect(writeAgentAudit).toHaveBeenCalledTimes(2)
     for (const call of writeAgentAudit.mock.calls) {
@@ -28,8 +35,9 @@ describe('S10-21a C6b: launchAdmissionBundle contestedLineage', () => {
       })
       // [S10-21d b6, R119 fix 2] Both panes get the SAME reasonCode, carrying both ids plus the
       // registered pane (they differ here).
+      // [S10-21d b3c, chair ruling on b6's open question] Leading token names the ARM.
       expect(call[0].reasonCode).toBe(
-        'self_resume recorded=rec-1 reported=rep-1 holder=tab1:leaf-a registered_pane=tabOLD:leaf-a'
+        'caller_resume recorded=rec-1 reported=rep-1 holder=tab1:leaf-a registered_pane=tabOLD:leaf-a'
       )
     }
     const auditedPanes = writeAgentAudit.mock.calls.map((call) => call[0].actorPaneKey).sort()
@@ -48,7 +56,14 @@ describe('S10-21a C6b: launchAdmissionBundle contestedLineage', () => {
     } as unknown as OrcaRuntimeService
 
     const { ctx } = launchAdmissionBundle(runtimeStub, null)
-    ctx.contestedLineage('tab1:leaf-a', 'tab1:leaf-a', 'agent-registered-1', 'rec-1', 'rep-1')
+    ctx.contestedLineage(
+      'tab1:leaf-a',
+      'tab1:leaf-a',
+      'agent-registered-1',
+      'rec-1',
+      'rep-1',
+      'host_minted'
+    )
 
     expect(writeAgentAudit).toHaveBeenCalledTimes(1)
     expect(writeAgentAudit.mock.calls[0][0]).toMatchObject({
@@ -58,8 +73,9 @@ describe('S10-21a C6b: launchAdmissionBundle contestedLineage', () => {
       outcome: 'contested'
     })
     // [S10-21d b6, R119 fix 2] No `registered_pane=` suffix when the two panes coincide.
+    // [S10-21d b3c, chair ruling on b6's open question] Leading token names the ARM.
     expect(writeAgentAudit.mock.calls[0][0].reasonCode).toBe(
-      'self_resume recorded=rec-1 reported=rep-1 holder=tab1:leaf-a'
+      'host_minted recorded=rec-1 reported=rep-1 holder=tab1:leaf-a'
     )
     expect(writeHostNoticeToPane).toHaveBeenCalledTimes(1)
   })
@@ -123,7 +139,14 @@ describe('S10-21a C11: launchAdmissionBundle notice text (snapshot)', () => {
     } as unknown as OrcaRuntimeService
 
     const { ctx } = launchAdmissionBundle(runtimeStub, null)
-    ctx.contestedLineage('tab1:leaf-a', 'tab1:leaf-a', 'agent-registered-1', 'rec-1', 'rep-1')
+    ctx.contestedLineage(
+      'tab1:leaf-a',
+      'tab1:leaf-a',
+      'agent-registered-1',
+      'rec-1',
+      'rep-1',
+      'self_resume'
+    )
 
     expect(writeHostNoticeToPane).toHaveBeenCalledWith(
       'tab1:leaf-a',

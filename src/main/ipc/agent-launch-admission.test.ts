@@ -473,8 +473,9 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
       CALLER,
       ctx({ contestedLineage: (...args) => contested.push(args) })
     )
+    // [S10-21d b3c, chair ruling on b6's open question] 6th element names the arm.
     expect(contested).toEqual([
-      ['tab1:leaf-a', 'tabOLD:leaf-a', 'agt_tabOLD:leaf-a', 'self-sess', 'self-sess']
+      ['tab1:leaf-a', 'tabOLD:leaf-a', 'agt_tabOLD:leaf-a', 'self-sess', 'self-sess', 'self_resume']
     ])
   })
 
@@ -749,9 +750,9 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
     )
     // [S10-21d b6, R119 fix 2] recordedSessionId is the pane's PRIOR newest row; reportedSessionId
     // is the new target the caller just recorded — genuinely distinct here, unlike SELF_RESUME's.
-    expect(contested).toEqual([
-      ['tab1:leaf-a', 'tab1:leaf-a', 'agt_tab1:leaf-a', 'first-sess', REAL_CONVERSATION_ID]
-    ])
+    // [S10-21d b3c, chair ruling on b6's open question] 6th element names the arm.
+    const expected = ['tab1:leaf-a', 'tab1:leaf-a', 'agt_tab1:leaf-a', 'first-sess']
+    expect(contested).toEqual([[...expected, REAL_CONVERSATION_ID, 'caller_resume']])
   })
 
   it("S10-21c B3b, D-R149 MEDIUM 2: a caller's `claude --resume X` where X is NOT UUID-shaped is UNRECORDED (resume_target_unparseable) — no row, spawn still proceeds", async () => {
