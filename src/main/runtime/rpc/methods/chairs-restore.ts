@@ -25,7 +25,9 @@ import { OrchestrationError } from '../../orchestration/orchestration-error'
 import { hostIdFor, rateLimited } from './agent-directory-rpc-view'
 import {
   parseChairsManifest,
+  CHAIRS_MANIFEST_EFFORTS,
   type ChairsManifest,
+  type ChairsManifestEffort,
   type ChairsManifestEntry
 } from '../../orchestration/chairs-manifest'
 import { planChairsRestore } from '../../orchestration/chairs-restore-plan'
@@ -280,8 +282,17 @@ export const CHAIRS_RESTORE_METHODS: RpcMethod[] = [
           conversationId: launch.session_id,
           // [S10-21d b3b, D-R165 H1 fix] machine-distinct id, never the orchestration-
           // compatibility constant (always 'local') — see ChairsRestoreExecutorDeps's own doc.
-          host: hostname()
-          // model/effort omitted: no pref_* columns exist on agent_launch_sessions in this lane.
+          host: hostname(),
+          // [S10-21d bD C1, D-R168 MEDIUM-1 fix] the composed tree carries pref_model/pref_effort
+          // on agent_launch_sessions (agent-launch-sessions.ts:71-74) — capture them so a pinned
+          // chair survives export/restart/restore instead of silently resetting to defaults. An
+          // out-of-set effort is omitted (never written unvalidated); model is independent of
+          // that check and always included when present.
+          ...(launch.pref_model ? { model: launch.pref_model } : {}),
+          ...(launch.pref_effort &&
+          CHAIRS_MANIFEST_EFFORTS.includes(launch.pref_effort as ChairsManifestEffort)
+            ? { effort: launch.pref_effort as ChairsManifestEffort }
+            : {})
         })
       }
       const manifest: ChairsManifest = { version: 1, chairs }
