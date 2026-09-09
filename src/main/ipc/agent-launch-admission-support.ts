@@ -167,3 +167,79 @@ export const ADMISSION_AUDIT_VERBS = [
   'launch_recorded',
   'launch'
 ] as const
+
+// [compose bC] Moved here verbatim from agent-launch-admission.ts (max-lines ratchet after
+// composing lane 1 + lane 2's own additions) — no behavior change.
+/** [D-R104 F-4/F-5] Shared confirm/compensate builder for a launch that recorded a row —
+ * HOST_MINTED and (now) HOST_RESUME both close over it. `onRowDeleted` runs whenever the row is
+ * actually deleted (surface divergence at confirm, or a spawn failure at compensate) — HOST_RESUME
+ * uses it to restore the predecessor pane's current_sessions row; HOST_MINTED has none to restore.
+ *
+ * [D-R104 F-5 fix] `compensate(true)` (the `agentSessionOwners.ensure` post-callback-throw path,
+ * pty.ts) is tracked by its OWN `ensureFailureAudited` flag, independent of `settled` — it must
+ * still fire (and audit) even after `confirm` already ran and set `settled`, because it reports a
+ * LATER, separate failure than anything `confirm`/`compensate(false)` already resolved, and it
+ * never mutates the row (`§C.6`: never destroy a fact not proven false), so it cannot race either
+ * of them. */
+export function buildRecordedAdmission(
+  db: OrchestrationDb,
+  ctx: AgentLaunchAdmissionContext,
+  paneKey: string,
+  seq: number,
+  spawnOptions: PtySpawnOptions,
+  /** [S10-21c B3] Optional: the caller-resume path below records a row but claims NO
+   * classification. Every existing value would be a lie (`host_minted` means the host minted the
+   * id; `self_resume_*` means the pane's own newest row) and a NEW value would have to be added
+   * to the renderer-facing `LaunchAdmissionNoticeClassification` wire enum
+   * (src/shared/launch-admission-notice.ts) — a wire change this brief does not carry. Omitting
+   * it is behaviour-preserving at both consumers: `resolveDaemonRespawnGateAction` returns
+   * `{kind:'none'}` for undefined exactly as it does for today's 'unrecorded', and pty.ts's
+   * push at :6973 is already `admittedLaunch?.classification`-gated (the renderer's own
+   * reconciliation maps 'UNRECORDED' to `{kind:'none'}` too). */
+  classification?: LaunchAdmissionClassification,
+  onRowDeleted?: () => void
+): AdmittedLaunch {
+  let settled = false
+  let ensureFailureAudited = false
+  return {
+    spawnOptions,
+    classification,
+    confirm: (spawnResult: PtySpawnResult) => {
+      if (settled) {
+        return
+      }
+      settled = true
+      const surface = spawnResult.agentSessionEnsure?.owner.surface
+      if (surface !== undefined) {
+        // [forced deviation] Not `makePaneKey`: it throws on a malformed tabId/leafId, and
+        // confirm() must never throw post-spawn. Same `tab:leaf` format, without the
+        // validation — a malformed surface still compares (and, correctly, diverges).
+        const actualPaneKey = `${surface.tabId}:${surface.leafId}`
+        if (actualPaneKey !== paneKey) {
+          db.deleteLaunchRow(seq)
+          onRowDeleted?.()
+          audit(db, paneKey, ctx.hostId, 'launch_surface_diverged', 'compensated', null)
+          ctx.notice(paneKey, 'launch_surface_diverged', 'launch_surface_diverged')
+        }
+      }
+    },
+    compensate: (fromEnsureFailure?: boolean) => {
+      if (fromEnsureFailure) {
+        if (ensureFailureAudited) {
+          return
+        }
+        ensureFailureAudited = true
+        // [§C.6] The process may still be alive: never destroy a fact not proven false.
+        audit(db, paneKey, ctx.hostId, 'launch_ensure_failed_after_spawn', 'compensated', null)
+        return
+      }
+      if (settled) {
+        return
+      }
+      settled = true
+      db.deleteLaunchRow(seq)
+      onRowDeleted?.()
+      audit(db, paneKey, ctx.hostId, 'launch_spawn_failed', 'compensated', null)
+    }
+  }
+}

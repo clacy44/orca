@@ -9,7 +9,6 @@
 // agent-launch-admission-lock.ts (the (host,pane) mutex) to stay under the max-lines budget.
 import { randomUUID } from 'node:crypto'
 import type { PtySpawnOptions } from '../providers/pty-provider-contract'
-import type { PtySpawnResult } from '../providers/pty-spawn-result'
 import { spliceHostMintedSessionId } from '../../shared/agent-resume-launch-command'
 import { isCoveredLaunchAgent } from '../../shared/covered-launch-agents'
 import { LOCAL_EXECUTION_HOST_ID } from '../../shared/execution-host'
@@ -35,12 +34,12 @@ import {
 import { withPaneLock } from './agent-launch-admission-lock'
 import {
   audit,
+  buildRecordedAdmission,
   launchPrefsForCtx,
   passThrough,
   preflightResumeTranscript,
   type AdmittedLaunch,
-  type AgentLaunchAdmissionContext,
-  type LaunchAdmissionClassification
+  type AgentLaunchAdmissionContext
 } from './agent-launch-admission-support'
 import {
   auditSelfResume,
@@ -80,85 +79,11 @@ export type LaunchAdmission =
 // [S10-21d R118, forced deviation — see RETURN] AgentLaunchAdmissionContext itself moved to
 // agent-launch-admission-support.ts purely to keep this file under the max-lines budget after
 // adding the launchPreferences field — no behavior change, every existing import of it from THIS
-// module keeps working via this re-export. [compose bC] support.ts's own copy of this type was
-// updated to lane2's 6-arg contestedLineage signature (arm-aware, b3c) — see that file.
+// module keeps working via this re-export ([compose bC] support.ts's copy updated to lane2's
+// 6-arg contestedLineage, arm-aware, b3c).
 export type { AgentLaunchAdmissionContext }
 
 export type { AdmittedLaunch } from './agent-launch-admission-support'
-
-/** [D-R104 F-4/F-5] Shared confirm/compensate builder for a launch that recorded a row —
- * HOST_MINTED and (now) HOST_RESUME both close over it. `onRowDeleted` runs whenever the row is
- * actually deleted (surface divergence at confirm, or a spawn failure at compensate) — HOST_RESUME
- * uses it to restore the predecessor pane's current_sessions row; HOST_MINTED has none to restore.
- *
- * [D-R104 F-5 fix] `compensate(true)` (the `agentSessionOwners.ensure` post-callback-throw path,
- * pty.ts) is tracked by its OWN `ensureFailureAudited` flag, independent of `settled` — it must
- * still fire (and audit) even after `confirm` already ran and set `settled`, because it reports a
- * LATER, separate failure than anything `confirm`/`compensate(false)` already resolved, and it
- * never mutates the row (`§C.6`: never destroy a fact not proven false), so it cannot race either
- * of them. */
-function buildRecordedAdmission(
-  db: OrchestrationDb,
-  ctx: AgentLaunchAdmissionContext,
-  paneKey: string,
-  seq: number,
-  spawnOptions: PtySpawnOptions,
-  /** [S10-21c B3] Optional: the caller-resume path below records a row but claims NO
-   * classification. Every existing value would be a lie (`host_minted` means the host minted the
-   * id; `self_resume_*` means the pane's own newest row) and a NEW value would have to be added
-   * to the renderer-facing `LaunchAdmissionNoticeClassification` wire enum
-   * (src/shared/launch-admission-notice.ts) — a wire change this brief does not carry. Omitting
-   * it is behaviour-preserving at both consumers: `resolveDaemonRespawnGateAction` returns
-   * `{kind:'none'}` for undefined exactly as it does for today's 'unrecorded', and pty.ts's
-   * push at :6973 is already `admittedLaunch?.classification`-gated (the renderer's own
-   * reconciliation maps 'UNRECORDED' to `{kind:'none'}` too). */
-  classification?: LaunchAdmissionClassification,
-  onRowDeleted?: () => void
-): AdmittedLaunch {
-  let settled = false
-  let ensureFailureAudited = false
-  return {
-    spawnOptions,
-    classification,
-    confirm: (spawnResult: PtySpawnResult) => {
-      if (settled) {
-        return
-      }
-      settled = true
-      const surface = spawnResult.agentSessionEnsure?.owner.surface
-      if (surface !== undefined) {
-        // [forced deviation] Not `makePaneKey`: it throws on a malformed tabId/leafId, and
-        // confirm() must never throw post-spawn. Same `tab:leaf` format, without the
-        // validation — a malformed surface still compares (and, correctly, diverges).
-        const actualPaneKey = `${surface.tabId}:${surface.leafId}`
-        if (actualPaneKey !== paneKey) {
-          db.deleteLaunchRow(seq)
-          onRowDeleted?.()
-          audit(db, paneKey, ctx.hostId, 'launch_surface_diverged', 'compensated', null)
-          ctx.notice(paneKey, 'launch_surface_diverged', 'launch_surface_diverged')
-        }
-      }
-    },
-    compensate: (fromEnsureFailure?: boolean) => {
-      if (fromEnsureFailure) {
-        if (ensureFailureAudited) {
-          return
-        }
-        ensureFailureAudited = true
-        // [§C.6] The process may still be alive: never destroy a fact not proven false.
-        audit(db, paneKey, ctx.hostId, 'launch_ensure_failed_after_spawn', 'compensated', null)
-        return
-      }
-      if (settled) {
-        return
-      }
-      settled = true
-      db.deleteLaunchRow(seq)
-      onRowDeleted?.()
-      audit(db, paneKey, ctx.hostId, 'launch_spawn_failed', 'compensated', null)
-    }
-  }
-}
 
 /** [errata 5(p) v2.1 §C.1-§C.4] The one launch-admission point. Called from `spawnWithLane`
  * between the lane computation and `provider.spawn`. [D-R104 F-8 fix] The (hostId, paneKey)
@@ -288,19 +213,15 @@ export async function admitAgentLaunch(
         // clear a pane's stale sleeping-session record (see RETURN: no such consumer exists yet).
         ctx.notice(paneKey, 'launch_host_resume', 'launch_host_resume')
         // [S10-21d b3b, D-R163 H1 fix] resolveHostResumeRecordLaunch re-checks the holder fresh,
-        // inside this lock, before building the write (see its own doc comment for the race).
-        // [compose bC] R118's launchPreferences spread lands on top of b3/b3b's builder — both
-        // must survive (brief bC surface (b)).
-        const params = {
-          ...resolveHostResumeRecordLaunch(db, ctx, {
-            paneKey,
-            agentType: spawnOptions.launchAgent ?? 'claude',
-            sessionId: x,
-            admission,
-            refuse
-          }),
-          ...launchPrefsForCtx(ctx.launchPreferences)
-        }
+        // inside this lock, before building the write (now also spreading R118's launchPreferences
+        // onto the result — see its own doc comment).
+        const params = resolveHostResumeRecordLaunch(db, ctx, {
+          paneKey,
+          agentType: spawnOptions.launchAgent ?? 'claude',
+          sessionId: x,
+          admission,
+          refuse
+        })
         const result = db.recordLaunch(params)
         if (!result.ok) {
           // [S10-21d b3b, D-R163 H2 LOW] unheld restore's failure IS foreign_session_id

@@ -2,6 +2,7 @@
 // out of agent-launch-admission.ts to stay under the max-lines ratchet (that file sat at the
 // wall before this brief). Pure — no IO, no side effects besides the returned closure.
 import type { OrchestrationDb } from '../runtime/orchestration/db'
+import { launchPrefsForCtx } from './agent-launch-admission-support'
 import type {
   LaunchEvidence,
   RecordLaunchParams
@@ -76,10 +77,12 @@ export function checkHostResumeHolderUnmoved(
 /** [S10-21d b3b, D-R163 H1/H2 LOW] One call-site wrapper for the admission's HOST_RESUME arm:
  * runs the fresh re-check (see checkHostResumeHolderUnmoved) then builds the record-launch
  * params — collapses the call site to a few lines, keeping agent-launch-admission.ts under its
- * own 300-line budget regardless of how the formatter reflows individual call expressions. */
+ * own 300-line budget regardless of how the formatter reflows individual call expressions.
+ * [compose bC] `ctx.launchPreferences` (R118) is spread onto the built params here too — both
+ * lanes' effects survive from one call site (brief bC surface (b)). */
 export function resolveHostResumeRecordLaunch(
   db: OrchestrationDb,
-  ctx: { hostId: string; launchGeneration: string },
+  ctx: { hostId: string; launchGeneration: string; launchPreferences?: HostResumePrefs },
   write: {
     paneKey: string
     agentType: string
@@ -98,11 +101,16 @@ export function resolveHostResumeRecordLaunch(
   if (holderMoved) {
     write.refuse(holderMoved)
   }
-  return buildHostResumeRecordLaunchParams(
-    ctx.hostId,
-    write.paneKey,
-    write.agentType,
-    write.sessionId,
-    write.admission
-  )
+  return {
+    ...buildHostResumeRecordLaunchParams(
+      ctx.hostId,
+      write.paneKey,
+      write.agentType,
+      write.sessionId,
+      write.admission
+    ),
+    ...launchPrefsForCtx(ctx.launchPreferences)
+  }
 }
+
+type HostResumePrefs = { model?: string; effort?: string }
