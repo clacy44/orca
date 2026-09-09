@@ -15,7 +15,10 @@ import { isCoveredLaunchAgent } from '../../shared/covered-launch-agents'
 import { LOCAL_EXECUTION_HOST_ID } from '../../shared/execution-host'
 import { SETUP_AGENT_SEQUENCE_STARTUP_COMMAND_ENV } from '../../shared/setup-agent-sequencing'
 import { isSessionId } from '../../shared/stable-pane-id'
-import type { RecordLaunchParams } from '../runtime/orchestration/agent-launch-sessions'
+import type {
+  LaunchEvidence,
+  RecordLaunchParams
+} from '../runtime/orchestration/agent-launch-sessions'
 import { resolveResumeTranscript } from '../startup/resolve-resume-transcript'
 // [JUDGMENT CALL, see RETURN] `OrchestrationDb` (db.ts), not the raw `Database.Database` the
 // store module (agent-launch-sessions.ts) takes: `OrchestrationDb.db` is private with no public
@@ -25,6 +28,10 @@ import { resolveResumeTranscript } from '../startup/resolve-resume-transcript'
 // deleteLaunchRow delegate this commit adds to db.ts — the only one that was missing).
 import type { OrchestrationDb } from '../runtime/orchestration/db'
 import { LaunchAdmissionRefusedError } from './agent-launch-admission-errors'
+import {
+  resolveHostResumeRecordLaunch,
+  hostResumeOnRowDeleted
+} from './agent-launch-admission-host-resume'
 import { withPaneLock } from './agent-launch-admission-lock'
 import {
   audit,
@@ -35,6 +42,11 @@ import {
   type AgentLaunchAdmissionContext,
   type LaunchAdmissionClassification
 } from './agent-launch-admission-support'
+import {
+  auditSelfResume,
+  contestOrSupersedeDerivedRow,
+  selfResumePassThrough
+} from './agent-launch-self-resume-arm'
 import {
   claudeIndexInSubject,
   resolveAdmissionShell,
@@ -57,17 +69,19 @@ export type LaunchAdmission =
   | {
       kind: 'host-resume'
       sessionId: string
-      predecessorPaneKey: string
+      predecessorPaneKey: string | null // [DEC-2] null: launcher restore, no pane on host holds it
       executionHostId: string
       launchGeneration: string
       launchSeq?: number
+      evidence?: Extract<LaunchEvidence, 'sweep_record' | 'host_restore'> // [DEC-2] default sweep_record
       sequencedAgentLine?: string
     }
 
 // [S10-21d R118, forced deviation — see RETURN] AgentLaunchAdmissionContext itself moved to
 // agent-launch-admission-support.ts purely to keep this file under the max-lines budget after
 // adding the launchPreferences field — no behavior change, every existing import of it from THIS
-// module keeps working via this re-export.
+// module keeps working via this re-export. [compose bC] support.ts's own copy of this type was
+// updated to lane2's 6-arg contestedLineage signature (arm-aware, b3c) — see that file.
 export type { AgentLaunchAdmissionContext }
 
 export type { AdmittedLaunch } from './agent-launch-admission-support'
@@ -273,27 +287,30 @@ export async function admitAgentLaunch(
         // [S10-21a C7f, D-R114 fix 2] Resume-shaped notice so a renderer store consumer can
         // clear a pane's stale sleeping-session record (see RETURN: no such consumer exists yet).
         ctx.notice(paneKey, 'launch_host_resume', 'launch_host_resume')
-        const params: RecordLaunchParams = {
-          hostId: ctx.hostId,
-          paneKey,
-          agentType: spawnOptions.launchAgent ?? 'claude',
-          sessionId: x,
-          launchGeneration: admission.launchGeneration,
-          executionHostId: admission.executionHostId,
-          evidence: 'sweep_record',
-          supersedePaneKey: admission.predecessorPaneKey,
+        // [S10-21d b3b, D-R163 H1 fix] resolveHostResumeRecordLaunch re-checks the holder fresh,
+        // inside this lock, before building the write (see its own doc comment for the race).
+        // [compose bC] R118's launchPreferences spread lands on top of b3/b3b's builder — both
+        // must survive (brief bC surface (b)).
+        const params = {
+          ...resolveHostResumeRecordLaunch(db, ctx, {
+            paneKey,
+            agentType: spawnOptions.launchAgent ?? 'claude',
+            sessionId: x,
+            admission,
+            refuse
+          }),
           ...launchPrefsForCtx(ctx.launchPreferences)
         }
         const result = db.recordLaunch(params)
         if (!result.ok) {
-          return refuse('launch_record_write_failed')
+          // [S10-21d b3b, D-R163 H2 LOW] unheld restore's failure IS foreign_session_id
+          return refuse(admission.predecessorPaneKey ? 'launch_record_write_failed' : result.reason)
         }
         // [D-R104 F-4] A restated row is not this call's to confirm/compensate over — it was
         // already there (F-12).
         if (result.restated) {
           return passThrough(spawnOptions, 'host_resume')
         }
-        const predecessorPaneKey = admission.predecessorPaneKey
         return buildRecordedAdmission(
           db,
           ctx,
@@ -301,29 +318,20 @@ export async function admitAgentLaunch(
           result.row.seq,
           spawnOptions,
           'host_resume',
-          () => {
-            db.restoreCurrentSessionForPane(ctx.hostId, predecessorPaneKey)
-          }
+          hostResumeOnRowDeleted(db, ctx.hostId, admission.predecessorPaneKey)
         )
       }
       if (newestRow !== undefined && newestRow.session_id === x) {
-        // SELF_RESUME — [v2.1 V1] ALWAYS audited, no row, no splice.
+        // SELF_RESUME — [v2.1 V1] ALWAYS audited, no row, no splice. [S10-21d b6, R119 fix]
+        // Same-pane-vs-contested split and the passThrough's own confirm/compensate live in
+        // agent-launch-self-resume-arm.ts (max-lines budget).
         const reasonCode = admission.kind === 'host-resume' ? 'host' : 'caller'
-        audit(db, paneKey, ctx.hostId, 'launch_self_resume', 'admitted', reasonCode)
-        if (reasonCode === 'caller' && registeredRow !== undefined && registeredRow.derived === 0) {
-          ctx.notice(paneKey, 'launch_self_resume', 'caller')
-          // getAgentByPaneKey matches by pane SUFFIX (derived-agent-rows.ts) and its own WHERE
-          // clause requires pane_key IS NOT NULL for any row it returns — the `?? paneKey`
-          // fallback is defensive only, never actually reached.
-          ctx.contestedLineage(paneKey, registeredRow.pane_key ?? paneKey, registeredRow.id)
-        }
-        return passThrough(
-          spawnOptions,
-          reasonCode === 'host' ? 'self_resume_host' : 'self_resume_caller',
-          // [S10-21a C14b, D-R128 F6] Binds the renderer-funnel gate's refresh to this specific
-          // registered row — two registered rows can share a pane suffix.
-          reasonCode === 'caller' ? registeredRow?.id : undefined
-        )
+        auditSelfResume(db, ctx, paneKey, reasonCode, registeredRow, newestRow.session_id, x)
+        const classification = reasonCode === 'host' ? 'self_resume_host' : 'self_resume_caller'
+        // [S10-21a C14b, D-R128 F6] Binds the renderer-funnel gate's refresh to this specific
+        // registered row — two registered rows can share a pane suffix.
+        const agentId = reasonCode === 'caller' ? registeredRow?.id : undefined
+        return selfResumePassThrough(db, ctx, paneKey, spawnOptions, classification, agentId)
       }
       // [S10-21c B3, design §2 S2 ADDENDUM] A host-resume admission whose command RESOLVES to a
       // session id that is neither the ticket's own nor this pane's newest row: the sweep's
@@ -407,11 +415,18 @@ export async function admitAgentLaunch(
       // admission surface still must not supersede a derived row's recorded session silently).
       // A distinct outcome, never `contestedLineage` (which is reserved for the non-derived,
       // registered-owner signal), so a supersession here is never traceless either way.
-      if (registeredRow !== undefined && registeredRow.derived === 0) {
-        ctx.contestedLineage(paneKey, registeredRow.pane_key ?? paneKey, registeredRow.id)
-      } else if (registeredRow !== undefined) {
-        audit(db, paneKey, ctx.hostId, 'launch_recorded', 'admitted', 'derived_row_superseded')
-      }
+      // [S10-21d b6, R119 fix 2] Shared contest-or-supersede helper — now threads both session
+      // ids through to `contestedLineage`.
+      const priorSessionId = newestRow?.session_id ?? 'none'
+      contestOrSupersedeDerivedRow(
+        db,
+        ctx,
+        paneKey,
+        registeredRow,
+        priorSessionId,
+        x,
+        'caller_resume'
+      )
       // [forced deviation from HOST_MINTED's shape, deliberate] HOST_MINTED/HOST_RESUME notice
       // BEFORE their `recordLaunch`; this notices AFTER it, so a refused resume never emits a
       // notice claiming a resume that did not happen.
@@ -496,11 +511,17 @@ export async function admitAgentLaunch(
     // plus a pty text notice — no `agent_audit` row at all.
     // [S10-21c B-final F5, D-R159 finding 5] Same derived-row fix as the caller_resume arm above:
     // a DERIVED registered row gets its own distinct audit outcome instead of silence.
-    if (registeredRow !== undefined && registeredRow.derived === 0) {
-      ctx.contestedLineage(paneKey, registeredRow.pane_key ?? paneKey, registeredRow.id)
-    } else if (registeredRow !== undefined) {
-      audit(db, paneKey, ctx.hostId, 'launch_recorded', 'admitted', 'derived_row_superseded')
-    }
+    // [S10-21d b6, R119 fix 2] Shared contest-or-supersede helper — both session ids threaded.
+    const priorSessionId = newestRow?.session_id ?? 'none'
+    contestOrSupersedeDerivedRow(
+      db,
+      ctx,
+      paneKey,
+      registeredRow,
+      priorSessionId,
+      sessionId,
+      'host_minted'
+    )
     // [D-R104 F-12] A restated row is not this call's to confirm/compensate over.
     if (result.restated) {
       return passThrough(nextSpawnOptions, 'host_minted')

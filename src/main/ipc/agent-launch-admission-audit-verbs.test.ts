@@ -46,7 +46,11 @@ describe('S10-21a C6c: ADMISSION_AUDIT_VERBS enumerates every admission audit ve
 
   it("pty.ts's contestedLineage writeAgentAudit call uses a verb from the constant", () => {
     const source = readFileSync(join(HERE, 'pty.ts'), 'utf8')
-    const contestedLineageStart = source.indexOf('contestedLineage: (claimantPaneKey')
+    // [S10-21d b6, R119 fix 2] `contestedLineage`'s widened (5-param) signature no longer fits
+    // oxfmt's line width on one line — first-param name is still asserted, just no longer via a
+    // literal single-line substring.
+    const contestedLineageMatch = source.match(/contestedLineage:\s*\(\s*claimantPaneKey/)
+    const contestedLineageStart = contestedLineageMatch?.index ?? -1
     expect(contestedLineageStart).toBeGreaterThan(-1)
     // Scope the search to the contestedLineage closure body only, not the whole 8000+ line file.
     const closureBody = source.slice(contestedLineageStart, contestedLineageStart + 2000)

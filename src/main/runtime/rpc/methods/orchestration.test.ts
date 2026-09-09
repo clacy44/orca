@@ -129,8 +129,12 @@ describe('orchestration RPC methods', () => {
     // orchestration.threads.purgePeerLedger (orchestration-pact-purge.ts, design §4.6(b): the
     // write side of the append-only ledger's operator purge verb). S10-21b B16b adds
     // orchestration.agents.quarantineRemote (orchestration-agents-quarantine-remote.ts, design
-    // §4.7: the RPC/CLI caller for setLocalRemoteAgentQuarantine).
-    expect(registry.size).toBe(72)
+    // §4.7: the RPC/CLI caller for setLocalRemoteAgentQuarantine). S10-21d b4 adds
+    // orchestration.chairs.restore/.status/.export (chairs-restore.ts, design-r105-r112 ITEM 2).
+    expect(registry.size).toBe(75)
+    expect(registry.has('orchestration.chairs.restore')).toBe(true)
+    expect(registry.has('orchestration.chairs.status')).toBe(true)
+    expect(registry.has('orchestration.chairs.export')).toBe(true)
     expect(registry.has('orchestration.agents.quarantineRemote')).toBe(true)
     expect(registry.has('orchestration.federatedAsk')).toBe(true)
     expect(registry.has('orchestration.federatedSend')).toBe(true)

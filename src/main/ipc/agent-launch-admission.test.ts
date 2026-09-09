@@ -367,7 +367,12 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
     expect(currentSession.session_id).toBe(newest?.session_id)
   })
 
-  it('T52: SELF_RESUME(caller) into a registered pane is admitted, writes no row, audits launch_self_resume(caller), and notices', async () => {
+  // [S10-21d b6, R119 SCENARIO_CORRECTION of T52] T52 asserted the R119 BUG as expected
+  // behaviour: a pane resuming its OWN registered agent's OWN recorded id (same paneKey both
+  // sides) was wrongly notice+contested. That subject is unchanged (a covered `--resume` of the
+  // pane's own newest row, into that SAME pane's own registered agent); the outcome corrects to
+  // NO contest, ONE self-describing admitted row (diag-r119-2026-09-08.md FIX 1/TEST 1).
+  it("T52/R119 fix 1: SELF_RESUME(caller) of a pane's OWN registered agent (same pane) is admitted, writes no row, audits ONE self_resume_same_pane row, never contests", async () => {
     const db = freshDb()
     // Seed the pane's own newest row directly (as if the host had launched it earlier).
     db.recordLaunch({
@@ -381,14 +386,14 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
     })
     insertRegisteredAgent(db, 'tab1:leaf-a')
     const notices: { paneKey: string; verb: string; reasonCode: string }[] = []
-    const contested: string[] = []
+    const contested: unknown[] = []
     const admitted = await admitAgentLaunch(
       () => db,
       opts({ command: 'claude --resume self-sess' }),
       CALLER,
       ctx({
         notice: (paneKey, verb, reasonCode) => notices.push({ paneKey, verb, reasonCode }),
-        contestedLineage: (paneKey) => contested.push(paneKey)
+        contestedLineage: (...args) => contested.push(args)
       })
     )
     expect(admitted.spawnOptions.command).toBe('claude --resume self-sess')
@@ -396,15 +401,15 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
       .prepare('SELECT COUNT(*) as n FROM agent_launch_sessions WHERE pane_key = ?')
       .get('tab1:leaf-a') as { n: number }
     expect(rowCountAfter.n).toBe(1) // unchanged from the seeded row
-    const auditRow = rawDb(db)
-      .prepare(`SELECT * FROM agent_audit ORDER BY seq DESC LIMIT 1`)
-      .get() as { verb: string; reason_code: string }
-    expect(auditRow.verb).toBe('launch_self_resume')
-    expect(auditRow.reason_code).toBe('caller')
-    expect(notices).toEqual([
-      { paneKey: 'tab1:leaf-a', verb: 'launch_self_resume', reasonCode: 'caller' }
-    ])
-    expect(contested).toEqual(['tab1:leaf-a'])
+    const auditRows = rawDb(db)
+      .prepare(`SELECT * FROM agent_audit WHERE verb = 'launch_self_resume'`)
+      .all() as { verb: string; reason_code: string }[]
+    expect(auditRows).toHaveLength(1) // ONE row, not two
+    expect(auditRows[0].reason_code).toBe(
+      'self_resume_same_pane recorded=self-sess reported=self-sess holder=tab1:leaf-a'
+    )
+    expect(notices).toEqual([]) // same-pane self-resume is never a contest — no notice either
+    expect(contested).toEqual([]) // never contestedLineage for a pane's own registered agent
     // [S10-21a C7g, Ruling 34 Addendum 25] classification threads through for the C7f/C7g gate.
     expect(admitted.classification).toBe('self_resume_caller')
   })
@@ -459,17 +464,19 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
     // [S10-21a C6b, Ruling 34 Addendum 19] contestedLineage's signature widened to carry the
     // registered row's own id — the admission-side contest audit is attributed to it (verb
     // 'launch', outcome 'contested'), not left agentId: null.
-    const contested: [string, string, string][] = []
+    // [S10-21d b6, R119 fix 2] ...and now the two session ids, since a different registered
+    // pane still means a genuine contest (unchanged semantics, now attributable).
+    const contested: unknown[][] = []
     await admitAgentLaunch(
       () => db,
       opts({ command: 'claude --resume self-sess' }),
       CALLER,
-      ctx({
-        contestedLineage: (claimantPaneKey, registeredPaneKey, registeredAgentId) =>
-          contested.push([claimantPaneKey, registeredPaneKey, registeredAgentId])
-      })
+      ctx({ contestedLineage: (...args) => contested.push(args) })
     )
-    expect(contested).toEqual([['tab1:leaf-a', 'tabOLD:leaf-a', 'agt_tabOLD:leaf-a']])
+    // [S10-21d b3c, chair ruling on b6's open question] 6th element names the arm.
+    expect(contested).toEqual([
+      ['tab1:leaf-a', 'tabOLD:leaf-a', 'agt_tabOLD:leaf-a', 'self-sess', 'self-sess', 'self_resume']
+    ])
   })
 
   it('SELF_RESUME(v2.1 V1): always audits, even into an UNregistered pane (no notice/contest)', async () => {
@@ -734,17 +741,18 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
       evidence: 'host_launch'
     })
     insertRegisteredAgent(db, 'tab1:leaf-a')
-    const contested: [string, string, string][] = []
+    const contested: unknown[][] = []
     await admitAgentLaunch(
       () => db,
       opts({ command: `claude --resume ${REAL_CONVERSATION_ID}` }),
       CALLER,
-      ctx({
-        contestedLineage: (claimantPaneKey, registeredPaneKey, registeredAgentId) =>
-          contested.push([claimantPaneKey, registeredPaneKey, registeredAgentId])
-      })
+      ctx({ contestedLineage: (...args) => contested.push(args) })
     )
-    expect(contested).toEqual([['tab1:leaf-a', 'tab1:leaf-a', 'agt_tab1:leaf-a']])
+    // [S10-21d b6, R119 fix 2] recordedSessionId is the pane's PRIOR newest row; reportedSessionId
+    // is the new target the caller just recorded — genuinely distinct here, unlike SELF_RESUME's.
+    // [S10-21d b3c, chair ruling on b6's open question] 6th element names the arm.
+    const expected = ['tab1:leaf-a', 'tab1:leaf-a', 'agt_tab1:leaf-a', 'first-sess']
+    expect(contested).toEqual([[...expected, REAL_CONVERSATION_ID, 'caller_resume']])
   })
 
   it("S10-21c B3b, D-R149 MEDIUM 2: a caller's `claude --resume X` where X is NOT UUID-shaped is UNRECORDED (resume_target_unparseable) — no row, spawn still proceeds", async () => {

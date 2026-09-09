@@ -42,11 +42,20 @@ export type AgentLaunchAdmissionContext = {
    * [S10-21a C6, SCOPE 3(b)] `registeredPaneKey` is the registered agent's OWN pane_key
    * (`getAgentByPaneKey` matches by pane SUFFIX — derived-agent-rows.ts:22-34 — so it can
    * legitimately differ from `claimantPaneKey`, the pane the caller-origin SELF_RESUME actually
-   * landed on). The runtime-side handler notices BOTH when they differ, one when they don't. */
+   * landed on). The runtime-side handler notices BOTH when they differ, one when they don't.
+   * [S10-21d b3c, chair ruling on b6's open question] `arm` names the arm that produced the
+   * row — a field reader can then tell a false 'self_resume' contest from a real one (R119 fix
+   * 2's own point), rather than every arm sharing one label. [compose bC] signature widened here
+   * to lane2's b3c shape (recordedSessionId/reportedSessionId/arm) — this is the type lane1's
+   * R118 moved out of agent-launch-admission.ts; the moved copy must match the shape every real
+   * caller (pty.ts, agent-launch-self-resume-arm.ts's SelfResumeCtx) already uses. */
   contestedLineage: (
     claimantPaneKey: string,
     registeredPaneKey: string,
-    registeredAgentId: string
+    registeredAgentId: string,
+    recordedSessionId: string,
+    reportedSessionId: string,
+    arm: 'self_resume' | 'caller_resume' | 'host_minted'
   ) => void
 }
 

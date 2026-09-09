@@ -42,6 +42,25 @@ export function getAgentByPaneKey(
     .get(hostId, paneSuffix(paneKey), paneKey) as AgentRow | undefined
 }
 
+/** [S10-21d b3b, D-R163 LOW] Every non-tombstoned row sharing `paneKey`'s suffix — defense in
+ * depth for conjunct F (dead-holder-adoption.ts), same reasoning as the tie-break above:
+ * `idx_agents_pane_suffix` makes at most one such row possible today, but a caller checking
+ * liveness against a SINGLE `getAgentByPaneKey` pick would silently miss a live, differently-
+ * named sibling if that constraint were ever relaxed. */
+export function listAgentsByPaneKeySuffix(
+  db: Database.Database,
+  hostId: string,
+  paneKey: string
+): AgentRow[] {
+  return db
+    .prepare(
+      `SELECT * FROM agents
+       WHERE host_id = ? AND tombstoned_at IS NULL
+         AND pane_key IS NOT NULL AND substr(pane_key, instr(pane_key, ':') + 1) = ?`
+    )
+    .all(hostId, paneSuffix(paneKey)) as AgentRow[]
+}
+
 export type UpsertDerivedAgentForPaneParams = {
   hostId: string
   paneKey: string

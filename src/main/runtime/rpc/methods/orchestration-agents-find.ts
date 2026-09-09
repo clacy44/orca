@@ -10,10 +10,9 @@ import {
 } from '../../orchestration/agent-resolver'
 import type { AgentRow } from '../../orchestration/types'
 import { refreshDerivedAgentsFromLiveGraph, refreshLiveness } from './agent-directory-rpc-liveness'
-import { hostIdFor, rateLimited } from './agent-directory-rpc-view'
+import { DIRECTORY_LIVE_CAP, hostIdFor, rateLimited } from './agent-directory-rpc-view'
 
 const MINUTE_MS = 60 * 1000
-const DIRECTORY_LIVE_CAP = 200
 
 const FindParams = z.object({
   query: requiredString('Missing query'),

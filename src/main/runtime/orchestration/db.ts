@@ -88,6 +88,7 @@ import {
   deleteLaunchRowsForAgent as deleteLaunchRowsForAgentImpl,
   launchBySessionId as launchBySessionIdImpl,
   newestLaunchForPane as newestLaunchForPaneImpl,
+  paneHoldingSession as paneHoldingSessionImpl,
   recordLaunch as recordLaunchImpl,
   recordSelfReportRotation as recordSelfReportRotationImpl,
   setLaunchAgentId as setLaunchAgentIdImpl,
@@ -263,6 +264,7 @@ import {
 import type { ThreadSinceCursor } from './thread-replay-since-filter'
 import {
   getAgentByPaneKey as getAgentByPaneKeyImpl,
+  listAgentsByPaneKeySuffix as listAgentsByPaneKeySuffixImpl,
   upsertDerivedAgentForPane as upsertDerivedAgentForPaneImpl,
   pruneStaleDerivedAgents as pruneStaleDerivedAgentsImpl,
   type UpsertDerivedAgentForPaneParams
@@ -5344,6 +5346,12 @@ export class OrchestrationDb {
     return launchBySessionIdImpl(this.db, sessionId)
   }
 
+  // [S10-21d b3] Who currently holds session X, per current_sessions — the launcher's own
+  // pre-adoption read (requestChairRestore), re-read again inside the pane lock before deciding.
+  paneHoldingSession(hostId: string, sessionId: string): string | undefined {
+    return paneHoldingSessionImpl(this.db, hostId, sessionId)
+  }
+
   setLaunchAgentId(
     by: { seq: number } | { hostId: string; paneKey: string },
     agentId: string
@@ -5833,6 +5841,10 @@ export class OrchestrationDb {
 
   getAgentByPaneKey(hostId: string, paneKey: string): AgentRow | undefined {
     return getAgentByPaneKeyImpl(this.db, hostId, paneKey)
+  }
+
+  listAgentsByPaneKeySuffix(hostId: string, paneKey: string): AgentRow[] {
+    return listAgentsByPaneKeySuffixImpl(this.db, hostId, paneKey)
   }
 
   upsertDerivedAgentForPane(params: UpsertDerivedAgentForPaneParams): AgentRow | undefined {

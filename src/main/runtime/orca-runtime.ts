@@ -132,6 +132,7 @@ import {
   type RestoreTicketPayload
 } from './restore-ticket-registry'
 import { isRestoreSweepLockHeld } from './restore-sweep-lock'
+import { requestChairRestore as requestChairRestoreImpl } from './orchestration/chair-restore' // [S10-21d b3b, D-R163 M4]
 import { OrchestrationDb } from './orchestration/db'
 import type { LegacySweepAuditRow } from './device-registry-legacy-sweep'
 import type { RemoteDispatchAttachmentRow } from './orchestration/types'
@@ -1544,23 +1545,22 @@ type RuntimePtyWorktreeRecord = {
   tailWaitState?: TerminalTailWaitState
 }
 
+type LiveReportOpts = { excludePaneKey?: string } // [S10-21d b3, DEC-3 D]
+type LiveReportCheckFn = (sessionId: string, opts?: LiveReportOpts) => boolean
+type ChairRestoreRequest = Parameters<typeof requestChairRestoreImpl>[1] // [b3b M4]
+type ChairRestoreResult = ReturnType<typeof requestChairRestoreImpl>
+
 // [S10-21a C3-v2c, errata 5(p) v2.1 §C.5] Named so `ensureAgentSession`'s internal third
 // parameter can carry the same shape without repeating the inline union.
 export type TerminalRestoreProvenance =
   | { kind: 'none' }
-  | { kind: 'host-restore'; ticket: RestoreTicketId }
+  | { kind: 'host-restore'; ticket: RestoreTicketId; evidence?: 'sweep_record' | 'host_restore' } // [S10-21d b3, DEC-2] omitted -> 'sweep_record'
 
 type TerminalCreateOptions = {
   // Why: required so the compiler enumerates every spawner; the funnel binds it to the pane it
   // mints and every spawn edge reads it back from there, never from the request (S9 §2a).
   credentialLane: TerminalCredentialLaneOption
-  // Why required, non-wire (INV-P-021, design v3.2 §2.2/§2.1d): every spawner must state whether
-  // this create carries host-restore provenance. `{ kind: 'none' }` is the answer for every
-  // caller-driven create; only the sweep (C7), redeeming its own ticket from
-  // RestoreTicketRegistry (restore-ticket-registry.ts), may ever pass `host-restore`. No RPC/IPC
-  // params schema carries this field — the ones that could accept terminal-create/
-  // ensureAgentSession options from a caller are `.strict()` (e.g.
-  // rpc/methods/agent-session.ts:138, :184), so an injected field is rejected, not ignored.
+  // Why non-wire (INV-P-021): only the sweep (C7)/requestChairRestore may pass 'host-restore'.
   restoreProvenance: TerminalRestoreProvenance
   // [S10-21a C3-v2c, errata 5(p) v2.1 §C.2/§C.5] Non-wire, host-set only. The literal agent line
   // this same caller handed to `createSequencedSetupAgentCommands({startupCommand})` — the ONLY
@@ -3262,6 +3262,7 @@ export class OrcaRuntimeService {
   // from the same instance later. No RPC/IPC surface ever sees a `RestoreTicketId` — it is
   // minted and redeemed entirely in-process (INV-P-021).
   private readonly restoreTickets = new RestoreTicketRegistry()
+  private liveReportCheck: LiveReportCheckFn | null = null // [S10-21d b3, DEC-3 D]
   // S10-16 C1 review F3: the device registry's R1.4 legacy-sweep audit rows have no sink until the
   // orchestration DB attaches (device-registry-load.ts runs before it exists) — RuntimeRpcServer
   // registers its DeviceRegistry here once pairing init succeeds, and this flushes it exactly once
@@ -13849,6 +13850,7 @@ export class OrcaRuntimeService {
     const leafId = parsePaneKey(paneKey)?.leafId
     if (
       hostRestorePayload &&
+      hostRestorePayload.predecessorPaneKey !== null &&
       leafId !== undefined &&
       parsePaneKey(hostRestorePayload.predecessorPaneKey)?.leafId === leafId
     ) {
@@ -13871,6 +13873,7 @@ export class OrcaRuntimeService {
     }
     if (
       hostRestorePayload &&
+      hostRestorePayload.predecessorPaneKey !== null &&
       parsePaneKey(hostRestorePayload.predecessorPaneKey)?.leafId === leafId
     ) {
       return
@@ -14134,6 +14137,15 @@ export class OrcaRuntimeService {
     return this.restoreTickets.hasLiveTicketForPane(paneKey)
   }
 
+  setHasLiveHookReportOfSessionCheck(check: LiveReportCheckFn): void {
+    this.liveReportCheck = check
+  } // [S10-21d b3 DEC-3 D]
+  hasLiveHookReportOfSession(sessionId: string, opts?: LiveReportOpts): boolean | null {
+    return this.liveReportCheck ? this.liveReportCheck(sessionId, opts) : null // [b3b M1/M5]
+  }
+  requestChairRestore(request: ChairRestoreRequest): ChairRestoreResult {
+    return requestChairRestoreImpl({ runtime: this }, request)
+  }
   registerOrchestrationCompatibilitySshAttachment(
     targetId: string,
     connectionIncarnation: string
@@ -28763,6 +28775,9 @@ export class OrcaRuntimeService {
                 predecessorPaneKey: hostRestorePayload.predecessorPaneKey,
                 executionHostId: hostRestorePayload.executionHostId,
                 launchGeneration: hostRestorePayload.launchGeneration,
+                ...(opts.restoreProvenance.evidence
+                  ? { evidence: opts.restoreProvenance.evidence }
+                  : {}), // [S10-21d b3, DEC-2]
                 ...(hostRestorePayload.launchSeq !== undefined
                   ? { launchSeq: hostRestorePayload.launchSeq }
                   : {}),
@@ -31914,7 +31929,7 @@ export class OrcaRuntimeService {
     return resolveTerminalStartupCwd(workspace.path, requestedCwd)
   }
 
-  private async resolveTerminalWorkspaceLaunchScope(
+  async resolveTerminalWorkspaceLaunchScope(
     selector: string
   ): Promise<TerminalWorkspaceLaunchScope> {
     return (await this.resolveTerminalWorkspaceLaunchTarget(selector)).scope

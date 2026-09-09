@@ -12,6 +12,7 @@ import { ORCHESTRATION_AGENTS_QUARANTINE_METHODS } from './orchestration-agents-
 import { ORCHESTRATION_AGENTS_QUARANTINE_REMOTE_METHODS } from './orchestration-agents-quarantine-remote'
 import { ORCHESTRATION_AGENTS_RELINK_METHODS } from './orchestration-agents-relink'
 import { ORCHESTRATION_AGENTS_RETIRE_METHODS } from './orchestration-agents-retire'
+import { CHAIRS_RESTORE_METHODS } from './chairs-restore'
 
 export const ORCHESTRATION_AGENT_METHODS: RpcMethod[] = [
   ...ORCHESTRATION_AGENTS_REGISTER_METHODS,
@@ -20,5 +21,9 @@ export const ORCHESTRATION_AGENT_METHODS: RpcMethod[] = [
   ...ORCHESTRATION_AGENTS_QUARANTINE_METHODS,
   ...ORCHESTRATION_AGENTS_QUARANTINE_REMOTE_METHODS,
   ...ORCHESTRATION_AGENTS_RELINK_METHODS,
-  ...ORCHESTRATION_AGENTS_RETIRE_METHODS
+  ...ORCHESTRATION_AGENTS_RETIRE_METHODS,
+  // S10-21d b4: `orca chairs restore|status|export` — no pane attestation (see chairs-restore.ts's
+  // own JUDGMENT CALL note); a host-keyed rate limit stands in its place, plus (b3b, D-R165 M4) a
+  // strict local-transport fence: any paired-device caller is refused regardless.
+  ...CHAIRS_RESTORE_METHODS
 ]

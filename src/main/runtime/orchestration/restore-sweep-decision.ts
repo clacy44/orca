@@ -92,12 +92,16 @@ export function decideLeafHoldRows(
     // [S10-21d R110] 'daemon_survived' (the daemon-respawn arm's own launch row,
     // refreshAgentHandleAfterRespawn) holds the leaf under the identical rule — it is recorded
     // for THIS generation only when the pane's pty actually survived the restart.
+    // [S10-21d b3, DEC-2] 'host_restore' (the launcher's own HOST_RESUME evidence) holds the leaf
+    // exactly like 'caller_resume' — a launcher-issued restore admitted this generation is just
+    // as much a same-generation admitted launch as any other arm.
     if (
       evidence === 'sweep_record' ||
       evidence === 'host_launch' ||
       evidence === 'caller_resume' ||
       evidence === 'self_report_bootstrap' ||
-      evidence === 'daemon_survived'
+      evidence === 'daemon_survived' ||
+      evidence === 'host_restore'
     ) {
       if (occupantOnOwnPaneLive) {
         return {
@@ -111,7 +115,9 @@ export function decideLeafHoldRows(
                   ? `leaf_held: caller_resume_admitted_this_generation seq=${seq}`
                   : evidence === 'self_report_bootstrap'
                     ? `leaf_held: self_report_bootstrap_this_generation seq=${seq}`
-                    : `leaf_held: daemon_survived_admitted_this_generation seq=${seq}`
+                    : evidence === 'daemon_survived'
+                      ? `leaf_held: daemon_survived_admitted_this_generation seq=${seq}`
+                      : `leaf_held: host_restore_admitted_this_generation seq=${seq}`
         }
       }
       return {

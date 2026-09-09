@@ -15,6 +15,7 @@ export const APPIMAGE_CLI_COMMAND_NAMES = [
   'automations',
   'back',
   'capture',
+  'chairs',
   'check',
   'claude-teams',
   'clear',
