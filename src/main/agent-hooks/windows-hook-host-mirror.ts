@@ -11,6 +11,8 @@
 // handling, Expect: 100-continue, proxy resolution). Those are covered only by the
 // Windows-only `describe.skipIf` spawn test in the same test file.
 
+import { cancelUnreadResponseBody } from '../lib/unread-response-body'
+
 export type WindowsHookHostEndpointCoordinates = {
   port: string
   token: string
@@ -217,7 +219,11 @@ export async function readWindowsHookHostStdin(
   })
 }
 
-// Counterpart: OrcaHookHost.cs `PostPayload`. Swallows every failure — the host always exits 0.
+// Counterpart: OrcaHookHost.cs `PostPayload`, which disposes the response with
+// `using (request.GetResponse()) { }`. Swallows every failure — the host always exits 0. Mirrors
+// that disposal by cancelling the response body on every path (success and !ok) via
+// cancelUnreadResponseBody; an unread global-fetch body can crash the process (see
+// global-fetch-call-site-audit.test.ts).
 export async function postWindowsHookHostPayload(opts: {
   port: string
   token: string
@@ -228,7 +234,7 @@ export async function postWindowsHookHostPayload(opts: {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), opts.totalTimeoutMs ?? 1500)
   try {
-    await fetch(`http://127.0.0.1:${opts.port}${opts.pathname}`, {
+    const response = await fetch(`http://127.0.0.1:${opts.port}${opts.pathname}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
@@ -237,6 +243,7 @@ export async function postWindowsHookHostPayload(opts: {
       body: opts.body,
       signal: controller.signal
     })
+    await cancelUnreadResponseBody(response)
   } catch {
     // Why: mirrors OrcaHookHost.cs's top-level try/catch — a failed POST must never surface.
   } finally {
