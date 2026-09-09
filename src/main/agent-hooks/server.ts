@@ -57,6 +57,11 @@ import {
   parseClaudeStatusLineBody,
   type ClaudeStatusLineRateLimits
 } from '../../shared/claude-statusline-rate-limits'
+// [S10-21d R118, design (b)] The one allow-list gate between a live statusline report and
+// updateLaunchPrefsForPane — 'ultracode' is deliberately absent: the statusline cannot produce
+// it (renders as 'xhigh'), so it is a 'launch'-only value (agent-launch-admission.ts), never an
+// observed one. Anything not in this set fails closed (never written, never logged).
+const CLAUDE_SESSION_PREFS_VALID_EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
 import {
   AGENT_STATUS_STALE_AFTER_MS,
   type AgentStatusClearIpcPayload,
@@ -689,6 +694,11 @@ export class AgentHookServer {
   private env = 'production'
   private onAgentStatus: ((payload: EnrichedAgentHookEventPayload) => void) | null = null
   private onClaudeStatusLine: ((event: ClaudeStatusLineRateLimits) => void) | null = null
+  // S10-21d R118 (design (b)): fires ONLY for a validated observed effort level, alongside
+  // onClaudeStatusLine, never in its place — see the allow-list gate at the call site below.
+  private onClaudeSessionPrefs:
+    | ((event: { paneKey: string; model?: string; effort: string }) => void)
+    | null = null
   private onPaneStatusCleared: PaneStatusClearListener | null = null
   private paneStatusClearListeners = new Set<PaneStatusClearListener>()
   private statusChangeListeners = new Set<StatusChangeListener>()
@@ -765,6 +775,15 @@ export class AgentHookServer {
     listener: ((event: ClaudeStatusLineRateLimits) => void) | null
   ): void {
     this.onClaudeStatusLine = listener
+  }
+
+  // S10-21d R118 (design (b)): a separate slot, not a second consumer of onClaudeStatusLine —
+  // this one is gated (paneKey known + effort on the allow-list) at the call site, so a listener
+  // here never has to re-validate what it receives.
+  setClaudeSessionPrefsListener(
+    listener: ((event: { paneKey: string; model?: string; effort: string }) => void) | null
+  ): void {
+    this.onClaudeSessionPrefs = listener
   }
 
   subscribeStatusChanges(listener: StatusChangeListener): () => void {
@@ -2293,6 +2312,20 @@ export class AgentHookServer {
           const statusLineEvent = parseClaudeStatusLineBody(body)
           if (statusLineEvent) {
             this.onClaudeStatusLine?.(statusLineEvent)
+            // [S10-21d R118, design (b), DEC-9 upstream gate] Fail closed: only a recognized
+            // observed effort level, only for a pane we can identify, ever reaches
+            // updateLaunchPrefsForPane — never the raw payload (never logged either).
+            if (
+              statusLineEvent.paneKey &&
+              statusLineEvent.effort &&
+              CLAUDE_SESSION_PREFS_VALID_EFFORT_LEVELS.has(statusLineEvent.effort.level)
+            ) {
+              this.onClaudeSessionPrefs?.({
+                paneKey: statusLineEvent.paneKey,
+                model: statusLineEvent.model?.id,
+                effort: statusLineEvent.effort.level
+              })
+            }
           }
           res.writeHead(204)
           res.end()

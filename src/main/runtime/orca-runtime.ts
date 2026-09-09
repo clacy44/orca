@@ -1919,6 +1919,10 @@ type RuntimePtyController = {
      * `RuntimePtyController.spawn` caller — the same rationale as `TerminalCreateOptions`'s
      * `credentialLane`/`restoreProvenance`. Non-wire; never on `PtySpawnOptions`. */
     launchAdmission: LaunchAdmission
+    /** [S10-21d R118, design (a)/(b)] `createTerminal`'s own `opts.launchPreferences`
+     * (TerminalCreateOptions), narrowed to model/effort — threaded to `agent-launch-admission.ts`
+     * so a fresh HOST_MINTED/HOST_RESUME/caller_resume row records what it launched with. */
+    launchPreferences?: { model?: string; effort?: string }
     signal?: AbortSignal
     onPtySpawnCommitted?: () => void
     adoptedStablePane?: {
@@ -28775,6 +28779,11 @@ export class OrcaRuntimeService {
             rows: 40,
             cwd,
             launchAdmission,
+            // [S10-21d R118, design (a)/(b)] model/effort only — `mode` is unrelated to this
+            // slice and is never forwarded to admission/recordLaunch.
+            launchPreferences: opts.launchPreferences
+              ? { model: opts.launchPreferences.model, effort: opts.launchPreferences.effort }
+              : undefined,
             command: sequencedStartupCommand
               ? launchOpts.command
               : (agentTeamsPlan?.command ?? launchOpts.command),
@@ -36310,6 +36319,18 @@ export class OrcaRuntimeService {
     delivery: MessageDeliveryState
     recipient: MessageRecipientPresence
     environment?: string
+    /** R106: set only when `delivery` is 'relayed' and the row's own peer_relayed_at (UTC,
+     *  sqlite `datetime('now')`) is known — lets the CLI render an honest timestamp instead of
+     *  a live-presence claim it cannot back. Absent (e.g. the reply-outbox 'delivered' branch,
+     *  which has no peer_relayed_at column) means "relayed, timestamp unknown", not "not
+     *  relayed". */
+    relayedAt?: string
+    /** [S10-21d D-R162 M-3] Set only on the reply-outbox 'delivered' branch below: the far side
+     *  itself accepted this reply (peer_reply_outbox.state === 'delivered'), which is a stronger
+     *  claim than the plain relay-mirror's peer_relayed_at (this host's OWN relay attempt was
+     *  accepted, not the far side's receipt). Without it that branch was indistinguishable from
+     *  relay_pending's honest "delivery state unknown". */
+    deliveryConfirmed?: true
   } {
     // S10-15 verifier V-4 (was F4): a relayed-send mirror row (to_handle
     // `remote:<environmentId>:<agentId>`, S10-15 F1 R6) is never "pointed" to a live pane on
@@ -36369,13 +36390,20 @@ export class OrcaRuntimeService {
         return {
           delivery,
           recipient: { state: 'unresolved', lastSeenAt: null },
-          ...(environment ? { environment } : {})
+          ...(environment ? { environment } : {}),
+          // [S10-21d D-R162 M-3] Only this branch — the far side accepted the reply — carries
+          // the confirmed-delivery claim; every other outbox state (including 'relayed' rows
+          // reached below, which never had this outbox row at all) omits it.
+          ...(outboxItem.state === 'delivered' ? { deliveryConfirmed: true as const } : {})
         }
       }
       return {
         delivery: message.peer_relayed_at ? 'relayed' : 'relay_pending',
         recipient: { state: 'unresolved', lastSeenAt: null },
-        ...(environment ? { environment } : {})
+        ...(environment ? { environment } : {}),
+        // R106: peer_relayed_at is set only once the peer accepted the relay (`relayed`); a
+        // `relay_pending` row never carries a timestamp to report.
+        ...(message.peer_relayed_at ? { relayedAt: message.peer_relayed_at } : {})
       }
     }
     const baseDelivery = resolveMessageDeliveryState(

@@ -12,12 +12,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type Database from '../sqlite/sync-database'
 import { OrchestrationDb } from '../runtime/orchestration/db'
 import { recordLaunch } from '../runtime/orchestration/agent-launch-sessions'
+import { PRUNE_PER_PANE } from '../runtime/orchestration/agent-launch-sessions-retention'
 import { restoreOneRegisteredPane, runRestoreSweepBody } from './restore-registered-agent-panes'
 import { _resetRestoreSweepLockForTest } from '../runtime/restore-sweep-lock'
 import {
   HOST_ID,
   EXEC_HOST_ID,
   PRIOR_GEN,
+  LAUNCH_GEN,
   emptyInventory,
   insertAgent,
   baseDeps
@@ -134,15 +136,66 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
     )
     expect(outcome.kind).toBe('skipped_daemon_survived')
     expect(refreshSpy).toHaveBeenCalledTimes(1)
+    // [S10-21d R110, SCENARIO_CORRECTION] Adds `currentLaunchGeneration` to the expected call —
+    // was missing this field entirely (the daemon-survived arm never recorded a launch row, the
+    // exact staleness diag-r106-r110-2026-09-08.md reports).
     expect(refreshSpy).toHaveBeenCalledWith({
       hostId: HOST_ID,
       paneKey,
       newTerminalHandle: 'term_fresh_s7',
       processIncarnation: REAL_PROCESS_INCARNATION,
-      agentId: 'agent-s7'
+      agentId: 'agent-s7',
+      currentLaunchGeneration: LAUNCH_GEN
     })
     expect(notifyRebindDelivery).toHaveBeenCalledTimes(1)
     expect(notifyRebindDelivery).toHaveBeenCalledWith('agent-s7')
+  })
+
+  // [S10-21d D-R162 M-2] Before this fix, `handleDaemonSurvivedSkip` never pruned — every
+  // survival added a row that no retention pass ever removed, so a pane surviving N restarts
+  // accumulated N+1 rows, violating PRUNE_PER_PANE (agent-launch-sessions-retention.ts).
+  it('R162 M-2: four survivals of the same pane leave <= PRUNE_PER_PANE launch rows for it', async () => {
+    const db = rawDb()
+    const paneKey = 'tab1:00000000-0000-4000-8000-00000000a7f0'
+    insertAgent(db, {
+      id: 'agent-s7-m2',
+      display_name: 'chair-s7-m2',
+      pane_key: paneKey,
+      process_incarnation: REAL_PROCESS_INCARNATION
+    })
+    recordLaunch(db, {
+      hostId: HOST_ID,
+      paneKey,
+      agentType: 'claude',
+      sessionId: 'sess-s7-m2',
+      launchGeneration: PRIOR_GEN,
+      executionHostId: EXEC_HOST_ID,
+      evidence: 'host_launch'
+    })
+    const inventory = emptyInventory({
+      allLivePtyIds: new Set([REAL_PTY_ID]),
+      terminalIdentityByPtyId: new Map([
+        [REAL_PTY_ID, { handle: 'term_fresh_s7_m2', incarnationId: REAL_INCARNATION_ID }]
+      ])
+    })
+    const notifyRebindDelivery = vi.fn()
+    for (let i = 0; i < 4; i++) {
+      const outcome = await restoreOneRegisteredPane(
+        baseDeps(orchestrationDb!, { notifyRebindDelivery }),
+        orchestrationDb!,
+        HOST_ID,
+        'agent-s7-m2',
+        REAL_PROCESS_INCARNATION,
+        'wt-1',
+        orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!,
+        inventory
+      )
+      expect(outcome.kind).toBe('skipped_daemon_survived')
+    }
+    const rowCount = db
+      .prepare(`SELECT COUNT(*) AS n FROM agent_launch_sessions WHERE host_id = ? AND pane_key = ?`)
+      .get(HOST_ID, paneKey) as { n: number }
+    expect(rowCount.n).toBeLessThanOrEqual(PRUNE_PER_PANE)
   })
 
   it('a throw from refreshAgentHandleAfterRespawn is audited as a sweep note, never a failed skip — notifyRebindDelivery is not reached', async () => {
@@ -487,19 +540,22 @@ describe('S10-21c B5, design §2 S7: skipped_daemon_survived refreshes the handl
     )
     expect(summary.skippedDaemonSurvived).toBe(2)
     expect(refreshSpy).toHaveBeenCalledTimes(2)
+    // [S10-21d R110, SCENARIO_CORRECTION] Same addition as above, both candidates.
     expect(refreshSpy).toHaveBeenCalledWith({
       hostId: HOST_ID,
       paneKey: paneKeyA,
       newTerminalHandle: 'term_fresh_s7d_a',
       processIncarnation: 'pty-s7d-a:10101010-1010-4101-8101-101010101011',
-      agentId: 'agent-s7d-a'
+      agentId: 'agent-s7d-a',
+      currentLaunchGeneration: LAUNCH_GEN
     })
     expect(refreshSpy).toHaveBeenCalledWith({
       hostId: HOST_ID,
       paneKey: paneKeyB,
       newTerminalHandle: 'term_fresh_s7d_b',
       processIncarnation: 'pty-s7d-b:20202020-2020-4202-8202-202020202022',
-      agentId: 'agent-s7d-b'
+      agentId: 'agent-s7d-b',
+      currentLaunchGeneration: LAUNCH_GEN
     })
     expect(notifyRebindDelivery).toHaveBeenCalledTimes(2)
     expect(notifyRebindDelivery).toHaveBeenCalledWith('agent-s7d-a')

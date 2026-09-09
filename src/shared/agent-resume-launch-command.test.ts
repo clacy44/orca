@@ -578,3 +578,89 @@ describe('buildAgentResumeStartupPlan claude selector guard', () => {
     expect(restored?.launchConfig.agentCommand).toBe("claude '--resume'")
   })
 })
+
+// [S10-21d R118, design (c)/(e)] buildClaudeResumeLaunchCommand's modelEffort parameter.
+describe('buildClaudeResumeLaunchCommand: model/effort (S10-21d R118)', () => {
+  for (const { platform, shell } of SHELLS) {
+    it(`${platform}/${shell}: appends --model X --effort max alongside the resume selector`, () => {
+      const command = buildClaudeResumeLaunchCommand('claude', RESUME, shell, {
+        model: 'claude-opus-4-8',
+        effort: 'max'
+      })
+      const tokenized = tokenizeStartupCommand(command, shell)
+      expect(tokenized.ok).toBe(true)
+      if (!tokenized.ok) {
+        return
+      }
+      const { tokens } = tokenized
+      expect(tokens[tokens.indexOf('--model') + 1]).toBe('claude-opus-4-8')
+      expect(tokens[tokens.indexOf('--effort') + 1]).toBe('max')
+      expectSingleAuthoritativeResume(command, shell)
+    })
+
+    it(`${platform}/${shell}: appends --effort ultracode verbatim (not validated/rewritten here)`, () => {
+      const command = buildClaudeResumeLaunchCommand('claude', RESUME, shell, {
+        effort: 'ultracode'
+      })
+      const tokenized = tokenizeStartupCommand(command, shell)
+      expect(tokenized.ok).toBe(true)
+      if (!tokenized.ok) {
+        return
+      }
+      expect(tokenized.tokens[tokenized.tokens.indexOf('--effort') + 1]).toBe('ultracode')
+    })
+  }
+
+  it('NULL modelEffort (undefined) leaves the command byte-identical to today', () => {
+    const withUndefined = buildClaudeResumeLaunchCommand('claude', RESUME, 'posix')
+    const withEmptyFields = buildClaudeResumeLaunchCommand('claude', RESUME, 'posix', {})
+    expect(withUndefined).toBe(withEmptyFields)
+    expect(withUndefined).not.toContain('--model')
+    expect(withUndefined).not.toContain('--effort')
+  })
+
+  it('replaces a stale --effort already present in the base command', () => {
+    const command = buildClaudeResumeLaunchCommand('claude --effort high', RESUME, 'posix', {
+      effort: 'max'
+    })
+    const tokenized = tokenizeStartupCommand(command, 'posix')
+    expect(tokenized.ok).toBe(true)
+    if (!tokenized.ok) {
+      return
+    }
+    const effortTokens = tokenized.tokens.filter((t) => t === '--effort')
+    expect(effortTokens).toHaveLength(1)
+    expect(tokenized.tokens[tokenized.tokens.indexOf('--effort') + 1]).toBe('max')
+  })
+
+  it('replaces a stale --model already present in the base command, leaving unrelated agentArgs untouched', () => {
+    const command = buildClaudeResumeLaunchCommand(
+      'claude --model claude-old --verbose',
+      RESUME,
+      'posix',
+      { model: 'claude-new' }
+    )
+    const tokenized = tokenizeStartupCommand(command, 'posix')
+    expect(tokenized.ok).toBe(true)
+    if (!tokenized.ok) {
+      return
+    }
+    const modelTokens = tokenized.tokens.filter((t) => t === '--model')
+    expect(modelTokens).toHaveLength(1)
+    expect(tokenized.tokens[tokenized.tokens.indexOf('--model') + 1]).toBe('claude-new')
+    expect(tokenized.tokens).toContain('--verbose')
+  })
+
+  it('does not touch an existing --model when only effort is supplied', () => {
+    const command = buildClaudeResumeLaunchCommand('claude --model claude-x', RESUME, 'posix', {
+      effort: 'high'
+    })
+    const tokenized = tokenizeStartupCommand(command, 'posix')
+    expect(tokenized.ok).toBe(true)
+    if (!tokenized.ok) {
+      return
+    }
+    expect(tokenized.tokens[tokenized.tokens.indexOf('--model') + 1]).toBe('claude-x')
+    expect(tokenized.tokens[tokenized.tokens.indexOf('--effort') + 1]).toBe('high')
+  })
+})

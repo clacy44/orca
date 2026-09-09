@@ -91,7 +91,9 @@ import {
   recordLaunch as recordLaunchImpl,
   recordSelfReportRotation as recordSelfReportRotationImpl,
   setLaunchAgentId as setLaunchAgentIdImpl,
+  updateLaunchPrefsForPane as updateLaunchPrefsForPaneImpl,
   type AgentLaunchSessionRow,
+  type LaunchPrefSource,
   type RecordLaunchParams,
   type RecordLaunchResult,
   type RecordSelfReportRotationParams,
@@ -136,7 +138,9 @@ import {
 // one. Added here rather than left unreachable; mirrors every other launch-session delegate above.
 import {
   deleteLaunchRow as deleteLaunchRowImpl,
-  restoreCurrentSessionForPane as restoreCurrentSessionForPaneImpl
+  restoreCurrentSessionForPane as restoreCurrentSessionForPaneImpl,
+  prunePaneRows as prunePaneRowsImpl,
+  pruneGlobalRows as pruneGlobalRowsImpl
 } from './agent-launch-sessions-retention'
 import {
   clearSweepRestoreMark as clearSweepRestoreMarkImpl,
@@ -1206,7 +1210,18 @@ const AGENT_LAUNCH_SESSIONS_SCHEMA_SQL = `
                                                    -- constraint; the design's schema block omits
                                                    -- one, unlike current_sessions' explicit
                                                    -- UNIQUEs, so this stays literal to §7's text
-        recorded_at              TEXT NOT NULL DEFAULT (datetime('now'))
+        recorded_at              TEXT NOT NULL DEFAULT (datetime('now')),
+        -- [S10-21d R118, v43, DESIGN (a)] additive, nullable, no CHECK (mirrors evidence's own
+        -- literal-to-design-text discipline above). NULL means "no captured preference" — the
+        -- create/restore path already treats undefined prefs as a no-op (today's byte-identical
+        -- command), so no backfill and no default is needed for either column.
+        pref_model                TEXT,            -- last-known --model id, source 'launch' or
+                                                   -- 'observed' (pref_source)
+        pref_effort               TEXT,            -- last-known --effort level, including
+                                                   -- 'ultracode' (source 'launch' only — never
+                                                   -- captured live, DESIGN CANNOT note)
+        pref_source               TEXT             -- 'launch' | 'observed', NULL iff both pref_*
+                                                   -- columns are NULL
         -- [S10-21a C1a, errata 5(p)-5 item 1] UNIQUE(host_id, pane_key, launch_generation)
         -- DROPPED: launch_generation is one UUID per OrcaRuntimeService (errata 5(o)), so the
         -- constraint forbade a second covered launch into the same pane for the app's whole
@@ -1442,8 +1457,8 @@ type RunListCursor = {
   id: string
 }
 
-// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption, v29 dispatch liveness breach fence, v30 dispatch input evidence and post-ready observation fence, v31 persisted federation relay health, v32 recipient pane key on messages (bare-handle re-mint fallback), v33 agent directory + mailbox deliveries + audit/rate tables + message sender provenance (S10-1), v34 durable threads + thread_participants + gate_refusals + message purge/gate columns + message payload_kind pact-step discriminator column + question_threads peer-ask columns + agents.origin_kind tightening (S10-2a), v35 lock-step pact columns on threads (pact_proposer_agent_id/pact_steps_total/pact_ordinal/pact_paused_at/pact_pause_reason) + pact_steps append-only ledger + idx_pact_pair_live + trg_pact_turn_membership (S10-3), v36 remote_agents (mirrored peer-agent claims, never a row in `agents`) + relay_seen (durable per-item federation import outcome, incl. outcome='refused') (S10-4 rulings 1/2), v37 remote_agents.link_kind (D5 addressability keying) + remote_agents.peer_fingerprint (ruling 2 TOFU binding) + idx_remote_agents_peer (S10-15), v38 messages.peer_link_device_id/peer_agent_id/peer_thread_id/peer_relayed_at (cross-host send/reply provenance, chair ruling 7 — no messages.peer_fingerprint: R9's automatic route resolution was cut) + F7a stranded-name-addressed-row repair (S10-15 F1/F2), v39 remote_dispatch_attachments.blocked_reason/blocked_at/blocked_consumed_at/handle_bound_at/agent_exited_at + idx_rda_terminal_handle + 'agent_exited' state (CHECK rebuild) + peer_run_grants table (S10-19 peer access profile, chair rulings 20/22/24), v40 peer_link_bindings + peer_link_attempts + peer_link_scan_facts + peer_link_confirm_observations + peer_link_containment + peer_reply_outbox tables (S10-16 secure link binding, chair rulings 8/10/11/14/17/18g/23), v41 agent_launch_sessions + current_sessions + agent_sweep_restore_marks tables (S10-21a zero-ritual-restart C1, Ruling 34 Addendum 5) — host-authored launch-session provenance, the successor-collision fence, and durable sweep double-resume prevention; none are peer-writable, none are backfilled (§2.9), agent_launch_sessions/current_sessions/agent_sweep_restore_marks are EXEMPT from resetAll (§7), v42 35 additive columns across threads (19)/pact_steps (6)/remote_agents (2)/peer_reply_outbox (7)/peer_link_scan_facts (1, reachable_since, B17) + pact_applied_ids table + peer_link_scan_facts.unreachable_since (S10-21b B1, federated pacts, Ruling 34 Addendum 2/6/6(16)) — no CHECK widened anywhere (pact_pause_reason stays six values; a link-driven pause reuses 'counterpart_gone' with pact_steps.reason_code='counterpart_unreachable').
-const SCHEMA_VERSION = 42
+// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 worker terminal resource ownership, v24 creator-incarnation authority, v25 active Dispatch handle lookup, v26 indexed mutation receipt capacity, v27 durable federation acknowledgments, v28 blocked-worker liveness exemption, v29 dispatch liveness breach fence, v30 dispatch input evidence and post-ready observation fence, v31 persisted federation relay health, v32 recipient pane key on messages (bare-handle re-mint fallback), v33 agent directory + mailbox deliveries + audit/rate tables + message sender provenance (S10-1), v34 durable threads + thread_participants + gate_refusals + message purge/gate columns + message payload_kind pact-step discriminator column + question_threads peer-ask columns + agents.origin_kind tightening (S10-2a), v35 lock-step pact columns on threads (pact_proposer_agent_id/pact_steps_total/pact_ordinal/pact_paused_at/pact_pause_reason) + pact_steps append-only ledger + idx_pact_pair_live + trg_pact_turn_membership (S10-3), v36 remote_agents (mirrored peer-agent claims, never a row in `agents`) + relay_seen (durable per-item federation import outcome, incl. outcome='refused') (S10-4 rulings 1/2), v37 remote_agents.link_kind (D5 addressability keying) + remote_agents.peer_fingerprint (ruling 2 TOFU binding) + idx_remote_agents_peer (S10-15), v38 messages.peer_link_device_id/peer_agent_id/peer_thread_id/peer_relayed_at (cross-host send/reply provenance, chair ruling 7 — no messages.peer_fingerprint: R9's automatic route resolution was cut) + F7a stranded-name-addressed-row repair (S10-15 F1/F2), v39 remote_dispatch_attachments.blocked_reason/blocked_at/blocked_consumed_at/handle_bound_at/agent_exited_at + idx_rda_terminal_handle + 'agent_exited' state (CHECK rebuild) + peer_run_grants table (S10-19 peer access profile, chair rulings 20/22/24), v40 peer_link_bindings + peer_link_attempts + peer_link_scan_facts + peer_link_confirm_observations + peer_link_containment + peer_reply_outbox tables (S10-16 secure link binding, chair rulings 8/10/11/14/17/18g/23), v41 agent_launch_sessions + current_sessions + agent_sweep_restore_marks tables (S10-21a zero-ritual-restart C1, Ruling 34 Addendum 5) — host-authored launch-session provenance, the successor-collision fence, and durable sweep double-resume prevention; none are peer-writable, none are backfilled (§2.9), agent_launch_sessions/current_sessions/agent_sweep_restore_marks are EXEMPT from resetAll (§7), v42 35 additive columns across threads (19)/pact_steps (6)/remote_agents (2)/peer_reply_outbox (7)/peer_link_scan_facts (1, reachable_since, B17) + pact_applied_ids table + peer_link_scan_facts.unreachable_since (S10-21b B1, federated pacts, Ruling 34 Addendum 2/6/6(16)) — no CHECK widened anywhere (pact_pause_reason stays six values; a link-driven pause reuses 'counterpart_gone' with pact_steps.reason_code='counterpart_unreachable'). v43 3 additive columns on agent_launch_sessions (pref_model, pref_effort, pref_source TEXT, all nullable) (S10-21d R118 per-pane model/effort persistence, DESIGN (a)) — no data rewrite, no index change, launch ledger stays append-only (updateLaunchPrefsForPane touches only the newest row's pref_* columns, never inserts/deletes).
+const SCHEMA_VERSION = 43
 
 // S10-15 ruling 3(b): the per-link cap on DISTINCT mirrored peer agents — past this, a further
 // NEW remote agent id refuses the mirror write (never the mail/ask itself) with a typed
@@ -2051,6 +2066,34 @@ export class OrchestrationDb {
     `)
   }
 
+  // S10-21d R118 (design (a), v43): a store already stamped v43 by an earlier, in-review copy
+  // of this branch never re-enters migrate()'s `current < 43` block on any later open
+  // (createTables() runs BEFORE migrate() on every open, db.ts constructor) — same reason
+  // repairUnshippedV42FederatedPacts exists, modeled on it byte-for-byte in shape: guard on
+  // storedVersion, check the table exists, ALTER one column at a time behind hasColumn. Additive
+  // only — three nullable TEXT columns, no data rewrite, no index change.
+  private repairUnshippedV43PerPanePrefs(): void {
+    const storedVersion = this.db.pragma('user_version', { simple: true }) as number
+    if (storedVersion < 43) {
+      return
+    }
+    const hasTable = (t: string): boolean =>
+      this.db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(t) !==
+      undefined
+
+    if (hasTable('agent_launch_sessions')) {
+      for (const [column, ddl] of [
+        ['pref_model', 'TEXT'],
+        ['pref_effort', 'TEXT'],
+        ['pref_source', 'TEXT']
+      ] as const) {
+        if (!this.hasColumn('agent_launch_sessions', column)) {
+          this.db.exec(`ALTER TABLE agent_launch_sessions ADD COLUMN ${column} ${ddl}`)
+        }
+      }
+    }
+  }
+
   // S10-15 review m-2: scoped to host_id and capped at one match — deterministic today only
   // because host_id is the constant 'local' for every row this DB ever writes; defense in depth
   // against a future multi-host-per-db writer, and keeps the scalar subquery from ever throwing
@@ -2091,6 +2134,7 @@ export class OrchestrationDb {
     this.repairUnshippedV39AttachmentRetentionFloor()
     this.repairUnshippedV40LinkBinding()
     this.repairUnshippedV42FederatedPacts()
+    this.repairUnshippedV43PerPanePrefs()
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS runs (
         id                    TEXT PRIMARY KEY,
@@ -3308,6 +3352,21 @@ export class OrchestrationDb {
           CREATE INDEX IF NOT EXISTS idx_pact_steps_remote
             ON pact_steps(actor_is_remote, actor_environment_id, thread_id);
         `)
+      }
+      // v42 -> v43 (S10-21d R118, design (a)): 3 additive nullable TEXT columns on
+      // agent_launch_sessions (pref_model, pref_effort, pref_source) — no data rewrite, no
+      // index change, the launch ledger stays append-only (this ALTER only ever adds a column;
+      // it never touches an existing row's other fields).
+      if (current < 43) {
+        for (const [column, ddl] of [
+          ['pref_model', 'TEXT'],
+          ['pref_effort', 'TEXT'],
+          ['pref_source', 'TEXT']
+        ] as const) {
+          if (!this.hasColumn('agent_launch_sessions', column)) {
+            this.db.exec(`ALTER TABLE agent_launch_sessions ADD COLUMN ${column} ${ddl}`)
+          }
+        }
       }
       this.db.exec(`
         CREATE INDEX IF NOT EXISTS idx_dispatch_assignee_pane_leaf
@@ -5292,6 +5351,16 @@ export class OrchestrationDb {
     setLaunchAgentIdImpl(this.db, by, agentId)
   }
 
+  // S10-21d R118 (design (a)/(b), DEC-9): the one writer of pref_model/pref_effort/pref_source
+  // on an existing row — never inserts, never touches any other column.
+  updateLaunchPrefsForPane(
+    hostId: string,
+    paneKey: string,
+    prefs: { model?: string; effort?: string; source: LaunchPrefSource }
+  ): void {
+    updateLaunchPrefsForPaneImpl(this.db, hostId, paneKey, prefs)
+  }
+
   deleteLaunchRowsForAgent(agentId: string): number {
     return deleteLaunchRowsForAgentImpl(this.db, agentId)
   }
@@ -5344,6 +5413,14 @@ export class OrchestrationDb {
     params: RefreshAgentHandleAfterRespawnParams
   ): RefreshAgentHandleAfterRespawnResult {
     return refreshAgentHandleAfterRespawnImpl(this.db, params)
+  }
+
+  // [S10-21d D-R162 M-2] `db` is private on this class — the daemon-survived sweep arm
+  // (restore-sweep-daemon-survived-delivery.ts) needs the same post-commit §7 prunes
+  // rebindRestoredPane runs (agent-restore-rebind.ts:437-438) and has no other way to reach them.
+  pruneLaunchRowRetention(hostId: string, paneKey: string): void {
+    prunePaneRowsImpl(this.db, hostId, paneKey)
+    pruneGlobalRowsImpl(this.db, hostId)
   }
 
   // S10-21a C10 (design v3.2 §2.11 N4 fix; Ruling 34 Addendum 25): host-authored pact un-pause

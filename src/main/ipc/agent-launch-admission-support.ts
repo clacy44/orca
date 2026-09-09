@@ -2,8 +2,53 @@
 // agent-launch-admission.ts to stay under the repo's max-lines budget.
 import type { PtySpawnOptions } from '../providers/pty-provider-contract'
 import type { PtySpawnResult } from '../providers/pty-spawn-result'
+import type { RecordLaunchParams } from '../runtime/orchestration/agent-launch-sessions'
 import type { OrchestrationDb } from '../runtime/orchestration/db'
 import type { resolveResumeTranscript } from '../startup/resolve-resume-transcript'
+
+// [S10-21d R118, design (a)] Split out of agent-launch-admission.ts (same max-lines-budget
+// reason this whole file exists) — takes the narrow shape directly rather than the full
+// AgentLaunchAdmissionContext (defined below in this same file). Undefined input (the
+// overwhelming majority of launches) spreads to nothing, so params.prefs is omitted and the
+// INSERT writes NULL (design (d)).
+export function launchPrefsForCtx(
+  launchPreferences: { model?: string; effort?: string } | undefined
+): Pick<RecordLaunchParams, 'prefs'> {
+  return launchPreferences ? { prefs: { ...launchPreferences, source: 'launch' as const } } : {}
+}
+
+// [S10-21d R118, forced deviation — see RETURN] Moved here verbatim from
+// agent-launch-admission.ts (which re-exports it) to stay under that file's max-lines budget
+// after this slice added the launchPreferences field — no behavior change.
+export type AgentLaunchAdmissionContext = {
+  hostId: string
+  executionHostId: string
+  launchGeneration: string
+  /** [S10-21d R118, design (a)/(b)] Threaded from `createTerminal`'s own `opts.launchPreferences`
+   * (TerminalCreateOptions) down through `RuntimePtyController.spawn` and
+   * `launchAdmissionBundle` — undefined for the overwhelming majority of launches that name no
+   * preference, in which case every `recordLaunch` call in agent-launch-admission.ts passes no
+   * `prefs` and the INSERT writes NULL (design (d), byte-identical to today). model/effort only —
+   * `mode` is a separate, unrelated preference this slice does not touch. */
+  launchPreferences?: { model?: string; effort?: string }
+  /** [D-R104 F-3] REQUIRED — every production caller (launchAdmissionBundle, pty.ts) now wires a
+   * real pane notice; a caller cannot silently omit it and have every UNRECORDED/self-resume
+   * signal go audit-only. [§2.6] Raised on SELF_RESUME(caller) into a registered pane and on
+   * every UNRECORDED. */
+  notice: (paneKey: string, verb: string, reasonCode: string) => void
+  /** [D-R104 F-3] REQUIRED, same reasoning as `notice`. [§C.4 SELF_RESUME v2.1 V1] The §2.6
+   * contested-lineage signal — [S10-21a C6b, Ruling 34 Addendum 19] audit verb 'launch', outcome
+   * 'contested', attributed to the registered row (`registeredAgentId`) — plus a pane notice.
+   * [S10-21a C6, SCOPE 3(b)] `registeredPaneKey` is the registered agent's OWN pane_key
+   * (`getAgentByPaneKey` matches by pane SUFFIX — derived-agent-rows.ts:22-34 — so it can
+   * legitimately differ from `claimantPaneKey`, the pane the caller-origin SELF_RESUME actually
+   * landed on). The runtime-side handler notices BOTH when they differ, one when they don't. */
+  contestedLineage: (
+    claimantPaneKey: string,
+    registeredPaneKey: string,
+    registeredAgentId: string
+  ) => void
+}
 
 /** [S10-21a C7f, D-R114 fix 1] The admission outcome pty.ts's post-spawn-commit gate needs at
  * :6937 — HOST_MINTED and HOST_RESUME both come from `buildRecordedAdmission`; the two

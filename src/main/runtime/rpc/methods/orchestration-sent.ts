@@ -36,9 +36,19 @@ export const ORCHESTRATION_SENT_METHODS: RpcMethod[] = [
           }
         )
       }
-      const { delivery, recipient, environment } = runtime.getMessageDeliverySnapshot(message)
+      const { delivery, recipient, environment, relayedAt, deliveryConfirmed } =
+        runtime.getMessageDeliverySnapshot(message)
       return {
-        delivery: { state: delivery, recipient, ...(environment ? { environment } : {}) }
+        delivery: {
+          state: delivery,
+          recipient,
+          ...(environment ? { environment } : {}),
+          // R106: carried through so the CLI formatter can render an honest relay timestamp
+          // instead of a resolvability claim it cannot back (diag-r106-r110-2026-09-08.md).
+          ...(relayedAt ? { relayedAt } : {}),
+          // [S10-21d D-R162 M-3] Carried through additively, same shape rule as relayedAt.
+          ...(deliveryConfirmed ? { deliveryConfirmed } : {})
+        }
       }
     }
   })

@@ -13,6 +13,16 @@
 // and can leave S3/S5 permanently dead for a legitimately churning pane until an app restart];
 // older entries age out of the window on their own. Structural params (not imported from
 // agent-lineage-mismatch.ts) so this split introduces no import cycle.
+//
+// [S10-21d R107, chair decision, diag-r106-r110-2026-09-08.md] A THIRD verdict shape, `pending`
+// (no file yet, or a zero-turn stub — never an observed negative), gets its own FIXED 10s retry
+// (PENDING_TRANSCRIPT_RETRY_MS) instead of the escalating negative ladder above: a fork stub or a
+// session seconds old may legitimately gain its first turn on the very next report, so treating
+// it as an increasingly-unlikely-to-change negative was the exact staleness this fixes. Coexists
+// with, rather than supersedes, D-R152-b4 finding 2 (a report inside the retry window still hits
+// the cache and never re-walks) and D-R156 finding 3 (the churn budget is still charged
+// unconditionally, pending or not — an id that will never produce a real transcript is exactly
+// what that bound must keep catching).
 import type Database from '../../sqlite/sync-database'
 import { writeAgentAudit } from './agent-audit-log'
 
@@ -30,6 +40,24 @@ const TRANSCRIPT_VERDICT_CACHE_MAX = 512
 /** First negative retry after 60s, doubling each re-check, capped at 15 min. */
 const NEGATIVE_TRANSCRIPT_BACKOFF_INITIAL_MS = 60_000
 const NEGATIVE_TRANSCRIPT_BACKOFF_CAP_MS = 15 * 60_000
+/** [S10-21d R107, chair decision; bounded by D-R162 H-1] A `pending` verdict (stub/zero-turn/
+ * not-yet-written transcript) is cached as a negative on a FIXED 10s retry — not the escalating
+ * 60s->15min ladder above — because it is not an observed negative and must not be treated as
+ * increasingly unlikely to change, UNLESS it stays pending for PENDING_TRANSCRIPT_MAX_CHECKS
+ * consecutive re-walks (~2 min): past that bound the id is presumed stuck and falls through to
+ * the ladder as an ordinary negative, seeded fresh (never carrying the pending entry's own fixed
+ * retry timestamps forward — see PENDING_TRANSCRIPT_MAX_CHECKS below).
+ * Fixed, not doubling: a stub that stays a stub keeps retrying every 10s for as long as it is
+ * seen (bounded overall by the churn budget below, which a pending verdict still charges — D-R156
+ * finding 3 is unchanged; a new launch generation still clears the cache outright — D-R154
+ * finding 1's generation-clear half is unaffected). Chosen to keep D-R152-b4 finding 2's own test
+ * timing (an immediate re-report, elapsed 0) inside the cache window. */
+const PENDING_TRANSCRIPT_RETRY_MS = 10_000
+/** [S10-21d D-R162 H-1] A pending verdict re-walks at the fixed 10s retry for up to this many
+ * consecutive pending checks (~2 min); the NEXT one (the 13th) falls through to the escalating
+ * negative ladder instead, seeded fresh — the id is presumed stuck rather than about to gain its
+ * first turn. */
+const PENDING_TRANSCRIPT_MAX_CHECKS = 12
 /** At most this many DISTINCT (reported id, agent type) PAIRS per pane may pay a walk inside the
  * rolling window below [D-R156 finding 3; S10-21c B-final, D-R158-b4d finding 2] — older pairs
  * age out on their own, so the bound refills over time instead of sitting dead for the rest of
@@ -45,7 +73,17 @@ export const ID_CHURN_REFUSAL_NOTE = 'live_report_id_churn_bounded'
 
 type CachedTranscriptVerdict =
   | { ok: true }
-  | { ok: false; note?: string; nextRetryAt: number; backoffMs: number }
+  | {
+      ok: false
+      note?: string
+      nextRetryAt: number
+      backoffMs: number
+      pending?: boolean
+      /** [D-R162 H-1] Consecutive pending-verdict count charged against PENDING_TRANSCRIPT_MAX_CHECKS.
+       * Set once a pair has been pending at least once; kept (not cleared) once escalated past the
+       * grace so a later still-pending walk cannot fall back into the fixed 10s retry. */
+      pendingChecks?: number
+    }
 
 let transcriptVerdictGeneration: string | undefined
 const transcriptVerdictCache = new Map<string, CachedTranscriptVerdict>()
@@ -97,18 +135,25 @@ function writeIdChurnAuditOnce(
 
 /** [S10-21c B4, design §2 S3/S5 conjunct (iii)] `{path, hasTurn:true}` is real; `{coverage}` is
  * S4's third state and REFUSES here (the sweep only notes it and proceeds; this path is deciding
- * whether to believe an id the PANE authored, so an unverifiable transcript is no check at all). */
+ * whether to believe an id the PANE authored, so an unverifiable transcript is no check at all).
+ *
+ * [S10-21d R107] `pending: true` distinguishes "no observation yet" (no file at all, or a
+ * zero-turn stub — resolveResumeTranscript never reports `hasTurn:true` until a real record
+ * lands, diag-r106-r110-2026-09-08.md) from `uncovered`'s genuine, stable negative: a fork stub
+ * or a session only seconds old will legitimately gain its first turn on the very next report, so
+ * it gets its own fixed, short retry (PENDING_TRANSCRIPT_RETRY_MS) rather than the escalating
+ * 60s->15min ladder a genuine negative earns. */
 async function checkTranscriptConjunct(
   resolveResumeTranscript: ResolveLiveReportTranscript,
   agentType: string,
   sessionId: string
-): Promise<{ ok: true } | { ok: false; note?: string }> {
+): Promise<{ ok: true } | { ok: false; note?: string; pending?: boolean }> {
   const transcript = await resolveResumeTranscript(agentType, sessionId)
   if (transcript !== null && 'coverage' in transcript) {
     return { ok: false, note: `resume_preflight_uncovered ${agentType}` }
   }
   if (!transcript || !transcript.hasTurn) {
-    return { ok: false }
+    return { ok: false, pending: true }
   }
   return { ok: true }
 }
@@ -153,6 +198,13 @@ export async function checkTranscriptConjunctMemoized(
     writeIdChurnAuditOnce(db, params)
     return { ok: false, note: ID_CHURN_REFUSAL_NOTE }
   }
+  // [D-R156 finding 3 UNCHANGED by R107; wording corrected D-R162 H-1] Charged ONCE, the first
+  // time this (id, agentType) pair is seen in the window, BEFORE the verdict is known — not on
+  // every re-walk of an already-seen pair (see the `!seenIds.has` guard just below). The bound
+  // exists to rate-limit how many DIFFERENT ids a pane may ever pay a walk for (an
+  // anti-churn/anti-spoof property), which a pending verdict does not exempt: an id that will
+  // NEVER produce a real transcript still pays its one walk, same as any other id. R107/H-1
+  // change only the negative-cache/backoff branch below, never this charge.
   if (!seenIds.has(idChurnPairKey)) {
     seenIds.set(idChurnPairKey, now)
   }
@@ -170,21 +222,47 @@ export async function checkTranscriptConjunctMemoized(
       transcriptVerdictCache.delete(oldest)
     }
   }
+  // [D-R162 H-1] Consecutive-pending count carries forward across walks of this same pair
+  // regardless of whether the cached entry is currently flagged `pending` — once escalated past
+  // the grace (below) the flag is cleared but the count is kept, so a later still-pending walk
+  // cannot fall back into the fixed 10s retry.
+  const priorPendingChecks = cached && !cached.ok ? (cached.pendingChecks ?? 0) : 0
   if (verdict.ok) {
     transcriptVerdictCache.set(key, { ok: true })
+  } else if (verdict.pending === true && priorPendingChecks < PENDING_TRANSCRIPT_MAX_CHECKS) {
+    // [S10-21d R107; bounded by D-R162 H-1] Fixed 10s retry while inside the grace — see
+    // PENDING_TRANSCRIPT_RETRY_MS / PENDING_TRANSCRIPT_MAX_CHECKS. Coexists with D-R152-b4
+    // finding 2 (a report inside this window still hits the cache, so it never re-walks) and
+    // D-R154 finding 1 (a new generation still clears this entry, same as any other entry).
+    transcriptVerdictCache.set(key, {
+      ok: false,
+      note: verdict.note,
+      nextRetryAt: now + PENDING_TRANSCRIPT_RETRY_MS,
+      backoffMs: PENDING_TRANSCRIPT_RETRY_MS,
+      pending: true,
+      pendingChecks: priorPendingChecks + 1
+    })
   } else {
-    const backoffMs =
-      cached && !cached.ok
-        ? Math.min(cached.backoffMs * 2, NEGATIVE_TRANSCRIPT_BACKOFF_CAP_MS)
-        : NEGATIVE_TRANSCRIPT_BACKOFF_INITIAL_MS
+    // [D-R154 finding 1] Doubling only carries forward from a PRIOR genuine (non-pending)
+    // negative — a cached `pending` entry's fixed 10s must never seed the escalating ladder.
+    // [D-R162 H-1] A pending verdict that just exhausted its grace (priorPendingChecks >=
+    // PENDING_TRANSCRIPT_MAX_CHECKS) is NOT a prior genuine negative either — it enters the
+    // ladder seeded FRESH at the initial backoff, never carrying the pending entry's own fixed
+    // 10s timestamps forward.
+    const priorWasGenuineNegative = cached && !cached.ok && cached.pending !== true
+    const backoffMs = priorWasGenuineNegative
+      ? Math.min(cached.backoffMs * 2, NEGATIVE_TRANSCRIPT_BACKOFF_CAP_MS)
+      : NEGATIVE_TRANSCRIPT_BACKOFF_INITIAL_MS
     transcriptVerdictCache.set(key, {
       ok: false,
       note: verdict.note,
       nextRetryAt: now + backoffMs,
-      backoffMs
+      backoffMs,
+      pendingChecks: verdict.pending === true ? priorPendingChecks + 1 : priorPendingChecks
     })
   }
-  return verdict
+  // Never leak the internal `pending` discriminator past this function's own contract.
+  return verdict.ok ? { ok: true } : { ok: false, note: verdict.note }
 }
 
 /** Test-only: module-scoped state survives across `it()` blocks — reset between cases. */

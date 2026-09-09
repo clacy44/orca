@@ -31,6 +31,14 @@ export type OrchestrationMessageDelivery = {
   /** Set only when state is 'relayed' or 'relay_pending' — the saved-environment id parsed out
    *  of the row's `remote:<environmentId>:<agentId>` to_handle. */
   environment?: string
+  /** R106: set only when state is 'relayed' and the row's peer_relayed_at is known (UTC,
+   *  sqlite `datetime('now')`) — the CLI renders it verbatim rather than any live-presence
+   *  claim, since a relay acceptance is not a delivery receipt. */
+  relayedAt?: string
+  /** [S10-21d D-R162 M-3] Set only on the reply-outbox 'delivered' branch (orca-runtime.ts):
+   *  the far side itself accepted this reply, a resolvability claim stronger than the plain
+   *  relay mirror's peer_relayed_at. Additive/optional — every other branch omits it. */
+  deliveryConfirmed?: true
 }
 
 export type OrchestrationSentResult = {

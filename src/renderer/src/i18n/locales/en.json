@@ -3479,7 +3479,10 @@
             "antigravityUsageDetails": "Open Antigravity usage details",
             "grokUsageAria": "Open Grok usage details",
             "grokUsageMenu": "Grok Usage",
-            "floatingTerminalNewActivity": "{{label}}, new activity"
+            "floatingTerminalNewActivity": "{{label}}, new activity",
+            "inactiveUsageAgeNow": "just now",
+            "inactiveUsageAgeOneMin": "1 min ago",
+            "inactiveUsageAgeMins": "{{value0}} min ago"
           },
           "StatusBarUsageEmptyCta": {
             "828c764a79": "Connect an account",

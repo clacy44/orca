@@ -1163,6 +1163,11 @@ export function connectPanePty(
   // flips, exit, dispose) run before/after it exists, so start with no-ops.
   let syncHiddenRendererPtyDelivery: () => void = () => {}
   let releaseHiddenRendererPtyDelivery: () => void = () => {}
+  // Why (R116): requestHiddenOutputRestoreIfNeeded lives inside the per-connect
+  // runDeferredConnect closure (it captures that attempt's transport/ptyId), but
+  // noteVisibilityResume is on the binding returned from the outer scope — proxy
+  // through a reassignable reference, same shape as syncHiddenRendererPtyDelivery.
+  let requestHiddenOutputRestoreOnVisibilityResume: () => void = () => {}
   let handleRemoteOutputPauseChanged: (paused: boolean, supported: boolean) => void = () => {}
   let handleRendererOwnedAgentStatus: NonNullable<
     IpcPtyTransportOptions['onAgentStatus']
@@ -7710,6 +7715,12 @@ export function connectPanePty(
       return true
     }
 
+    // Why (R116): wire the proxy now that this attempt's requestHiddenOutputRestoreIfNeeded
+    // exists, so the outer-scope noteVisibilityResume binding can reach it.
+    requestHiddenOutputRestoreOnVisibilityResume = () => {
+      requestHiddenOutputRestoreIfNeeded()
+    }
+
     unregisterBacklogRecovery = registerTerminalBacklogRecovery(pane.terminal, () => {
       // Why: clear the hidden-delivery bit BEFORE the restore snapshot request; bytes arriving in between are reconciled by the seq guard.
       syncHiddenRendererPtyDelivery()
@@ -9315,10 +9326,15 @@ export function connectPanePty(
       }
     },
     // Why: visible-resume size readback repairs dropped hidden resizes without refitting against xterm's transient hidden DOM fallback.
+    // Why (R116): the readback above repairs size drift but never kicked the hidden-output
+    // replay itself — a bare reveal waited for the indirect syncHiddenRendererPtyDelivery/
+    // byte-arrival paths, which stalled until new bytes arrived. Request it explicitly so a
+    // parked pane's buffered output restores on the same tick it becomes visible.
     noteVisibilityResume() {
       armVisibleRemoteViewportClaim()
       claimPendingVisibleRemoteViewport()
       ptySizeReassertion.request({ fit: false })
+      requestHiddenOutputRestoreOnVisibilityResume()
       consumeHibernatedAgentWake()
       requestKnownWindowsShiftEnterReconfirmation()
       sampleVisiblePaneForegroundAgent()

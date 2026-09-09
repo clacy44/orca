@@ -28,9 +28,11 @@ import { LaunchAdmissionRefusedError } from './agent-launch-admission-errors'
 import { withPaneLock } from './agent-launch-admission-lock'
 import {
   audit,
+  launchPrefsForCtx,
   passThrough,
   preflightResumeTranscript,
   type AdmittedLaunch,
+  type AgentLaunchAdmissionContext,
   type LaunchAdmissionClassification
 } from './agent-launch-admission-support'
 import {
@@ -62,28 +64,11 @@ export type LaunchAdmission =
       sequencedAgentLine?: string
     }
 
-export type AgentLaunchAdmissionContext = {
-  hostId: string
-  executionHostId: string
-  launchGeneration: string
-  /** [D-R104 F-3] REQUIRED — every production caller (launchAdmissionBundle, pty.ts) now wires a
-   * real pane notice; a caller cannot silently omit it and have every UNRECORDED/self-resume
-   * signal go audit-only. [§2.6] Raised on SELF_RESUME(caller) into a registered pane and on
-   * every UNRECORDED. */
-  notice: (paneKey: string, verb: string, reasonCode: string) => void
-  /** [D-R104 F-3] REQUIRED, same reasoning as `notice`. [§C.4 SELF_RESUME v2.1 V1] The §2.6
-   * contested-lineage signal — [S10-21a C6b, Ruling 34 Addendum 19] audit verb 'launch', outcome
-   * 'contested', attributed to the registered row (`registeredAgentId`) — plus a pane notice.
-   * [S10-21a C6, SCOPE 3(b)] `registeredPaneKey` is the registered agent's OWN pane_key
-   * (`getAgentByPaneKey` matches by pane SUFFIX — derived-agent-rows.ts:22-34 — so it can
-   * legitimately differ from `claimantPaneKey`, the pane the caller-origin SELF_RESUME actually
-   * landed on). The runtime-side handler notices BOTH when they differ, one when they don't. */
-  contestedLineage: (
-    claimantPaneKey: string,
-    registeredPaneKey: string,
-    registeredAgentId: string
-  ) => void
-}
+// [S10-21d R118, forced deviation — see RETURN] AgentLaunchAdmissionContext itself moved to
+// agent-launch-admission-support.ts purely to keep this file under the max-lines budget after
+// adding the launchPreferences field — no behavior change, every existing import of it from THIS
+// module keeps working via this re-export.
+export type { AgentLaunchAdmissionContext }
 
 export type { AdmittedLaunch } from './agent-launch-admission-support'
 
@@ -296,7 +281,8 @@ export async function admitAgentLaunch(
           launchGeneration: admission.launchGeneration,
           executionHostId: admission.executionHostId,
           evidence: 'sweep_record',
-          supersedePaneKey: admission.predecessorPaneKey
+          supersedePaneKey: admission.predecessorPaneKey,
+          ...launchPrefsForCtx(ctx.launchPreferences)
         }
         const result = db.recordLaunch(params)
         if (!result.ok) {
@@ -394,7 +380,8 @@ export async function admitAgentLaunch(
         sessionId: x,
         launchGeneration: ctx.launchGeneration,
         executionHostId: ctx.executionHostId,
-        evidence: 'caller_resume'
+        evidence: 'caller_resume',
+        ...launchPrefsForCtx(ctx.launchPreferences)
       })
       // [S10-21c B3c, D-R151 HIGH, chair ruling 21c-E2] `current_sessions` has no liveness test:
       // the UNIQUE(host_id, session_id) collision this arm sees fires for ANY pane that has ever
@@ -495,7 +482,8 @@ export async function admitAgentLaunch(
       sessionId,
       launchGeneration: ctx.launchGeneration,
       executionHostId: ctx.executionHostId,
-      evidence: 'host_launch'
+      evidence: 'host_launch',
+      ...launchPrefsForCtx(ctx.launchPreferences)
     }
     const result = db.recordLaunch(params)
     if (!result.ok) {

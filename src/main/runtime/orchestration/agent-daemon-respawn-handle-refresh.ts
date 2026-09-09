@@ -12,6 +12,11 @@ import { getAgentByIdIncludingTombstoned } from './agent-retire'
 import { writeAgentAudit } from './agent-audit-log'
 import { pactsAwaitingUnpause } from './agent-pact-unpause-lookup'
 import { parseProcessIncarnation } from './agent-process-identity'
+import {
+  newestLaunchForPane,
+  recordLaunchInTransaction,
+  setLaunchAgentId
+} from './agent-launch-sessions'
 
 export type RefreshAgentHandleAfterRespawnParams = {
   hostId: string
@@ -24,6 +29,15 @@ export type RefreshAgentHandleAfterRespawnParams = {
    * not let this primitive's own suffix lookup silently pick a different, unrelated row.
    * Existing callers (pty.ts's daemon-respawn gate) omit it and keep the pane-suffix lookup. */
   agentId?: string
+  /** [S10-21d R110] When given, records a fresh `agent_launch_sessions` row for this pane in the
+   * SAME transaction as the handle refresh — evidence 'daemon_survived', stamped with this
+   * generation — so `sessionLaunchKnown` does not read stale (the pane's newest launch row is
+   * otherwise left on the PREVIOUS generation forever, diag-r106-r110-2026-09-08.md). Session
+   * id/agent type/execution host are read from the pane's own newest launch row
+   * (`newestLaunchForPane`), never supplied by the caller — this primitive never invents a
+   * session identity. Omitted by pty.ts's admission-time respawn gate, whose own admission path
+   * already records a launch row through a different door. */
+  currentLaunchGeneration?: string
 }
 
 export type RefreshAgentHandleAfterRespawnResult =
@@ -98,6 +112,54 @@ export function refreshAgentHandleAfterRespawn(
       db.prepare(
         `UPDATE agents SET terminal_handle = ?, last_seen_at = datetime('now') WHERE id = ?`
       ).run(params.newTerminalHandle, row.id)
+    }
+    // [S10-21d R110] Same transaction as the UPDATE above: a fresh launch row stamped with the
+    // CURRENT generation, so `sessionLaunchKnown` (orchestration-agents-directory.ts) reads true
+    // in the new generation instead of comparing against the pane's stale pre-restart row.
+    // sessionId/agentType/executionHostId come from the pane's own newest launch row — this
+    // primitive never invents a session identity. A same-pane rewrite's current_sessions upsert
+    // cannot conflict (current-session-upsert.ts's ON CONFLICT(host_id, pane_key) targets
+    // exactly this pane), so recordLaunchInTransaction's own conflict/delete path is provably
+    // unreached here; a foreign_session_id it still returned would mean that invariant broke, in
+    // which case this loudly notes it rather than trusting an unverified success.
+    if (params.currentLaunchGeneration !== undefined) {
+      const newest = newestLaunchForPane(db, params.hostId, params.paneKey)
+      if (newest) {
+        const launchResult = recordLaunchInTransaction(db, {
+          hostId: params.hostId,
+          paneKey: params.paneKey,
+          agentType: newest.agent_type,
+          sessionId: newest.session_id,
+          launchGeneration: params.currentLaunchGeneration,
+          executionHostId: newest.execution_host_id,
+          evidence: 'daemon_survived'
+        })
+        if (launchResult.ok) {
+          // [S10-21d D-R162 M-1] Every sibling writer of a launch row binds agent_id
+          // (agent-restore-rebind.ts:196,357,408; agent-lineage-mismatch.ts:387) — this one
+          // didn't, leaving retire() an orphan newest row that suppresses S5 bootstrap for the
+          // pane's next occupant (agent-lineage-mismatch.ts).
+          setLaunchAgentId(db, { seq: launchResult.row.seq }, row.id)
+        } else {
+          writeAgentAudit(db, {
+            agentId: row.id,
+            actorPaneKey: params.paneKey,
+            actorHostId: params.hostId,
+            verb: 'rebind',
+            outcome: 'refused',
+            reasonCode: `daemon_survived_launch_row_refused: ${launchResult.reason}`
+          })
+        }
+      } else {
+        writeAgentAudit(db, {
+          agentId: row.id,
+          actorPaneKey: params.paneKey,
+          actorHostId: params.hostId,
+          verb: 'rebind',
+          outcome: 'refused',
+          reasonCode: 'daemon_survived_launch_row_missing: no prior launch row for pane'
+        })
+      }
     }
     const pactsToUnpause = pactsAwaitingUnpause(db, row.id)
     writeAgentAudit(db, {

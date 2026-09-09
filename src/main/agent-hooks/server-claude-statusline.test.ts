@@ -77,4 +77,73 @@ describe('AgentHookServer /statusline/claude', () => {
 
     expect(events).toEqual([])
   })
+
+  // [S10-21d R118, design (b)] onClaudeSessionPrefs — a separate slot, gated before it ever
+  // fires: paneKey known, effort on the allow-list. Never logs the payload (assert only on the
+  // listener's own received event, never on console output).
+  describe('onClaudeSessionPrefs sink', () => {
+    const paneKey = 'tab-1:22222222-2222-4222-8222-222222222222'
+
+    function prefsBody(effort: string, model?: string): string {
+      return new URLSearchParams({
+        paneKey,
+        payload: JSON.stringify({
+          ...(model ? { model: { id: model } } : {}),
+          effort: { level: effort }
+        })
+      }).toString()
+    }
+
+    it('fires with a valid effort level and known paneKey', async () => {
+      const events: { paneKey: string; model?: string; effort: string }[] = []
+      server.setClaudeSessionPrefsListener((event) => events.push(event))
+
+      await expect(post(prefsBody('xhigh', 'claude-opus-4-8'))).resolves.toMatchObject({
+        status: 204
+      })
+      expect(events).toEqual([{ paneKey, model: 'claude-opus-4-8', effort: 'xhigh' }])
+    })
+
+    it('never fires for an unrecognized effort level (fail closed)', async () => {
+      const events: unknown[] = []
+      server.setClaudeSessionPrefsListener((event) => events.push(event))
+
+      await expect(post(prefsBody('ultracode'))).resolves.toMatchObject({ status: 204 })
+      expect(events).toEqual([])
+    })
+
+    it('never fires with no paneKey', async () => {
+      const events: unknown[] = []
+      server.setClaudeSessionPrefsListener((event) => events.push(event))
+
+      const body = new URLSearchParams({
+        payload: JSON.stringify({ effort: { level: 'max' } })
+      }).toString()
+      await expect(post(body)).resolves.toMatchObject({ status: 204 })
+      expect(events).toEqual([])
+    })
+
+    it('never fires when the payload carries no effort at all', async () => {
+      const events: unknown[] = []
+      server.setClaudeSessionPrefsListener((event) => events.push(event))
+
+      const body = new URLSearchParams({
+        paneKey,
+        payload: JSON.stringify({ model: { id: 'claude-opus-4-8' } })
+      }).toString()
+      await expect(post(body)).resolves.toMatchObject({ status: 204 })
+      expect(events).toEqual([])
+    })
+
+    it('still forwards to onClaudeStatusLine alongside onClaudeSessionPrefs', async () => {
+      const statusLineEvents: ClaudeStatusLineRateLimits[] = []
+      const prefsEvents: unknown[] = []
+      server.setClaudeStatusLineListener((event) => statusLineEvents.push(event))
+      server.setClaudeSessionPrefsListener((event) => prefsEvents.push(event))
+
+      await post(prefsBody('high'))
+      expect(statusLineEvents).toHaveLength(1)
+      expect(prefsEvents).toHaveLength(1)
+    })
+  })
 })

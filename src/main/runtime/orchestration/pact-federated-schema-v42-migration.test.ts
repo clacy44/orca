@@ -227,7 +227,7 @@ describe('S10-21b B1: schema v42 migration (T24)', () => {
 
     db = new OrchestrationDb(path)
     const sqlite = rawDb(db)
-    expect(sqlite.pragma('user_version', { simple: true })).toBe(42)
+    expect(sqlite.pragma('user_version', { simple: true })).toBe(43)
 
     for (const column of THREADS_V42_COLUMNS) {
       expect(hasColumn(sqlite, 'threads', column)).toBe(true)
@@ -332,7 +332,7 @@ describe('S10-21b B1: schema v42 migration (T24)', () => {
     // Second open (migrate() re-runs on every open; current is already 42) is a no-op.
     db = new OrchestrationDb(path)
     const sqliteAgain = rawDb(db)
-    expect(sqliteAgain.pragma('user_version', { simple: true })).toBe(42)
+    expect(sqliteAgain.pragma('user_version', { simple: true })).toBe(43)
     expect(rowCount(sqliteAgain, 'pact_applied_ids')).toBe(0)
   })
 

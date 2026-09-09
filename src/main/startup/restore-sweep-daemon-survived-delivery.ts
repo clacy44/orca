@@ -62,7 +62,11 @@ export function handleDaemonSurvivedSkip(
       paneKey: launchRow.pane_key,
       newTerminalHandle: controllerIdentity.handle,
       processIncarnation,
-      agentId
+      agentId,
+      // [S10-21d R110] Records this pane's launch row afresh in the SAME transaction, evidence
+      // 'daemon_survived', so sessionLaunchKnown does not go stale for a daemon-survived pane
+      // (diag-r106-r110-2026-09-08.md).
+      currentLaunchGeneration: deps.getLaunchGenerationId()
     })
     if (!res.ok) {
       auditSweepNote(
@@ -86,6 +90,11 @@ export function handleDaemonSurvivedSkip(
     return { kind: 'skipped_daemon_survived' }
   }
   if (res !== undefined && res.ok) {
+    // [S10-21d D-R162 M-2] Post-commit, same as recordLaunch's own wrapper and
+    // rebindRestoredPane (agent-restore-rebind.ts:437-438): without this, a pane surviving N
+    // daemon restarts accumulates N+1 launch rows, violating PRUNE_PER_PANE. Self-transacting,
+    // never inside refreshAgentHandleAfterRespawn's own transaction (already closed above).
+    db.pruneLaunchRowRetention(hostId, launchRow.pane_key)
     try {
       // [S10-21c B3c, D-R151 LOW 1] Own try, placed AFTER the refresh try: a throw here must
       // never be labelled a refresh failure (the refresh already committed successfully) and
