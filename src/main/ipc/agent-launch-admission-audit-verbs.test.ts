@@ -21,7 +21,10 @@ describe('S10-21a C6c: ADMISSION_AUDIT_VERBS enumerates every admission audit ve
       'agent-launch-admission-lock.ts',
       'agent-launch-admission-support.ts',
       'agent-launch-admission-errors.ts',
-      'agent-launch-classification.ts'
+      'agent-launch-classification.ts',
+      // [S10-21d bD C3, D-R168 INFO fix] the file exists (was b6 scope, missed from this list) —
+      // its audit() verbs now sit inside the integrity fence this test enforces.
+      'agent-launch-self-resume-arm.ts'
     ]
     const found = new Set<string>()
     for (const file of files) {
