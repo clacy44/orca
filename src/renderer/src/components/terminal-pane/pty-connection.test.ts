@@ -12309,6 +12309,99 @@ describe('connectPanePty', () => {
       expect(gapReset).toBeDefined()
     })
 
+    it('(R116) noteVisibilityResume synchronously restores the active pane, once', async () => {
+      enableMainAuthority()
+      const deps = createDeps({ isVisibleRef: { current: false } })
+      const { pane, dataCallback, binding } = await connectHiddenPane(deps)
+      const getMainBufferSnapshot = window.api.pty.getMainBufferSnapshot as unknown as ReturnType<
+        typeof vi.fn
+      >
+      getMainBufferSnapshot.mockResolvedValue({
+        data: 'restored\r\n',
+        cols: 100,
+        rows: 30,
+        seq: 64
+      })
+
+      dataCallback('hidden output\r\n', { seq: 16, rawLength: 16 })
+      const { _dispatchPtyModelRestoreNeededForTest } = await import('./pty-model-restore-channel')
+      _dispatchPtyModelRestoreNeededForTest({ id: 'pty-id', reason: 'hidden-drop', markerSeq: 64 })
+
+      // A single unsplit pane is manager.getActivePane()'s fallback ('active'
+      // when no split has explicitly claimed focus) — the switch target.
+      ;(deps.isVisibleRef as { current: boolean }).current = true
+      const resumable = binding as unknown as { noteVisibilityResume: () => void }
+      resumable.noteVisibilityResume()
+      // No timer advance: the 'active' scheduler branch runs synchronously.
+      await flushAsyncTicks(20)
+
+      expect(getMainBufferSnapshot).toHaveBeenCalledTimes(1)
+      expect(pane.terminal.write).toHaveBeenCalledWith(
+        expect.stringContaining('restored'),
+        expect.any(Function)
+      )
+    })
+
+    it('(R116) noteVisibilityResume staggers restore for a sibling split that is not the active pane', async () => {
+      enableMainAuthority()
+      const { connectPanePty } = await import('./pty-connection')
+      const activeTransport = createMockTransport('pty-active')
+      transportFactoryQueue.push(activeTransport)
+      const siblingTransport = createMockTransport('pty-id')
+      const capturedDataCallback: {
+        current: ((data: string, meta?: { seq?: number; rawLength?: number }) => void) | null
+      } = { current: null }
+      siblingTransport.connect.mockImplementation(
+        async ({ callbacks }: { callbacks: ConnectCallbacks }) => {
+          capturedDataCallback.current = callbacks.onData ?? null
+          return 'pty-id'
+        }
+      )
+      transportFactoryQueue.push(siblingTransport)
+      // Pane 1 is the manager's active split; pane 2 is the sibling revealed by
+      // the same tab-switch resume but never claimed focus.
+      const manager = createManager(2, 1)
+      const deps = createDeps({ isVisibleRef: { current: false } })
+      connectPanePty(createPane(1) as never, manager as never, deps as never)
+      await flushAsyncTicks(6)
+      const pane = createPane(2)
+      const binding = connectPanePty(pane as never, manager as never, deps as never) as {
+        noteVisibilityResume: () => void
+      }
+      await flushAsyncTicks(6)
+      expect(capturedDataCallback.current).not.toBeNull()
+
+      const getMainBufferSnapshot = window.api.pty.getMainBufferSnapshot as unknown as ReturnType<
+        typeof vi.fn
+      >
+      getMainBufferSnapshot.mockResolvedValue({
+        data: 'sibling restored\r\n',
+        cols: 100,
+        rows: 30,
+        seq: 64
+      })
+
+      capturedDataCallback.current?.('hidden output\r\n', { seq: 16, rawLength: 16 })
+      const { _dispatchPtyModelRestoreNeededForTest } = await import('./pty-model-restore-channel')
+      _dispatchPtyModelRestoreNeededForTest({ id: 'pty-id', reason: 'hidden-drop', markerSeq: 64 })
+
+      ;(deps.isVisibleRef as { current: boolean }).current = true
+      binding.noteVisibilityResume()
+      await flushAsyncTicks(4)
+
+      // 'inactive' priority queues the replay on the 16ms scheduler instead of
+      // restoring synchronously — manager.getActivePane() is still pane 1.
+      expect(getMainBufferSnapshot).not.toHaveBeenCalled()
+
+      await new Promise((resolve) => setTimeout(resolve, 40))
+
+      expect(getMainBufferSnapshot).toHaveBeenCalledTimes(1)
+      expect(pane.terminal.write).toHaveBeenCalledWith(
+        expect.stringContaining('sibling restored'),
+        expect.any(Function)
+      )
+    })
+
     it('marks the PTY hidden on hidden output and clears it before requesting restore on reveal', async () => {
       enableMainAuthority()
       const deps = createDeps({ isVisibleRef: { current: false } })
