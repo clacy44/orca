@@ -87,6 +87,28 @@ describe('D-R163 M3 negatives 3/4: HOST_RESUME null-predecessor success, and hos
     expect(currentSessionRows).toEqual([{ pane_key: 'tab1:leaf-a' }])
   })
 
+  it('[S10-21d bD C2, D-R168 LOW-1] a host_restore admission naming a model and an effort writes pref_model/pref_effort with pref_source "launch" on the new launch row', async () => {
+    const db = freshDb()
+    const admission: LaunchAdmission = {
+      kind: 'host-resume',
+      sessionId: 'sess-with-prefs',
+      predecessorPaneKey: null,
+      executionHostId: HOST_ID,
+      launchGeneration: 'gen-1',
+      evidence: 'host_restore'
+    }
+    await admitAgentLaunch(
+      () => db,
+      opts({ command: 'claude --resume sess-with-prefs' }),
+      admission,
+      ctx({ launchPreferences: { model: 'opus', effort: 'high' } })
+    )
+    const row = db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')
+    expect(row?.pref_model).toBe('opus')
+    expect(row?.pref_effort).toBe('high')
+    expect(row?.pref_source).toBe('launch')
+  })
+
   it('negative 4: a dead-holder adoption (host_restore, predecessor set) whose spawn THROWS is compensated — the row it wrote is deleted, the predecessor pane current_sessions row is restored, DB is back to its prior state', async () => {
     const db = freshDb()
     // The dead holder's own prior launch history — what the compensate path must restore.
