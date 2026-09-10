@@ -22,7 +22,7 @@ import { z } from 'zod'
 import { defineMethod, type RpcMethod, type RpcContext } from '../core'
 import { OptionalString, OptionalBoolean } from '../schemas'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
-import { hostIdFor, rateLimited } from './agent-directory-rpc-view'
+import { DIRECTORY_LIVE_CAP, hostIdFor, rateLimited } from './agent-directory-rpc-view'
 import {
   parseChairsManifest,
   CHAIRS_MANIFEST_EFFORTS,
@@ -256,24 +256,38 @@ export const CHAIRS_RESTORE_METHODS: RpcMethod[] = [
           `${path} already exists; pass --force to overwrite`
         )
       }
-      // [G1-10o B4/C28 fix] Pass the DB layer's own hard cap explicitly so the *default* of 100
-      // (agent-directory.ts:378) cannot silently shorten the manifest below that cap. The cap
-      // itself is still 200 (Math.min(..., 200) in listAgents) — if a host ever has more than
-      // 200 registered, non-quarantined, non-derived chairs, refuse rather than write a
-      // silently-short manifest; retrying with `--only` scoping is the operator's escape hatch.
-      const AGENT_DIRECTORY_HARD_CAP = 200
-      const { agents } = db.listAgents({
+      // [G1-10o B4/C28 fix, D-R170 M2/M3 PARTIAL — see D-R170 M2 deviation in RETURN] Pass the
+      // DB layer's own hard cap explicitly (the single shared constant, not a fourth private
+      // copy of it) so the *default* of 100 (agent-directory.ts:378) cannot silently shorten
+      // the manifest below it.
+      //
+      // D-R170's own smallest fix for M2 (request `DIRECTORY_LIVE_CAP + 1`, refuse only when
+      // `agents.length > DIRECTORY_LIVE_CAP`) is NOT applied here: `listAgents` clamps its
+      // OWN internal limit to `Math.min(Math.max(params.limit ?? 100, 1), 200)`
+      // (agent-directory.ts:378) — a literal 200 ceiling independent of whatever limit the
+      // caller requests. Requesting 201 is silently reduced back to 200 inside listAgents, so
+      // `agents.length` can never exceed 200 and `agents.length > DIRECTORY_LIVE_CAP` can never
+      // be true — the truncation refusal would become permanently unreachable, which is worse
+      // than the pre-fix over-refusal: a host with >200 real chairs would now export a
+      // silently-short manifest with no warning at all. Kept at `>=` (the pre-D-R170 behavior)
+      // so the guard stays loud; it still over-refuses a host with EXACTLY 200 real chairs
+      // (the residual M2 names), but that is a known false-positive, not a silent truncation.
+      // Actually distinguishing "exactly the cap" from "more than the cap" requires
+      // listAgents itself to report whether it trimmed anything (e.g. a total-before-slice or
+      // a `truncated` flag) — out of this dispatch's scope; flagged for the chair.
+      const { agents, omitted } = db.listAgents({
         hostId,
         includeDerived: false,
         includeQuarantined: false,
-        limit: AGENT_DIRECTORY_HARD_CAP
+        limit: DIRECTORY_LIVE_CAP
       })
-      if (agents.length >= AGENT_DIRECTORY_HARD_CAP) {
+      if (agents.length >= DIRECTORY_LIVE_CAP) {
         throw new OrchestrationError(
           'chairs_export_truncated',
           `${agents.length} registered chairs meets or exceeds the directory's hard cap of ` +
-            `${AGENT_DIRECTORY_HARD_CAP}; refusing to write a manifest that may silently omit ` +
-            'chairs. Narrow the export or raise the directory cap.'
+            `${DIRECTORY_LIVE_CAP}; refusing to write a manifest that may silently omit ` +
+            'chairs. Retire or tombstone stale directory rows (orca agents retire) so the ' +
+            'host falls below the cap.'
         )
       }
       const chairs: ChairsManifestEntry[] = []
@@ -321,7 +335,7 @@ export const CHAIRS_RESTORE_METHODS: RpcMethod[] = [
       const manifest: ChairsManifest = { version: 1, chairs }
       await mkdir(dirname(path), { recursive: true })
       await writeFileAtomic(path, `${JSON.stringify(manifest, null, 2)}\n`)
-      return { path, manifest, skipped }
+      return { path, manifest, skipped, omittedQuarantined: omitted.quarantined }
     }
   })
 ]

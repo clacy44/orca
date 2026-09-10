@@ -11,7 +11,6 @@ import type { RpcContext } from '../core'
 import { OrchestrationDb } from '../../orchestration/db'
 import { OrcaRuntimeService } from '../../orca-runtime'
 import type { ChairsManifest } from '../../orchestration/chairs-manifest'
-import { OrchestrationError } from '../../orchestration/orchestration-error'
 
 vi.mock('electron', () => ({
   BrowserWindow: { fromId: vi.fn(() => null) },
@@ -189,6 +188,16 @@ describe('G1-10o B4/C28 fix: export loudly reports chairs it cannot represent', 
     })
   }
 
+  function rawDb(): {
+    prepare: (sql: string) => {
+      get: (...args: unknown[]) => unknown
+      all: (...args: unknown[]) => unknown[]
+      run: (...args: unknown[]) => unknown
+    }
+  } {
+    return (db as unknown as { db: ReturnType<typeof rawDb> }).db
+  }
+
   it('a chair with a worktree but no worktree recorded is skipped and reported; others still export', async () => {
     await setup()
     registerChair('chair-good', 'tab1:leaf-a', 'wt-1')
@@ -220,6 +229,16 @@ describe('G1-10o B4/C28 fix: export loudly reports chairs it cannot represent', 
     expect(result.skipped).toEqual([{ name: 'chair-no-worktree', reason: 'no_worktree' }])
   })
 
+  // [D-R170 L2] Tightened to the specific error code (not just the error class — every
+  // refusal on this handler throws OrchestrationError) and asserts no file was written.
+  // [D-R170 M2 — NOT applied, see deviation in RETURN] This still refuses a host with EXACTLY
+  // 200 real chairs (a complete, non-truncated read) — the review's own smallest fix for that
+  // over-refusal (request DIRECTORY_LIVE_CAP + 1, refuse only when agents.length exceeds the
+  // cap) does not work: listAgents' OWN internal clamp
+  // (Math.min(Math.max(params.limit ?? 100, 1), 200), agent-directory.ts:378) caps the read at
+  // 200 regardless of the requested limit, so agents.length can never exceed 200 and the
+  // proposed `>` guard would never fire — silently re-opening the truncation hole for a host
+  // with MORE than 200 chairs. Kept at `>=` (pre-D-R170 behavior) so the guard stays loud.
   it('a directory at the listAgents hard cap (200) refuses rather than writing a silently short manifest', async () => {
     await setup()
     for (let i = 0; i < 200; i++) {
@@ -236,8 +255,38 @@ describe('G1-10o B4/C28 fix: export loudly reports chairs it cannot represent', 
       })
     }
     const path = join(dir, 'chairs.json')
-    await expect(exportMethod!.handler({ manifestPath: path, force: false }, ctx)).rejects.toThrow(
-      OrchestrationError
-    )
+    await expect(
+      exportMethod!.handler({ manifestPath: path, force: false }, ctx)
+    ).rejects.toMatchObject({ code: 'chairs_export_truncated' })
+    await expect(readFile(path, 'utf8')).rejects.toThrow()
+  })
+
+  // [D-R170 L4] no_pane and no_launch_row were previously untested — only no_worktree was.
+  // pane_key only goes NULL via a tombstone path in production (agent-retire.ts, etc.), which
+  // export's own query excludes (`tombstoned_at IS NULL`) — set it directly to exercise the
+  // no_pane skip branch against a live, non-tombstoned row.
+  it('a chair with no pane recorded is skipped and reported as no_pane', async () => {
+    await setup()
+    registerChair('chair-no-pane', 'tab1:leaf-nopane', 'wt-1')
+    rawDb().prepare(`UPDATE agents SET pane_key = NULL WHERE display_name = ?`).run('chair-no-pane')
+    const path = join(dir, 'chairs.json')
+    const result = (await exportMethod!.handler({ manifestPath: path, force: false }, ctx)) as {
+      manifest: ChairsManifest
+      skipped: { name: string; reason: string }[]
+    }
+    expect(result.manifest.chairs).toEqual([])
+    expect(result.skipped).toEqual([{ name: 'chair-no-pane', reason: 'no_pane' }])
+  })
+
+  it('a chair with a pane but no launch row is skipped and reported as no_launch_row', async () => {
+    await setup()
+    registerChair('chair-no-launch', 'tab1:leaf-nolaunch', 'wt-1')
+    const path = join(dir, 'chairs.json')
+    const result = (await exportMethod!.handler({ manifestPath: path, force: false }, ctx)) as {
+      manifest: ChairsManifest
+      skipped: { name: string; reason: string }[]
+    }
+    expect(result.manifest.chairs).toEqual([])
+    expect(result.skipped).toEqual([{ name: 'chair-no-launch', reason: 'no_launch_row' }])
   })
 })

@@ -129,3 +129,20 @@ orca chairs export
 
 Refuses to overwrite any existing file at the target path unless `--force` is passed (an
 existence check, not a parse attempt — a non-manifest file there is refused too).
+
+A chair the manifest cannot represent is skipped and reported, never silently dropped:
+
+```
+Wrote 3 chair(s) to /home/user/.orca/chairs.json; skipped 1: chair-x (no worktree recorded); omitted 2 quarantined
+```
+
+- a skipped chair prints its reason: `no pane recorded`, `no launch row recorded`, or
+  `no worktree recorded`.
+- `omitted N quarantined` is printed (only when `N > 0`) for chairs excluded by the directory
+  read's own `includeQuarantined: false` filter, before the skip checks above ever run — lift
+  the quarantine and re-export to bring them back.
+
+If the number of registered, non-quarantined, non-derived chairs meets or exceeds the
+directory's hard cap (200), the export refuses outright with `chairs_export_truncated` rather
+than writing a manifest that may silently omit chairs — no file is written. Retire or tombstone
+stale directory rows (`orca agents retire`) so the host falls below the cap, then retry.
