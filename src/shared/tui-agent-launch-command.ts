@@ -51,10 +51,7 @@ export function resolveAgentLaunchCommand(args: {
     args.agent,
     args.sessionOptions,
     args.sessionOptionsOverrideAgentArgs ? [] : trailingTokens.tokens,
-    // [D-R170 M16] Catalog defaults (e.g. claude's default effort) must still be injected on
-    // an override-armed resume — a model-only preference must not silently drop the catalog's
-    // default effort — so this is independent of sessionOptionsOverrideAgentArgs.
-    true
+    !args.sessionOptionsOverrideAgentArgs
   )
   if (override && args.sessionOptionsOverrideAgentArgs) {
     const overrideTokens = tokenizeStartupCommand(override, args.shell)

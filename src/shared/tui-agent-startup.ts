@@ -224,17 +224,6 @@ export function buildAgentResumeStartupPlan(args: {
         // drop it (diag-r118-2026-09-08.md) — args.sessionOptions undefined (design (d)) emits no
         // flags, byte-identical to today's argv either way.
         sessionOptions: args.sessionOptions,
-        // [G1-10o B7/C45 fix, corrected per D-R170 M17] Mirrors the two CREATE call sites that
-        // pass Boolean(sessionOptions) (orca-runtime.ts:24067, :27849): a persisted pref must
-        // win over an operator-authored --model/--effort in agentArgs on resume the same way it
-        // does at those two sites. NOTE: createAgentSession (orca-runtime.ts:28229-28246) and
-        // the renderer create path do NOT pass this flag, so resume precedence here matches
-        // those two create sites only, not every create path.
-        // [D-R170 H1] Gated off whenever this agent has a command override, so a stored
-        // preference can no longer arm the override-conflict refusal in
-        // resolveAgentLaunchCommand on the restore path and strand a resumable pane.
-        sessionOptionsOverrideAgentArgs:
-          Boolean(args.sessionOptions) && !args.cmdOverrides[args.agent],
         isRemote: args.isRemote
       })
   if (!baseCommand.ok) {
