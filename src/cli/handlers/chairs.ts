@@ -104,7 +104,7 @@ function formatRow(row: ChairsRestoreResultRow): string {
   return (
     `${row.name}  [${status}]  pane=${row.paneKey} recorded=${row.recorded ?? '-'} ` +
     `minted=${row.minted} paneLive=${row.paneLive} ` +
-    `reported<30m=${row.attested === null ? 'unknown' : row.attested} autoRestoreArmed=${row.autoRestoreArmed}`
+    `reported=${row.attested === null ? 'unknown' : row.attested} autoRestoreArmed=${row.autoRestoreArmed}`
   )
 }
 
