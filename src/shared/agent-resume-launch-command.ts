@@ -182,6 +182,16 @@ export function buildClaudeResumeLaunchCommand(
   shell: AgentStartupShell,
   modelEffort?: { model?: string; effort?: string }
 ): string {
+  // [G1-10o B7/C45 fix] Neither pref field is allow-listed at every writer (model has no
+  // allow-list at all — chairs-manifest.ts:67-69). A dash-leading value would otherwise be
+  // promoted from a flag's operand into a bare argv token in flag position once the cut below
+  // strips only the flag and leaves the value standing (e.g. pref_model:
+  // '--dangerously-skip-permissions'). Fail closed: never emit such a value, so it can neither
+  // land in argv nor drive a cut at isClaudeModelOrEffortToken below.
+  modelEffort = {
+    model: modelEffort?.model?.startsWith('-') ? undefined : modelEffort?.model,
+    effort: modelEffort?.effort?.startsWith('-') ? undefined : modelEffort?.effort
+  }
   const quotedResume = resumeArgs.map((arg) => quoteStartupArg(arg, shell)).join(' ')
   const quotedModelEffort = [
     ...(modelEffort?.model !== undefined ? ['--model', modelEffort.model] : []),
@@ -257,10 +267,14 @@ export function buildClaudeResumeLaunchCommand(
     let end = spans[i].end
     const next = tokens[i + 1]
     const bareWithValue =
-      ((isSelector && (token === '--resume' || token === '-r')) ||
-        (isModelOrEffort && (token === '--model' || token === '--effort'))) &&
       next !== undefined &&
-      !next.startsWith('-')
+      ((isSelector && (token === '--resume' || token === '-r') && !next.startsWith('-')) ||
+        // [G1-10o B7/C45 fix] --model/--effort are known arity-1 flags, unlike -r<id>'s
+        // ambiguity with another option's dash-leading value — absorb the next token
+        // unconditionally so an orphaned dash-leading value can never be left standing in flag
+        // position (the entry-normalisation above only prevents modelEffort itself from
+        // producing one; this also removes one already present in agentArgs).
+        (isModelOrEffort && (token === '--model' || token === '--effort')))
     if (bareWithValue) {
       // A stale session locator, model id, or effort level rides along with its flag.
       end = spans[i + 1].end

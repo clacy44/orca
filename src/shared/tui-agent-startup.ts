@@ -224,6 +224,11 @@ export function buildAgentResumeStartupPlan(args: {
         // drop it (diag-r118-2026-09-08.md) — args.sessionOptions undefined (design (d)) emits no
         // flags, byte-identical to today's argv either way.
         sessionOptions: args.sessionOptions,
+        // [G1-10o B7/C45 fix] Mirrors the create path (buildAgentStartupPlan above,
+        // sessionOptionsOverrideAgentArgs: Boolean(sessionOptions)): a persisted pref must win
+        // over an operator-authored --model/--effort in agentArgs on resume the same way it
+        // does on create, and the override is then recorded in appliedSessionOptions.
+        sessionOptionsOverrideAgentArgs: Boolean(args.sessionOptions),
         isRemote: args.isRemote
       })
   if (!baseCommand.ok) {
