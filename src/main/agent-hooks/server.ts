@@ -860,7 +860,7 @@ export class AgentHookServer {
    * pane kept only for destructive liveness checks — this IS one) — they only stop counting once
    * stale. [D-R170 M9 correction] This is deliberately UNLIKE the house freshness predicates
    * (`isFreshNonDoneAgentStatus`, agent-status-types.ts:282-287) and unlike this file's own
-   * inference gates (:956, :1048), which disqualify `restoredUnconfirmed` unconditionally. This
+   * inference gates (:965, :1057), which disqualify `restoredUnconfirmed` unconditionally. This
    * one is a destructive-action guard, so recency is the only bound and the flag alone must
    * never suppress it. [D-R170 M6] That bounds rather than closes the hole in both directions:
    * an idle live pane emits no events, so a row can go stale while its process lives; this
@@ -871,12 +871,15 @@ export class AgentHookServer {
         continue
       }
       const enriched = entry as EnrichedAgentHookEventPayload
-      // [D-R170 L8] Clamp to now: a restart can see an earlier wall clock (see hydrate's own
-      // note below), so a future-dated receivedAt must not count as live evidence forever.
-      const receivedAt = Math.min(enriched.receivedAt, Date.now())
+      // [D-R170 L8, STILL OPEN per D-R171 NM-4] A future-dated receivedAt (clock skew across a
+      // restart) is not clamped here or at ingest, so it can hold this guard open for the skew
+      // duration. A prior `Math.min(enriched.receivedAt, Date.now())` clamp here was a provable
+      // no-op (both Date.now() reads land microseconds apart) and has been removed rather than
+      // left in place misrepresenting L8 as closed. Left for a deliberate fix-at-ingest or
+      // WONTFIX decision, not patched here.
       if (
         (enriched.restoredUnconfirmed || enriched.retainedForLiveness) &&
-        receivedAt < Date.now() - AGENT_STATUS_STALE_AFTER_MS
+        enriched.receivedAt < Date.now() - AGENT_STATUS_STALE_AFTER_MS
       ) {
         continue
       }
