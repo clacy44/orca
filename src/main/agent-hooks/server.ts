@@ -858,16 +858,25 @@ export class AgentHookServer {
    * GEN_ABSENCE (OD-21d-1). `restoredUnconfirmed`/`retainedForLiveness` rows CAN still name a
    * live process (a not-yet-reconfirmed rehydration stamp, or a user-dismissed-but-still-alive
    * pane kept only for destructive liveness checks — this IS one) — they only stop counting once
-   * stale, matching every other liveness predicate in the house. */
+   * stale. [D-R170 M9 correction] This is deliberately UNLIKE the house freshness predicates
+   * (`isFreshNonDoneAgentStatus`, agent-status-types.ts:282-287) and unlike this file's own
+   * inference gates (:956, :1048), which disqualify `restoredUnconfirmed` unconditionally. This
+   * one is a destructive-action guard, so recency is the only bound and the flag alone must
+   * never suppress it. [D-R170 M6] That bounds rather than closes the hole in both directions:
+   * an idle live pane emits no events, so a row can go stale while its process lives; this
+   * bounds the hole to AGENT_STATUS_STALE_AFTER_MS rather than closing it. */
   hasLiveReportOfSession(sessionId: string, opts?: { excludePaneKey?: string }): boolean {
     for (const [paneKey, entry] of this.state.lastStatusByPaneKey.entries()) {
       if (opts?.excludePaneKey !== undefined && paneKey === opts.excludePaneKey) {
         continue
       }
       const enriched = entry as EnrichedAgentHookEventPayload
+      // [D-R170 L8] Clamp to now: a restart can see an earlier wall clock (see hydrate's own
+      // note below), so a future-dated receivedAt must not count as live evidence forever.
+      const receivedAt = Math.min(enriched.receivedAt, Date.now())
       if (
         (enriched.restoredUnconfirmed || enriched.retainedForLiveness) &&
-        enriched.receivedAt < Date.now() - AGENT_STATUS_STALE_AFTER_MS
+        receivedAt < Date.now() - AGENT_STATUS_STALE_AFTER_MS
       ) {
         continue
       }

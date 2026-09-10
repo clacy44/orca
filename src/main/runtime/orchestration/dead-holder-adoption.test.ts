@@ -102,34 +102,34 @@ describe('S10-21d b3: resolveHolderAdoption', () => {
     expect(result).toEqual({ adoptable: false, reason: 'death_signal_insufficient' })
   })
 
-  it('D-R163 M2: IDENTITY with a live hook report of X elsewhere -> refused death_signal_insufficient (not just GEN_ABSENCE)', () => {
+  it('D-R163 M2, D-R170 M7: IDENTITY with a live hook report of X elsewhere -> refused live_report_elsewhere (not just GEN_ABSENCE)', () => {
     const result = resolveHolderAdoption(
       baseInput({
         incumbent: { dead: true, signal: 'IDENTITY', evidence: {} as never },
         liveHookReportOfSessionElsewhere: true
       })
     )
-    expect(result).toEqual({ adoptable: false, reason: 'death_signal_insufficient' })
+    expect(result).toEqual({ adoptable: false, reason: 'live_report_elsewhere' })
   })
 
-  it('D-R163 M2: D1 with a live hook report of X elsewhere -> refused death_signal_insufficient (not just GEN_ABSENCE)', () => {
+  it('D-R163 M2, D-R170 M7: D1 with a live hook report of X elsewhere -> refused live_report_elsewhere (not just GEN_ABSENCE)', () => {
     const result = resolveHolderAdoption(
       baseInput({
         incumbent: { dead: true, signal: 'D1', evidence: {} as never },
         liveHookReportOfSessionElsewhere: true
       })
     )
-    expect(result).toEqual({ adoptable: false, reason: 'death_signal_insufficient' })
+    expect(result).toEqual({ adoptable: false, reason: 'live_report_elsewhere' })
   })
 
-  it('GEN_ABSENCE with a live hook report of X elsewhere -> refused death_signal_insufficient', () => {
+  it('D-R170 M7: GEN_ABSENCE with a live hook report of X elsewhere -> refused live_report_elsewhere', () => {
     const result = resolveHolderAdoption(
       baseInput({
         incumbent: { dead: false, reason: 'inventory_unknown' },
         liveHookReportOfSessionElsewhere: true
       })
     )
-    expect(result).toEqual({ adoptable: false, reason: 'death_signal_insufficient' })
+    expect(result).toEqual({ adoptable: false, reason: 'live_report_elsewhere' })
   })
 
   it('GEN_ABSENCE with a null inventory round -> refused death_signal_insufficient', () => {

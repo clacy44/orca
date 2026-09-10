@@ -18,6 +18,7 @@ export type HolderAdoptionRefusalReason =
   | 'current_generation'
   | 'holder_launch_row_missing'
   | 'death_signal_insufficient'
+  | 'live_report_elsewhere'
   | 'sweep_in_flight'
   | 'other_live_registered_row'
   | 'transcript_preflight_failed'
@@ -84,7 +85,11 @@ export function resolveHolderAdoption(input: HolderAdoptionInput): HolderAdoptio
   // reporting X elsewhere contests IDENTITY/D1 exactly as it contests GEN_ABSENCE (DEC-1's
   // contested-state case) — checked FIRST so neither branch below needs its own copy.
   if (input.liveHookReportOfSessionElsewhere) {
-    return { adoptable: false, reason: 'death_signal_insufficient' }
+    // [D-R170 M7] Distinct from the ordinary no-death-signal refusal below (:103) — this one
+    // fires because another pane's hook report contests the session, which needs a different
+    // operator response (investigate that pane / wait out its recency window), not "the D2/pty
+    // evidence didn't add up". The CLI prints this reason verbatim.
+    return { adoptable: false, reason: 'live_report_elsewhere' }
   }
   let signal: 'IDENTITY' | 'D1' | 'GEN_ABSENCE' | null = null
   if (

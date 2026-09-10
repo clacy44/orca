@@ -86,15 +86,17 @@ or a runtime-kind peer) is refused regardless of any other check.
 Each restored or already-live chair prints one line:
 
 ```
-backend-dll  [ok]  pane=tab:leaf-1 recorded=sess-abc minted=sess-abc paneLive=true attested=true autoRestoreArmed=true
+backend-dll  [ok]  pane=tab:leaf-1 recorded=sess-abc minted=sess-abc paneLive=true reported<30m=true autoRestoreArmed=true
 ```
 
 - `pane` — the pane key the chair now lives on.
 - `recorded` — the session id the host's own launch record carries for that pane.
 - `minted` — the session id the manifest asked for (`lastSessionId` if set, else `conversationId`).
 - `paneLive` — whether the pane currently resolves live.
-- `attested` — whether the hook channel has reported this session live; `unknown` when that check
-  is unwired (never a silent false).
+- `reported<30m` — NOT a liveness attestation: whether the hook channel has reported this
+  session within the last `AGENT_STATUS_STALE_AFTER_MS` (30 minutes), which a rehydrated row can
+  satisfy from a pane whose process has already died; `unknown` when the check is unwired
+  (never a silent false).
 - `autoRestoreArmed` — whether the conversation's own transcript carries a real turn (a
   zero-turn stub transcript would not auto-restore on the next restart).
 

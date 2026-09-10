@@ -62,8 +62,11 @@ export type ChairsRestoreVerificationRow = {
   recorded: string | null
   minted: string
   paneLive: boolean
-  // [S10-21d b3b, D-R165 M5] null = the hook-report check is unwired (never observed), not "no
-  // live report" — CLI/JSON prints `attested=unknown`, distinct from a wired false.
+  // [S10-21d b3b, D-R165 M5, corrected per D-R170 M8] null = the hook-report check is unwired
+  // (never observed), not "no live report" — CLI/JSON prints `reported<30m=unknown`, distinct
+  // from a wired false. NOT a liveness attestation: a recency-bounded report of a hook event
+  // within AGENT_STATUS_STALE_AFTER_MS, which a hydrated (restoredUnconfirmed) row can satisfy
+  // from a dead pane's frozen pre-restart timestamp — `ok` never reads this field.
   attested: boolean | null
   autoRestoreArmed: boolean
   ok: boolean
