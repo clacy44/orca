@@ -236,17 +236,22 @@ export async function requestChairRestore(
   const writeAdoptionAudit = (
     agentId: string | null,
     actorPaneKey: string | null,
-    exit: string
+    exit: string,
+    // [D-R171 NM-2 fix] Set true only from the ensure_agent_session_failed catch, after
+    // re-reading db.paneHoldingSession: when the holder's binding is still intact (the throw
+    // landed before the supersede DELETE committed, e.g. checkHostResumeHolderUnmoved's own
+    // refusal), the holder was never actually superseded and must not be stamped as such on its
+    // own append-only audit trail. The adoption-attempt row below is still written either way.
+    holderBindingIntact = false
   ): void => {
     if (holderPaneKey === null || adoptionSignal === null) {
       return
     }
-    const outcome =
-      exit === 'ensure_agent_session_failed'
-        ? 'adopted_ensure_failed'
-        : agentId
-          ? 'adopted'
-          : 'adopted_unregistered'
+    const outcome = exit.startsWith('ensure_agent_session_failed')
+      ? 'adopted_ensure_failed'
+      : agentId
+        ? 'adopted'
+        : 'adopted_unregistered'
     const reasonCode =
       `signal=${adoptionSignal} holder=${holderPaneKey} ` +
       `holder_generation=${holderGenerationForAudit} session=${request.sessionId} exit=${exit}`
@@ -258,7 +263,7 @@ export async function requestChairRestore(
       outcome,
       reasonCode
     })
-    if (holderRegisteredForAudit) {
+    if (holderRegisteredForAudit && !holderBindingIntact) {
       db.writeAgentAudit({
         agentId: holderRegisteredForAudit.id,
         actorPaneKey: holderPaneKey,
@@ -292,7 +297,17 @@ export async function requestChairRestore(
       { restoreProvenance: { kind: 'host-restore', ticket, evidence: 'host_restore' } }
     )
   } catch (err) {
-    writeAdoptionAudit(null, null, 'ensure_agent_session_failed')
+    // [D-R171 M12 fix] Carry the underlying error into the exit string so the audit row
+    // distinguishes this cause from every other pre-supersede throw that reaches this catch,
+    // instead of collapsing ~10 causes into the one bare literal. Matched with startsWith
+    // above and below since the message is appended.
+    const exit = `ensure_agent_session_failed:${err instanceof Error ? err.message : String(err)}`
+    // [D-R171 NM-2 fix] Re-read the holder binding rather than trusting the pre-call snapshot:
+    // many throws that reach this catch (e.g. checkHostResumeHolderUnmoved's own refusal) fire
+    // BEFORE the supersede DELETE inside ensureAgentSession commits, so the holder was never
+    // actually superseded.
+    const holderBindingIntact = db.paneHoldingSession(hostId, request.sessionId) === holderPaneKey
+    writeAdoptionAudit(null, null, exit, holderBindingIntact)
     return {
       ok: false,
       reason: `ensure_agent_session_failed: ${err instanceof Error ? err.message : String(err)}`

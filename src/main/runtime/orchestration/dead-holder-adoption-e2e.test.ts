@@ -447,4 +447,62 @@ describe('D-R163 M3 negatives 1/2/6: dead-holder adoption, wired end to end', ()
     expect(supersededAudit?.outcome).toBe('superseded')
     expect(supersededAudit?.agent_id).toBe(holderAgentIdBefore)
   })
+
+  it('[D-R171 NM-2 fix] ensureAgentSession throwing before the supersede commits writes no superseded row against the still-intact holder', async () => {
+    db = new OrchestrationDb(':memory:')
+    const runtime = makeRuntime()
+    runtime.setOrchestrationDb(db)
+    stubLaunchScope(runtime)
+    installRecordingPtyController(runtime, db)
+
+    const holderPtyId = `pty-${randomUUID()}`
+    const holderIncarnationId = randomUUID()
+    const { holderPaneKey } = await seedHolder(holderPtyId, holderIncarnationId)
+    const holderAgentIdBefore = db.getAgentByPaneKey(HOST_ID, holderPaneKey)?.id
+    expect(holderAgentIdBefore).toBeDefined()
+
+    const deadInventory: ControllerInventory = {
+      allLivePtyIds: new Set(),
+      terminalIdentityByPtyId: new Map()
+    }
+    vi.spyOn(runtime, 'takeControllerInventoryForSweep').mockResolvedValue(deadInventory)
+    // ensureAgentSession throws before it ever reaches the supersede DELETE (agent-launch-
+    // sessions.ts:186-189) — the holder's own binding is never touched.
+    vi.spyOn(runtime, 'ensureAgentSession').mockRejectedValue(new Error('boom'))
+
+    const result = await runtime.requestChairRestore({
+      worktreeSelector: 'id:wt-1',
+      sessionId: SESSION_ID,
+      displayName: 'chair-dead'
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) {
+      throw new Error('unreachable')
+    }
+    expect(result.reason).toContain('ensure_agent_session_failed')
+    expect(result.reason).toContain('boom')
+
+    // The holder's binding is untouched: still the session's sole current holder.
+    expect(
+      rawDb()
+        .prepare('SELECT pane_key FROM current_sessions WHERE host_id = ? AND session_id = ?')
+        .get(HOST_ID, SESSION_ID)
+    ).toEqual({ pane_key: holderPaneKey })
+
+    // [D-R171 M12] The adoption-attempt row still names the specific underlying error.
+    const adoptedAudit = rawDb()
+      .prepare(
+        `SELECT * FROM agent_audit WHERE verb = 'session_adopted' AND actor_pane_key IS NULL`
+      )
+      .get() as { outcome: string; reason_code: string } | undefined
+    expect(adoptedAudit?.outcome).toBe('adopted_ensure_failed')
+    expect(adoptedAudit?.reason_code).toContain('exit=ensure_agent_session_failed:boom')
+
+    // [D-R171 NM-2] No superseded row against the holder — its binding was never superseded.
+    const supersededAudit = rawDb()
+      .prepare(`SELECT * FROM agent_audit WHERE verb = 'superseded' AND actor_pane_key = ?`)
+      .get(holderPaneKey)
+    expect(supersededAudit).toBeUndefined()
+  })
 })
