@@ -54,27 +54,63 @@ describe('D-R163 M1: AgentHookServer.hasLiveReportOfSession', () => {
     expect(server.hasLiveReportOfSession(SESSION_ID, { excludePaneKey: HOLDER_PANE })).toBe(true)
   })
 
-  it('a restoredUnconfirmed entry is never live evidence', () => {
+  it('a STALE restoredUnconfirmed entry on a non-holder pane is never live evidence', () => {
     const server = new AgentHookServer()
     servers.push(server)
     server
       ._getStateForTests()
       .lastStatusByPaneKey.set(
         OTHER_PANE,
-        entry({ paneKey: OTHER_PANE, restoredUnconfirmed: true })
+        entry({ paneKey: OTHER_PANE, restoredUnconfirmed: true, receivedAt: 0 })
       )
     expect(server.hasLiveReportOfSession(SESSION_ID)).toBe(false)
   })
 
-  it('a retainedForLiveness entry is never live evidence', () => {
+  it('a STALE retainedForLiveness entry on a non-holder pane is never live evidence', () => {
     const server = new AgentHookServer()
     servers.push(server)
     server
       ._getStateForTests()
       .lastStatusByPaneKey.set(
         OTHER_PANE,
-        entry({ paneKey: OTHER_PANE, retainedForLiveness: true })
+        entry({ paneKey: OTHER_PANE, retainedForLiveness: true, receivedAt: 0 })
       )
     expect(server.hasLiveReportOfSession(SESSION_ID)).toBe(false)
+  })
+
+  it('[G1-10o B5/C35 fix] a RECENT restoredUnconfirmed entry on a non-holder pane IS live evidence', () => {
+    const server = new AgentHookServer()
+    servers.push(server)
+    server
+      ._getStateForTests()
+      .lastStatusByPaneKey.set(
+        OTHER_PANE,
+        entry({ paneKey: OTHER_PANE, restoredUnconfirmed: true, receivedAt: Date.now() })
+      )
+    expect(server.hasLiveReportOfSession(SESSION_ID)).toBe(true)
+  })
+
+  it('[G1-10o B5/C35 fix] a RECENT retainedForLiveness entry on a non-holder pane IS live evidence', () => {
+    const server = new AgentHookServer()
+    servers.push(server)
+    server
+      ._getStateForTests()
+      .lastStatusByPaneKey.set(
+        OTHER_PANE,
+        entry({ paneKey: OTHER_PANE, retainedForLiveness: true, receivedAt: Date.now() })
+      )
+    expect(server.hasLiveReportOfSession(SESSION_ID)).toBe(true)
+  })
+
+  it("[G1-10o B5/C35 fix] the holder's own RECENT retainedForLiveness row is still excluded by excludePaneKey", () => {
+    const server = new AgentHookServer()
+    servers.push(server)
+    server
+      ._getStateForTests()
+      .lastStatusByPaneKey.set(
+        HOLDER_PANE,
+        entry({ paneKey: HOLDER_PANE, retainedForLiveness: true, receivedAt: Date.now() })
+      )
+    expect(server.hasLiveReportOfSession(SESSION_ID, { excludePaneKey: HOLDER_PANE })).toBe(false)
   })
 })
