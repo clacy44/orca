@@ -47,6 +47,14 @@ export function resolveAgentLaunchCommand(args: {
   if (!trailingTokens.ok) {
     return { ok: false, error: `CLI arguments are invalid: ${trailingTokens.error}` }
   }
+  // [D-R170 M16, OPEN on the create path per the NH-1 revert ruling, carried as R127] The
+  // create call sites pass `sessionOptionsOverrideAgentArgs: Boolean(sessionOptions)`, so a
+  // stored preference makes this `includeCatalogDefaults` conjunct false and suppresses the
+  // catalog default effort — restoring 115a9e3688 behaviour. Resume passes no such flag (always
+  // `undefined`, so `!undefined` is true) and DOES inject the default
+  // (tui-agent-startup-session-options.test.ts:187-198, the M-B7c pin), so an operator's effort
+  // can silently change across a create-vs-resume boundary. Intended per the chair's REVERT
+  // ruling on B7 edit (3), not yet reconciled — see D-R172-g1-A3-review.md MEDIUM-4.
   const resolvedOptions = resolveAgentSessionOptionLaunch(
     args.agent,
     args.sessionOptions,

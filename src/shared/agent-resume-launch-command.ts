@@ -182,6 +182,19 @@ export function buildClaudeResumeLaunchCommand(
   shell: AgentStartupShell,
   modelEffort?: { model?: string; effort?: string }
 ): string {
+  // [G1-10o B7/C45 fix, narrowed per D-R170 M15] Neither pref field is allow-listed at every
+  // writer (model has no allow-list at all — chairs-manifest.ts:67-69). A dash-leading value
+  // would otherwise be promoted from a flag's operand into a bare argv token in flag position
+  // once the cut below strips only the flag and leaves the value standing (e.g. pref_model:
+  // '--dangerously-skip-permissions'). Fail closed for THIS function's own emission: a
+  // dash-leading modelEffort value passed in here can neither land in the argv this function
+  // appends nor drive a cut at isClaudeModelOrEffortToken below. It says nothing about a
+  // dash-leading value that reaches `baseCommand` by another route (e.g. already applied via
+  // resolveAgentLaunchCommand/resolveAgentSessionOptionLaunch before this function runs).
+  modelEffort = {
+    model: modelEffort?.model?.startsWith('-') ? undefined : modelEffort?.model,
+    effort: modelEffort?.effort?.startsWith('-') ? undefined : modelEffort?.effort
+  }
   const quotedResume = resumeArgs.map((arg) => quoteStartupArg(arg, shell)).join(' ')
   const quotedModelEffort = [
     ...(modelEffort?.model !== undefined ? ['--model', modelEffort.model] : []),
@@ -257,10 +270,20 @@ export function buildClaudeResumeLaunchCommand(
     let end = spans[i].end
     const next = tokens[i + 1]
     const bareWithValue =
-      ((isSelector && (token === '--resume' || token === '-r')) ||
-        (isModelOrEffort && (token === '--model' || token === '--effort'))) &&
       next !== undefined &&
-      !next.startsWith('-')
+      ((isSelector && (token === '--resume' || token === '-r') && !next.startsWith('-')) ||
+        // [G1-10o B7/C45 fix, narrowed per D-R170 M15] --model/--effort are known arity-1
+        // flags, unlike -r<id>'s ambiguity with another option's dash-leading value — absorb
+        // the next token (excluding claude's own `--` terminator and a resume selector) so an
+        // orphaned dash-leading value can never be left standing in flag position, for the
+        // base command this function is handed (the entry-normalisation above only prevents
+        // modelEffort itself from producing one; this also removes one already present in the
+        // `baseCommand` token stream at this point — which, when agentArgs was overridden,
+        // reflects agent-session-option-agent-args.ts's own arity-1 removal upstream).
+        (isModelOrEffort &&
+          (token === '--model' || token === '--effort') &&
+          next !== '--' &&
+          !isClaudeResumeSelector(next)))
     if (bareWithValue) {
       // A stale session locator, model id, or effort level rides along with its flag.
       end = spans[i + 1].end

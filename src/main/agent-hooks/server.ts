@@ -848,22 +848,40 @@ export class AgentHookServer {
     return this.buildStatusChangeNotification().providerSessions
   }
 
-  /** [S10-21d b3, DEC-3 conjunct D GEN_ABSENCE; S10-21d b3b, D-R163 M1 fix] Read-only: true iff
-   * some OTHER pane's last-known hook report names `sessionId` as its provider session — the
-   * live-report half of the GEN_ABSENCE signal (dead-holder-adoption.ts), never wire-reachable.
-   * `excludePaneKey` skips the holder's own pane: `lastStatusByPaneKey` persists/rehydrates for 7
-   * days (including across a restart), so the dying holder's OWN stale row naming X would
-   * otherwise make X permanently unreachable for GEN_ABSENCE (OD-21d-1). `restoredUnconfirmed`/
-   * `retainedForLiveness` entries are never live evidence either — the first is a
-   * not-yet-reconfirmed rehydration stamp, the second a user-hidden identity kept only for
-   * destructive liveness checks. */
+  /** [S10-21d b3, DEC-3 conjunct D GEN_ABSENCE; S10-21d b3b, D-R163 M1 fix; G1-10o B5/C35 fix]
+   * Read-only: true iff some OTHER pane's last-known hook report names `sessionId` as its
+   * provider session — the live-report half of the GEN_ABSENCE signal (dead-holder-adoption.ts).
+   * The value is wire-surfaced per session id as the `attested` column via
+   * rpc/methods/chairs-restore.ts:123. `excludePaneKey` skips the holder's own pane:
+   * `lastStatusByPaneKey` persists/rehydrates for 7 days (including across a restart), so the
+   * dying holder's OWN stale row naming X would otherwise make X permanently unreachable for
+   * GEN_ABSENCE (OD-21d-1). `restoredUnconfirmed`/`retainedForLiveness` rows CAN still name a
+   * live process (a not-yet-reconfirmed rehydration stamp, or a user-dismissed-but-still-alive
+   * pane kept only for destructive liveness checks — this IS one) — they only stop counting once
+   * stale. [D-R170 M9 correction] This is deliberately UNLIKE the house freshness predicates
+   * (`isFreshNonDoneAgentStatus`, agent-status-types.ts:282-287) and unlike this file's own
+   * inference gates (`inferInterrupt`, `inferQuestionAnswered`), which disqualify
+   * `restoredUnconfirmed` unconditionally. This one is a destructive-action guard, so recency is
+   * the only bound and the flag alone must never suppress it. [D-R170 M6] That bounds rather
+   * than closes the hole in both directions:
+   * an idle live pane emits no events, so a row can go stale while its process lives; this
+   * bounds the hole to AGENT_STATUS_STALE_AFTER_MS rather than closing it. */
   hasLiveReportOfSession(sessionId: string, opts?: { excludePaneKey?: string }): boolean {
     for (const [paneKey, entry] of this.state.lastStatusByPaneKey.entries()) {
       if (opts?.excludePaneKey !== undefined && paneKey === opts.excludePaneKey) {
         continue
       }
       const enriched = entry as EnrichedAgentHookEventPayload
-      if (enriched.restoredUnconfirmed || enriched.retainedForLiveness) {
+      // [D-R170 L8, STILL OPEN per D-R171 NM-4] A future-dated receivedAt (clock skew across a
+      // restart) is not clamped here or at ingest, so it can hold this guard open for the skew
+      // duration. A prior `Math.min(enriched.receivedAt, Date.now())` clamp here was a provable
+      // no-op (both Date.now() reads land microseconds apart) and has been removed rather than
+      // left in place misrepresenting L8 as closed. Left for a deliberate fix-at-ingest or
+      // WONTFIX decision, not patched here.
+      if (
+        (enriched.restoredUnconfirmed || enriched.retainedForLiveness) &&
+        enriched.receivedAt < Date.now() - AGENT_STATUS_STALE_AFTER_MS
+      ) {
         continue
       }
       if (enriched.providerSession?.id === sessionId) {

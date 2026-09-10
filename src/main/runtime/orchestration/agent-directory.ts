@@ -25,6 +25,13 @@ function generateAgentId(): string {
 
 const MAX_NAME_COLLISION_SUFFIX = 20
 
+// [D-R171 NM-5 fix] listAgents' own read ceiling, exported so callers that need to detect
+// truncation (chairs-restore.ts's export) compare against the SAME number this clamp actually
+// enforces, rather than DIRECTORY_LIVE_CAP — an independent literal that happens to equal this
+// one today but is the REGISTRATION ceiling, invited to change on its own (see
+// orchestration-agents-register.ts's "already has 200 registered agents" error text).
+export const AGENT_DIRECTORY_READ_CAP = 200
+
 export type UpsertAgentByPaneSuffixParams = {
   displayName: string
   role: string | null
@@ -375,7 +382,7 @@ export function listAgents(db: Database.Database, params: ListAgentsParams = {})
   if (params.includeDerived === false) {
     visible = visible.filter((row) => row.derived === 0)
   }
-  const limit = Math.min(Math.max(params.limit ?? 100, 1), 200)
+  const limit = Math.min(Math.max(params.limit ?? 100, 1), AGENT_DIRECTORY_READ_CAP)
   visible = visible.slice(0, limit)
 
   return {

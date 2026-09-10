@@ -38,7 +38,7 @@ type ChairsRestoreResultRow =
   | { name: string; kind: 'refuse'; reason: string; holderPaneKey: string; ok: false }
   | { name: string; kind: 'error'; reason: string; ok: false }
 
-type ChairsManifestEntry = {
+export type ChairsManifestEntry = {
   name: string
   role?: string
   worktree: string
@@ -50,7 +50,7 @@ type ChairsManifestEntry = {
   effort?: string
 }
 
-type ChairsManifest = { version: 1; chairs: ChairsManifestEntry[] }
+export type ChairsManifest = { version: 1; chairs: ChairsManifestEntry[] }
 
 type RestoreResult = {
   path: string
@@ -62,7 +62,17 @@ type RestoreResult = {
 
 type StatusResult = { path: string; plan: ChairsRestorePlan }
 
-type ExportResult = { path: string; manifest: ChairsManifest }
+export type ExportSkipReason = 'no_pane' | 'no_launch_row' | 'no_worktree'
+export type ExportSkip = { name: string; reason: ExportSkipReason }
+// [D-R170 M4] `skipped`/`omittedQuarantined` are optional — this method is local-only and not
+// protocol-version-gated (added fields are non-breaking), so a CLI from this branch must not
+// throw against an older running daemon that predates them.
+export type ExportResult = {
+  path: string
+  manifest: ChairsManifest
+  skipped?: ExportSkip[]
+  omittedQuarantined?: number
+}
 
 function formatPlanLine(action: ChairsRestorePlan['actions'][number]): string {
   switch (action.kind) {
@@ -94,7 +104,7 @@ function formatRow(row: ChairsRestoreResultRow): string {
   return (
     `${row.name}  [${status}]  pane=${row.paneKey} recorded=${row.recorded ?? '-'} ` +
     `minted=${row.minted} paneLive=${row.paneLive} ` +
-    `attested=${row.attested === null ? 'unknown' : row.attested} autoRestoreArmed=${row.autoRestoreArmed}`
+    `reported=${row.attested === null ? 'unknown' : row.attested} autoRestoreArmed=${row.autoRestoreArmed}`
   )
 }
 
@@ -120,8 +130,29 @@ function formatStatusResult(result: StatusResult): string {
   return lines.join('\n') || 'Nothing to do.'
 }
 
-function formatExportResult(result: ExportResult): string {
-  return `Wrote ${result.manifest.chairs.length} chair(s) to ${result.path}`
+const EXPORT_SKIP_REASON_TEXT: Record<ExportSkipReason, string> = {
+  no_pane: 'no pane recorded',
+  no_launch_row: 'no launch row recorded',
+  no_worktree: 'no worktree recorded'
+}
+
+export function formatExportResult(result: ExportResult): string {
+  // [D-R170 M4] Guard against an older daemon's response, which carries neither field.
+  const skipped = result.skipped ?? []
+  let line = `Wrote ${result.manifest.chairs.length} chair(s) to ${result.path}`
+  if (skipped.length > 0) {
+    const detail = skipped
+      .map((s) => `${s.name} (${EXPORT_SKIP_REASON_TEXT[s.reason] ?? s.reason})`)
+      .join(', ')
+    line += `; skipped ${skipped.length}: ${detail}`
+  }
+  // [D-R170 M1] The `includeQuarantined: false` filter runs before the skip guards above and
+  // is never reported by them — say so explicitly so a lifted quarantine doesn't silently
+  // reappear as a partial restore later.
+  if (result.omittedQuarantined && result.omittedQuarantined > 0) {
+    line += `; omitted ${result.omittedQuarantined} quarantined`
+  }
+  return line
 }
 
 export const CHAIRS_HANDLERS: Record<string, CommandHandler> = {

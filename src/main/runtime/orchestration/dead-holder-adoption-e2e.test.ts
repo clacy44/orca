@@ -16,6 +16,8 @@ import { OrchestrationDb } from './db'
 import { OrcaRuntimeService } from '../orca-runtime'
 import { _resetRestoreSweepLockForTest } from '../restore-sweep-lock'
 import type { ControllerInventory } from './agent-process-identity'
+import { checkHostResumeHolderUnmoved } from '../../ipc/agent-launch-admission-host-resume'
+import { LaunchAdmissionRefusedError } from '../../ipc/agent-launch-admission-errors'
 
 vi.mock('electron', () => ({
   BrowserWindow: { fromId: vi.fn(() => null) },
@@ -374,5 +376,266 @@ describe('D-R163 M3 negatives 1/2/6: dead-holder adoption, wired end to end', ()
         .prepare('SELECT pane_key FROM current_sessions WHERE host_id = ? AND session_id = ?')
         .get(HOST_ID, SESSION_ID)
     ).toEqual({ pane_key: holderPaneKey })
+  })
+
+  it('[G1-10o B6/C38 fix, D-R170 M12] register-failed-after-supersede writes an audit row naming the holder AND the specific register failure', async () => {
+    db = new OrchestrationDb(':memory:')
+    const runtime = makeRuntime()
+    runtime.setOrchestrationDb(db)
+    stubLaunchScope(runtime)
+    installRecordingPtyController(runtime, db)
+
+    const holderPtyId = `pty-${randomUUID()}`
+    const holderIncarnationId = randomUUID()
+    const { holderPaneKey } = await seedHolder(holderPtyId, holderIncarnationId)
+    const holderAgentIdBefore = db.getAgentByPaneKey(HOST_ID, holderPaneKey)?.id
+    expect(holderAgentIdBefore).toBeDefined()
+
+    // Quarantine the holder's identity: registerAgentForPane's name-collision guard locks the
+    // name regardless of pane liveness (agent-directory.ts:215-226), so the eventual register
+    // for the new pane returns name_taken even though the holder pane itself is dead.
+    db.setAgentQuarantine({ id: holderAgentIdBefore!, quarantined: true, reasonCode: 'test' })
+
+    const deadInventory: ControllerInventory = {
+      allLivePtyIds: new Set(),
+      terminalIdentityByPtyId: new Map()
+    }
+    vi.spyOn(runtime, 'takeControllerInventoryForSweep').mockResolvedValue(deadInventory)
+    const noticeSpy = vi.spyOn(runtime, 'writeHostNoticeToPane')
+
+    const result = await runtime.requestChairRestore({
+      worktreeSelector: 'id:wt-1',
+      sessionId: SESSION_ID,
+      displayName: 'chair-dead'
+    })
+
+    // [D-R170 M13] The "Session adopted" pane notice must never fire on the register-failed
+    // exit — a refused restore must not print a success banner into the pane it refused.
+    expect(noticeSpy).not.toHaveBeenCalled()
+
+    expect(result.ok).toBe(false)
+    if (result.ok) {
+      throw new Error('unreachable')
+    }
+    expect(result.reason).toContain('register_failed')
+    expect(result.reason).toContain('name_taken')
+
+    // The supersede already committed (destructive act happened inside ensureAgentSession before
+    // registration was attempted) — the session now names a pane with no registered agent.
+    const sessionRow = rawDb()
+      .prepare('SELECT pane_key FROM current_sessions WHERE host_id = ? AND session_id = ?')
+      .get(HOST_ID, SESSION_ID) as { pane_key: string } | undefined
+    expect(sessionRow?.pane_key).toBeDefined()
+    expect(sessionRow?.pane_key).not.toBe(holderPaneKey)
+
+    // [D-R170 M12] A session_adopted audit row still exists, and (unlike before) its
+    // reason_code names the specific failure (register_failed:name_taken) rather than only the
+    // holder — distinguishing it from restore_pane_key_missing and from the other register
+    // failure reasons (directory_full, invalid_name).
+    const adoptedAudit = rawDb()
+      .prepare(`SELECT * FROM agent_audit WHERE verb = 'session_adopted' AND actor_pane_key = ?`)
+      .get(sessionRow?.pane_key) as
+      | { agent_id: string | null; outcome: string; reason_code: string }
+      | undefined
+    expect(adoptedAudit?.agent_id).toBeNull()
+    expect(adoptedAudit?.outcome).toBe('adopted_unregistered')
+    expect(adoptedAudit?.reason_code).toContain(`holder=${holderPaneKey}`)
+    expect(adoptedAudit?.reason_code).toContain('exit=register_failed:name_taken')
+
+    // The superseded audit row still names the holder's identity.
+    const supersededAudit = rawDb()
+      .prepare(`SELECT * FROM agent_audit WHERE verb = 'superseded' AND actor_pane_key = ?`)
+      .get(holderPaneKey) as { agent_id: string | null; outcome: string } | undefined
+    expect(supersededAudit?.outcome).toBe('superseded')
+    expect(supersededAudit?.agent_id).toBe(holderAgentIdBefore)
+  })
+
+  it('[D-R172 MEDIUM-1 fix] ensureAgentSession throwing an error that is NOT a launch-admission refusal is treated conservatively: a superseded row IS written even though the holder is untouched', async () => {
+    db = new OrchestrationDb(':memory:')
+    const runtime = makeRuntime()
+    runtime.setOrchestrationDb(db)
+    stubLaunchScope(runtime)
+    installRecordingPtyController(runtime, db)
+
+    const holderPtyId = `pty-${randomUUID()}`
+    const holderIncarnationId = randomUUID()
+    const { holderPaneKey } = await seedHolder(holderPtyId, holderIncarnationId)
+    const holderAgentIdBefore = db.getAgentByPaneKey(HOST_ID, holderPaneKey)?.id
+    expect(holderAgentIdBefore).toBeDefined()
+
+    const deadInventory: ControllerInventory = {
+      allLivePtyIds: new Set(),
+      terminalIdentityByPtyId: new Map()
+    }
+    vi.spyOn(runtime, 'takeControllerInventoryForSweep').mockResolvedValue(deadInventory)
+    // A generic, unclassified throw — NOT a `LaunchAdmissionRefusedError` — from somewhere in
+    // ensureAgentSession. [D-R172 MEDIUM-1] the chair-restore catch can only distinguish
+    // `LaunchAdmissionRefusedError` (always pre-commit, agent-launch-admission.ts:144-147) from
+    // everything else; an unrecognized error class defaults to the conservative assumption
+    // (binding NOT intact) even on a path, like this one, where the throw in fact never reached
+    // the supersede DELETE. This is the named, accepted trade-off of the interim fix, not a bug:
+    // see the real-refusal case below for the one this fix DOES get right.
+    vi.spyOn(runtime, 'ensureAgentSession').mockRejectedValue(new Error('boom'))
+
+    const result = await runtime.requestChairRestore({
+      worktreeSelector: 'id:wt-1',
+      sessionId: SESSION_ID,
+      displayName: 'chair-dead'
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) {
+      throw new Error('unreachable')
+    }
+    expect(result.reason).toContain('ensure_agent_session_failed')
+    expect(result.reason).toContain('boom')
+
+    // The holder's binding is untouched: still the session's sole current holder.
+    expect(
+      rawDb()
+        .prepare('SELECT pane_key FROM current_sessions WHERE host_id = ? AND session_id = ?')
+        .get(HOST_ID, SESSION_ID)
+    ).toEqual({ pane_key: holderPaneKey })
+
+    // [D-R171 M12] The adoption-attempt row still names the specific underlying error.
+    const adoptedAudit = rawDb()
+      .prepare(
+        `SELECT * FROM agent_audit WHERE verb = 'session_adopted' AND actor_pane_key IS NULL`
+      )
+      .get() as { outcome: string; reason_code: string } | undefined
+    expect(adoptedAudit?.outcome).toBe('adopted_ensure_failed')
+    expect(adoptedAudit?.reason_code).toContain('exit=ensure_agent_session_failed:boom')
+
+    // [D-R172 MEDIUM-1] A superseded row IS written for an unrecognized error class, per the
+    // conservative default above — a known imprecision of the interim fix.
+    const supersededAudit = rawDb()
+      .prepare(`SELECT * FROM agent_audit WHERE verb = 'superseded' AND actor_pane_key = ?`)
+      .get(holderPaneKey) as { outcome: string } | undefined
+    expect(supersededAudit?.outcome).toBe('superseded')
+  })
+
+  it("[D-R172 MEDIUM-1 fix] a REAL restore_holder_moved refusal (holder moves between the predicate and the admission) writes the adoption-attempt row but NO 'superseded' row against the holder", async () => {
+    db = new OrchestrationDb(':memory:')
+    const runtime = makeRuntime()
+    runtime.setOrchestrationDb(db)
+    stubLaunchScope(runtime)
+    installRecordingPtyController(runtime, db)
+
+    const holderPtyId = `pty-${randomUUID()}`
+    const holderIncarnationId = randomUUID()
+    const { holderPaneKey } = await seedHolder(holderPtyId, holderIncarnationId)
+    const holderAgentIdBefore = db.getAgentByPaneKey(HOST_ID, holderPaneKey)?.id
+    expect(holderAgentIdBefore).toBeDefined()
+
+    const deadInventory: ControllerInventory = {
+      allLivePtyIds: new Set(),
+      terminalIdentityByPtyId: new Map()
+    }
+    vi.spyOn(runtime, 'takeControllerInventoryForSweep').mockResolvedValue(deadInventory)
+
+    const rawWrite = rawDb() as unknown as {
+      prepare: (sql: string) => { run: (...args: unknown[]) => unknown }
+    }
+    // Simulate the holder moving between `requestChairRestore`'s own predicate read
+    // (`chair-restore.ts:92`, already resolved to `holderPaneKey` above) and the admission's
+    // in-lock re-check: only NOW — at the point `ensureAgentSession` is entered, standing in for
+    // that re-check per the file-level DEVIATION note (the fake pty controller bypasses the real
+    // IPC-hop admission stack) — does the session's `current_sessions` row move to a DIFFERENT
+    // pane than the one the adoption decision was made against.
+    vi.spyOn(runtime, 'ensureAgentSession').mockImplementation(async () => {
+      const movedToPaneKey = `tab-new:${randomUUID()}`
+      rawWrite
+        .prepare('UPDATE current_sessions SET pane_key = ? WHERE host_id = ? AND session_id = ?')
+        .run(movedToPaneKey, HOST_ID, SESSION_ID)
+
+      // Drive the REAL predicate `checkHostResumeHolderUnmoved` (agent-launch-admission-host-
+      // resume.ts) against this exact db state, proving it genuinely yields
+      // `restore_holder_moved` for this fixture rather than assuming it.
+      const realRefusal = checkHostResumeHolderUnmoved(db, HOST_ID, 'gen-new', SESSION_ID, {
+        evidence: 'host_restore',
+        predecessorPaneKey: holderPaneKey,
+        executionHostId: HOST_ID,
+        launchGeneration: 'gen-new'
+      })
+      expect(realRefusal).toBe('restore_holder_moved')
+      if (!realRefusal) {
+        throw new Error('unreachable: asserted above')
+      }
+
+      // The real admission arm's `refuse()` (agent-launch-admission.ts:144-147) throws exactly
+      // this class for exactly this reason code.
+      throw new LaunchAdmissionRefusedError(realRefusal)
+    })
+
+    const result = await runtime.requestChairRestore({
+      worktreeSelector: 'id:wt-1',
+      sessionId: SESSION_ID,
+      displayName: 'chair-dead'
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) {
+      throw new Error('unreachable')
+    }
+    expect(result.reason).toContain('ensure_agent_session_failed')
+    expect(result.reason).toContain('restore_holder_moved')
+
+    // The adoption-attempt row IS written.
+    const adoptedAudit = rawDb()
+      .prepare(
+        `SELECT * FROM agent_audit WHERE verb = 'session_adopted' AND actor_pane_key IS NULL`
+      )
+      .get() as { outcome: string; reason_code: string } | undefined
+    expect(adoptedAudit?.outcome).toBe('adopted_ensure_failed')
+    // [D-R172 MEDIUM-2] `reason_code` is capped at 200 chars, which truncates this particular
+    // message before 'restore_holder_moved' — asserted on `result.reason` above instead, which
+    // carries the untruncated message.
+    expect(adoptedAudit?.reason_code).toContain('exit=ensure_agent_session_failed')
+
+    // No 'superseded' row against the holder: `LaunchAdmissionRefusedError` is recognized as
+    // pre-commit, so `holderBindingIntact` is true and the superseded write is skipped.
+    const supersededAudit = rawDb()
+      .prepare(`SELECT * FROM agent_audit WHERE verb = 'superseded' AND actor_pane_key = ?`)
+      .get(holderPaneKey)
+    expect(supersededAudit).toBeUndefined()
+  })
+
+  it('[D-R172 MEDIUM-2 fix] a multi-KB ensureAgentSession error message yields a reason_code capped at 200 chars', async () => {
+    db = new OrchestrationDb(':memory:')
+    const runtime = makeRuntime()
+    runtime.setOrchestrationDb(db)
+    stubLaunchScope(runtime)
+    installRecordingPtyController(runtime, db)
+
+    const holderPtyId = `pty-${randomUUID()}`
+    const holderIncarnationId = randomUUID()
+    await seedHolder(holderPtyId, holderIncarnationId)
+
+    const deadInventory: ControllerInventory = {
+      allLivePtyIds: new Set(),
+      terminalIdentityByPtyId: new Map()
+    }
+    vi.spyOn(runtime, 'takeControllerInventoryForSweep').mockResolvedValue(deadInventory)
+    // A pathological, environment-controlled error message (5 KB) — `agent_audit.reason_code`
+    // is append-only (db.ts's ABORT triggers on UPDATE/DELETE), so this must not mint an
+    // unbounded, unremovable row.
+    const hugeMessage = 'x'.repeat(5 * 1024)
+    vi.spyOn(runtime, 'ensureAgentSession').mockRejectedValue(new Error(hugeMessage))
+
+    const result = await runtime.requestChairRestore({
+      worktreeSelector: 'id:wt-1',
+      sessionId: SESSION_ID,
+      displayName: 'chair-dead'
+    })
+
+    expect(result.ok).toBe(false)
+
+    const adoptedAudit = rawDb()
+      .prepare(
+        `SELECT * FROM agent_audit WHERE verb = 'session_adopted' AND actor_pane_key IS NULL`
+      )
+      .get() as { reason_code: string } | undefined
+    expect(adoptedAudit?.reason_code).toBeDefined()
+    expect(adoptedAudit!.reason_code.length).toBeLessThanOrEqual(200)
   })
 })

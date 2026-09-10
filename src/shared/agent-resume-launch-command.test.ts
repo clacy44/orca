@@ -663,4 +663,53 @@ describe('buildClaudeResumeLaunchCommand: model/effort (S10-21d R118)', () => {
     expect(tokenized.tokens[tokenized.tokens.indexOf('--model') + 1]).toBe('claude-x')
     expect(tokenized.tokens[tokenized.tokens.indexOf('--effort') + 1]).toBe('high')
   })
+
+  it('[G1-10o B7/C45 fix] a dash-leading modelEffort value is never emitted, and never left as a bare token', () => {
+    const command = buildClaudeResumeLaunchCommand('claude', RESUME, 'posix', {
+      model: '--dangerously-skip-permissions'
+    })
+    const tokenized = tokenizeStartupCommand(command, 'posix')
+    expect(tokenized.ok).toBe(true)
+    if (!tokenized.ok) {
+      return
+    }
+    expect(tokenized.tokens).not.toContain('--model')
+    expect(tokenized.tokens).not.toContain('--dangerously-skip-permissions')
+    expectSingleAuthoritativeResume(command, 'posix')
+  })
+
+  it('[G1-10o B7/C45 fix] a base command carrying a dash-leading --effort value is fully cleaned', () => {
+    const command = buildClaudeResumeLaunchCommand('claude --effort -x', RESUME, 'posix', {
+      effort: 'high'
+    })
+    const tokenized = tokenizeStartupCommand(command, 'posix')
+    expect(tokenized.ok).toBe(true)
+    if (!tokenized.ok) {
+      return
+    }
+    expect(tokenized.tokens).not.toContain('-x')
+    const effortTokens = tokenized.tokens.filter((t) => t === '--effort')
+    expect(effortTokens).toHaveLength(1)
+    expect(tokenized.tokens[tokenized.tokens.indexOf('--effort') + 1]).toBe('high')
+  })
+
+  it('[G1-10o B7/C45 fix] persisted prefs beat base-command --model/--effort flags on resume, the same as on create', () => {
+    const command = buildClaudeResumeLaunchCommand(
+      'claude --model operator-pin --effort low',
+      RESUME,
+      'posix',
+      { model: 'pref-model', effort: 'high' }
+    )
+    const tokenized = tokenizeStartupCommand(command, 'posix')
+    expect(tokenized.ok).toBe(true)
+    if (!tokenized.ok) {
+      return
+    }
+    expect(tokenized.tokens.filter((t) => t === '--model')).toHaveLength(1)
+    expect(tokenized.tokens.filter((t) => t === '--effort')).toHaveLength(1)
+    expect(tokenized.tokens[tokenized.tokens.indexOf('--model') + 1]).toBe('pref-model')
+    expect(tokenized.tokens[tokenized.tokens.indexOf('--effort') + 1]).toBe('high')
+    expect(tokenized.tokens).not.toContain('operator-pin')
+    expect(tokenized.tokens).not.toContain('low')
+  })
 })
