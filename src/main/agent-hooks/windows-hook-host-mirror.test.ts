@@ -431,10 +431,13 @@ describe.skipIf(process.platform !== 'win32')('windows-only: the produced exe en
       const env = server.buildPtyEnv()
       const paneKey = makePaneKey('tab-1', '22222222-2222-4222-8222-222222222222')
       const hook = getWindowsManagedLifecycleHook(
-        'C:\\Users\\test\\.orca\\agent-hooks\\claude-hook.cmd'
+        'C:\\Users\\test\\.orca\\agent-hooks\\claude-hook.cmd',
+        process.env.ORCA_TEST_RESOURCES_PATH
       )
-      // M3: null only when orca-hook-host.exe is absent — this CI job builds it first, so a
-      // null here means the build step itself failed silently rather than a real skip case.
+      // M3: the exe is resolved from ORCA_TEST_RESOURCES_PATH, which CI's pr.yml sets to the
+      // packaged app's unpacked resources dir (dist/win-unpacked/resources) after the
+      // "Package unpacked app" step — so a null here means the packaged app lacks the exe,
+      // not that the build step failed silently.
       if (hook === null) {
         throw new Error('orca-hook-host.exe not found — did build:native run before this test?')
       }

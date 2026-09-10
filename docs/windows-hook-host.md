@@ -42,7 +42,8 @@ console is ever allocated for it) that reads stdin and does the HTTP POST to Orc
   C# side bounds each phase independently via `Timeout`/`ReadWriteTimeout`, not a single
   whole-call budget) — those are provable only by the `describe.skipIf(win32)` spawn test in
   `windows-hook-host-mirror.test.ts`, which runs the real compiled `.exe` and is gated to actual
-  Windows CI.
+  Windows CI: `pr.yml`'s `package_windows` job runs it in the "Test Windows hook host" step,
+  after "Package unpacked app", against the unpacked `dist/win-unpacked/resources` dir.
 - **SignPath scope (R3 — OWNER ACTION ITEM, unverified from this repo):** SignPath signs the
   packaged Windows build externally, from outside this repo, so this cannot be confirmed here.
   Before shipping a build containing `orca-hook-host.exe`, the owner must confirm SignPath's
