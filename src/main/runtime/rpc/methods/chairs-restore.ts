@@ -22,7 +22,8 @@ import { z } from 'zod'
 import { defineMethod, type RpcMethod, type RpcContext } from '../core'
 import { OptionalString, OptionalBoolean } from '../schemas'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
-import { DIRECTORY_LIVE_CAP, hostIdFor, rateLimited } from './agent-directory-rpc-view'
+import { hostIdFor, rateLimited } from './agent-directory-rpc-view'
+import { AGENT_DIRECTORY_READ_CAP } from '../../orchestration/agent-directory'
 import {
   parseChairsManifest,
   CHAIRS_MANIFEST_EFFORTS,
@@ -256,36 +257,42 @@ export const CHAIRS_RESTORE_METHODS: RpcMethod[] = [
           `${path} already exists; pass --force to overwrite`
         )
       }
-      // [G1-10o B4/C28 fix, D-R170 M2/M3 PARTIAL — see D-R170 M2 deviation in RETURN] Pass the
-      // DB layer's own hard cap explicitly (the single shared constant, not a fourth private
-      // copy of it) so the *default* of 100 (agent-directory.ts:378) cannot silently shorten
-      // the manifest below it.
+      // [G1-10o B4/C28 fix, D-R170 M2/M3 PARTIAL, re-sourced per D-R171 NM-5 — see D-R170 M2
+      // deviation in RETURN] Pass listAgents' OWN read ceiling explicitly (AGENT_DIRECTORY_READ_CAP,
+      // exported by agent-directory.ts alongside the clamp it names) so the *default* of 100
+      // cannot silently shorten the manifest below it. D-R170's fix used DIRECTORY_LIVE_CAP —
+      // the REGISTRATION ceiling, a numerically-identical but independent literal invited to
+      // change on its own (see orchestration-agents-register.ts) — which NM-5 showed would go
+      // silent the moment the two drift: requesting more than listAgents' internal clamp is
+      // silently reduced back to it, so this refusal can only ever fire when the requested
+      // limit and the clamp agree.
       //
-      // D-R170's own smallest fix for M2 (request `DIRECTORY_LIVE_CAP + 1`, refuse only when
-      // `agents.length > DIRECTORY_LIVE_CAP`) is NOT applied here: `listAgents` clamps its
-      // OWN internal limit to `Math.min(Math.max(params.limit ?? 100, 1), 200)`
-      // (agent-directory.ts:378) — a literal 200 ceiling independent of whatever limit the
-      // caller requests. Requesting 201 is silently reduced back to 200 inside listAgents, so
-      // `agents.length` can never exceed 200 and `agents.length > DIRECTORY_LIVE_CAP` can never
-      // be true — the truncation refusal would become permanently unreachable, which is worse
-      // than the pre-fix over-refusal: a host with >200 real chairs would now export a
-      // silently-short manifest with no warning at all. Kept at `>=` (the pre-D-R170 behavior)
-      // so the guard stays loud; it still over-refuses a host with EXACTLY 200 real chairs
-      // (the residual M2 names), but that is a known false-positive, not a silent truncation.
-      // Actually distinguishing "exactly the cap" from "more than the cap" requires
-      // listAgents itself to report whether it trimmed anything (e.g. a total-before-slice or
-      // a `truncated` flag) — out of this dispatch's scope; flagged for the chair.
+      // D-R170's own smallest fix for M2 (request `AGENT_DIRECTORY_READ_CAP + 1`, refuse only
+      // when `agents.length > AGENT_DIRECTORY_READ_CAP`) is NOT applied here: `listAgents`
+      // clamps its OWN internal limit to `Math.min(Math.max(params.limit ?? 100, 1),
+      // AGENT_DIRECTORY_READ_CAP)` (agent-directory.ts) — independent of whatever limit the
+      // caller requests. Requesting one more than the cap is silently reduced back to it inside
+      // listAgents, so `agents.length` can never exceed the cap and `agents.length >
+      // AGENT_DIRECTORY_READ_CAP` can never be true — the truncation refusal would become
+      // permanently unreachable, which is worse than the pre-fix over-refusal: a host with more
+      // real chairs than the cap would now export a silently-short manifest with no warning at
+      // all. Kept at `>=` (the pre-D-R170 behavior) so the guard stays loud; it still
+      // over-refuses a host with EXACTLY the cap's worth of real chairs (the residual M2
+      // names), but that is a known false-positive, not a silent truncation. Actually
+      // distinguishing "exactly the cap" from "more than the cap" requires listAgents itself to
+      // report whether it trimmed anything (e.g. a total-before-slice or a `truncated` flag) —
+      // out of this dispatch's scope; flagged for the chair.
       const { agents, omitted } = db.listAgents({
         hostId,
         includeDerived: false,
         includeQuarantined: false,
-        limit: DIRECTORY_LIVE_CAP
+        limit: AGENT_DIRECTORY_READ_CAP
       })
-      if (agents.length >= DIRECTORY_LIVE_CAP) {
+      if (agents.length >= AGENT_DIRECTORY_READ_CAP) {
         throw new OrchestrationError(
           'chairs_export_truncated',
           `${agents.length} registered chairs meets or exceeds the directory's hard cap of ` +
-            `${DIRECTORY_LIVE_CAP}; refusing to write a manifest that may silently omit ` +
+            `${AGENT_DIRECTORY_READ_CAP}; refusing to write a manifest that may silently omit ` +
             'chairs. Retire or tombstone stale directory rows (orca agents retire) so the ' +
             'host falls below the cap.'
         )

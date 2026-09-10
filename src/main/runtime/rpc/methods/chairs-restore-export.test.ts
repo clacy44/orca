@@ -11,6 +11,7 @@ import type { RpcContext } from '../core'
 import { OrchestrationDb } from '../../orchestration/db'
 import { OrcaRuntimeService } from '../../orca-runtime'
 import type { ChairsManifest } from '../../orchestration/chairs-manifest'
+import { AGENT_DIRECTORY_READ_CAP } from '../../orchestration/agent-directory'
 
 vi.mock('electron', () => ({
   BrowserWindow: { fromId: vi.fn(() => null) },
@@ -233,12 +234,13 @@ describe('G1-10o B4/C28 fix: export loudly reports chairs it cannot represent', 
   // refusal on this handler throws OrchestrationError) and asserts no file was written.
   // [D-R170 M2 — NOT applied, see deviation in RETURN] This still refuses a host with EXACTLY
   // 200 real chairs (a complete, non-truncated read) — the review's own smallest fix for that
-  // over-refusal (request DIRECTORY_LIVE_CAP + 1, refuse only when agents.length exceeds the
-  // cap) does not work: listAgents' OWN internal clamp
-  // (Math.min(Math.max(params.limit ?? 100, 1), 200), agent-directory.ts:378) caps the read at
-  // 200 regardless of the requested limit, so agents.length can never exceed 200 and the
-  // proposed `>` guard would never fire — silently re-opening the truncation hole for a host
-  // with MORE than 200 chairs. Kept at `>=` (pre-D-R170 behavior) so the guard stays loud.
+  // over-refusal (request AGENT_DIRECTORY_READ_CAP + 1, refuse only when agents.length exceeds
+  // the cap) does not work: listAgents' OWN internal clamp
+  // (Math.min(Math.max(params.limit ?? 100, 1), AGENT_DIRECTORY_READ_CAP), agent-directory.ts)
+  // caps the read at 200 regardless of the requested limit, so agents.length can never exceed
+  // 200 and the proposed `>` guard would never fire — silently re-opening the truncation hole
+  // for a host with MORE than 200 chairs. Kept at `>=` (pre-D-R170 behavior) so the guard stays
+  // loud.
   it('a directory at the listAgents hard cap (200) refuses rather than writing a silently short manifest', async () => {
     await setup()
     for (let i = 0; i < 200; i++) {
@@ -289,4 +291,12 @@ describe('G1-10o B4/C28 fix: export loudly reports chairs it cannot represent', 
     expect(result.manifest.chairs).toEqual([])
     expect(result.skipped).toEqual([{ name: 'chair-no-launch', reason: 'no_launch_row' }])
   })
+})
+
+// [D-R171 NM-5 fix] Pins the value the export's truncation threshold now imports directly from
+// listAgents' own clamp, instead of the independent (registration-ceiling) literal. Top-level,
+// not inside the describe above — that block's afterEach unconditionally closes `db`, which
+// this assertion never opens.
+it('AGENT_DIRECTORY_READ_CAP is 200', () => {
+  expect(AGENT_DIRECTORY_READ_CAP).toBe(200)
 })
