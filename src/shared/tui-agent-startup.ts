@@ -228,7 +228,8 @@ export function buildAgentResumeStartupPlan(args: {
         // sessionOptionsOverrideAgentArgs: Boolean(sessionOptions)): a persisted pref must win
         // over an operator-authored --model/--effort in agentArgs on resume the same way it
         // does on create, and the override is then recorded in appliedSessionOptions.
-        sessionOptionsOverrideAgentArgs: Boolean(args.sessionOptions),
+        sessionOptionsOverrideAgentArgs:
+          Boolean(args.sessionOptions) && !args.cmdOverrides[args.agent],
         isRemote: args.isRemote
       })
   if (!baseCommand.ok) {

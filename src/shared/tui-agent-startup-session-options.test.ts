@@ -160,4 +160,24 @@ describe('tui agent startup session options', () => {
       "codex '-m' 'gpt-5.5' '-c' 'model_reasoning_effort=high' 'resume' 'thread-1'"
     )
   })
+
+  // [D-R170 H1 regression] Before the fix, sessionOptionsOverrideAgentArgs was
+  // `Boolean(args.sessionOptions)` unconditionally, which armed the override-conflict refusal
+  // in resolveAgentLaunchCommand whenever a cold-restore pane carried BOTH a stored preference
+  // and an operator agentCmdOverrides entry mentioning --model/--effort — even when the two
+  // agreed exactly. buildAgentResumeStartupPlan returned null, and the caller
+  // (ensureAgentSession) threw 'agent_session_identity_required', so the pane never came back.
+  // Pre-fix behaviour: `plan` was `null` and the production caller surfaced
+  // 'agent_session_identity_required' instead of resuming.
+  it('resumes when a cmdOverride and a matching sessionOptions preference agree (D-R170 H1)', () => {
+    const plan = buildAgentResumeStartupPlan({
+      agent: 'claude',
+      providerSession: { key: 'session_id', id: 'sess-1' },
+      cmdOverrides: { claude: 'claude --model x' },
+      platform: 'linux',
+      sessionOptions: { model: 'pref' }
+    })
+    expect(plan).not.toBeNull()
+    expect(plan?.launchCommand).toBe("claude '--model' 'pref' '--resume' 'sess-1'")
+  })
 })
