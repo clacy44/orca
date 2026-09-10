@@ -233,10 +233,17 @@ export async function requestChairRestore(
   // (not just above newPaneKey) so the catch below can also call it. `exit` names the specific
   // outcome for the reasonCode; `actorPaneKey` is explicit because it may be null (pre-mint) or
   // the holder's own key (mint succeeded but no pane key came back).
+  // [D-R171 LOW] A union, not `string` — a typo in one of the four call sites below silently
+  // downgrades the row to 'adopted_unregistered' with no compile error otherwise.
+  type WriteAdoptionAuditExit =
+    | `ensure_agent_session_failed:${string}`
+    | 'restore_pane_key_missing'
+    | `register_failed:${string}`
+    | 'ok'
   const writeAdoptionAudit = (
     agentId: string | null,
     actorPaneKey: string | null,
-    exit: string,
+    exit: WriteAdoptionAuditExit,
     // [D-R171 NM-2 fix] Set true only from the ensure_agent_session_failed catch, after
     // re-reading db.paneHoldingSession: when the holder's binding is still intact (the throw
     // landed before the supersede DELETE committed, e.g. checkHostResumeHolderUnmoved's own
@@ -301,7 +308,7 @@ export async function requestChairRestore(
     // distinguishes this cause from every other pre-supersede throw that reaches this catch,
     // instead of collapsing ~10 causes into the one bare literal. Matched with startsWith
     // above and below since the message is appended.
-    const exit = `ensure_agent_session_failed:${err instanceof Error ? err.message : String(err)}`
+    const exit: `ensure_agent_session_failed:${string}` = `ensure_agent_session_failed:${err instanceof Error ? err.message : String(err)}`
     // [D-R171 NM-2 fix] Re-read the holder binding rather than trusting the pre-call snapshot:
     // many throws that reach this catch (e.g. checkHostResumeHolderUnmoved's own refusal) fire
     // BEFORE the supersede DELETE inside ensureAgentSession commits, so the holder was never

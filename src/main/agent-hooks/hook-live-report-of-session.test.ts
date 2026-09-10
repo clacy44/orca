@@ -15,7 +15,11 @@ import { AgentHookServer } from './server'
 // production code's own `Date.now()` read.
 const BOUNDARY_MARGIN_MS = 1_000
 const STALE_RECEIVED_AT = Date.now() - AGENT_STATUS_STALE_AFTER_MS - BOUNDARY_MARGIN_MS
-const RECENT_RECEIVED_AT = Date.now() - AGENT_STATUS_STALE_AFTER_MS + BOUNDARY_MARGIN_MS
+// [D-R171 LOW] Call-time, not module-load-time: compared against the production code's own
+// Date.now() read, so a value fixed at import time could drift past the margin under load.
+function recentReceivedAt(): number {
+  return Date.now() - AGENT_STATUS_STALE_AFTER_MS + BOUNDARY_MARGIN_MS
+}
 
 const HOLDER_PANE = makePaneKey('tab-holder', '11111111-1111-4111-8111-111111111111')
 const OTHER_PANE = makePaneKey('tab-other', '22222222-2222-4222-8222-222222222222')
@@ -96,7 +100,7 @@ describe('D-R163 M1: AgentHookServer.hasLiveReportOfSession', () => {
       ._getStateForTests()
       .lastStatusByPaneKey.set(
         OTHER_PANE,
-        entry({ paneKey: OTHER_PANE, restoredUnconfirmed: true, receivedAt: RECENT_RECEIVED_AT })
+        entry({ paneKey: OTHER_PANE, restoredUnconfirmed: true, receivedAt: recentReceivedAt() })
       )
     expect(server.hasLiveReportOfSession(SESSION_ID)).toBe(true)
   })
@@ -108,7 +112,7 @@ describe('D-R163 M1: AgentHookServer.hasLiveReportOfSession', () => {
       ._getStateForTests()
       .lastStatusByPaneKey.set(
         OTHER_PANE,
-        entry({ paneKey: OTHER_PANE, retainedForLiveness: true, receivedAt: RECENT_RECEIVED_AT })
+        entry({ paneKey: OTHER_PANE, retainedForLiveness: true, receivedAt: recentReceivedAt() })
       )
     expect(server.hasLiveReportOfSession(SESSION_ID)).toBe(true)
   })
@@ -120,7 +124,7 @@ describe('D-R163 M1: AgentHookServer.hasLiveReportOfSession', () => {
       ._getStateForTests()
       .lastStatusByPaneKey.set(
         HOLDER_PANE,
-        entry({ paneKey: HOLDER_PANE, retainedForLiveness: true, receivedAt: RECENT_RECEIVED_AT })
+        entry({ paneKey: HOLDER_PANE, retainedForLiveness: true, receivedAt: recentReceivedAt() })
       )
     expect(server.hasLiveReportOfSession(SESSION_ID, { excludePaneKey: HOLDER_PANE })).toBe(false)
   })
@@ -135,7 +139,7 @@ describe('D-R163 M1: AgentHookServer.hasLiveReportOfSession', () => {
       ._getStateForTests()
       .lastStatusByPaneKey.set(
         HOLDER_PANE,
-        entry({ paneKey: HOLDER_PANE, restoredUnconfirmed: true, receivedAt: RECENT_RECEIVED_AT })
+        entry({ paneKey: HOLDER_PANE, restoredUnconfirmed: true, receivedAt: recentReceivedAt() })
       )
     expect(server.hasLiveReportOfSession(SESSION_ID, { excludePaneKey: HOLDER_PANE })).toBe(false)
   })

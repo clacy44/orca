@@ -141,7 +141,9 @@ export function formatExportResult(result: ExportResult): string {
   const skipped = result.skipped ?? []
   let line = `Wrote ${result.manifest.chairs.length} chair(s) to ${result.path}`
   if (skipped.length > 0) {
-    const detail = skipped.map((s) => `${s.name} (${EXPORT_SKIP_REASON_TEXT[s.reason]})`).join(', ')
+    const detail = skipped
+      .map((s) => `${s.name} (${EXPORT_SKIP_REASON_TEXT[s.reason] ?? s.reason})`)
+      .join(', ')
     line += `; skipped ${skipped.length}: ${detail}`
   }
   // [D-R170 M1] The `includeQuarantined: false` filter runs before the skip guards above and
