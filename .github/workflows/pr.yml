@@ -441,6 +441,11 @@ jobs:
       - name: Build package inputs
         run: pnpm run build:release
 
+      - name: Test Windows hook host
+        run: >-
+          pnpm exec vitest run --config config/vitest.config.ts
+          src/main/agent-hooks/windows-hook-host-mirror.test.ts
+
       - name: Prepare Electron native runtime
         run: node config/scripts/ensure-native-runtime.mjs --runtime=electron
 

@@ -58,8 +58,12 @@ internal static class OrcaHookHost
         // surface an error to Claude.
         try
         {
-            s_portPattern = new Regex(@"^\d{1,5}$");
-            s_pathnamePattern = new Regex(@"^/[A-Za-z0-9._~/-]*$");
+            // Pinned to match the mirror's ASCII-only, newline-strict guard exactly
+            // (source of truth: src/main/agent-hooks/windows-hook-host-mirror.ts:23-24) —
+            // \A/\z anchor the whole string (unlike ^/$, which also matches before a
+            // trailing newline), and [0-9] is ASCII-only (unlike \d, which is \p{Nd}).
+            s_portPattern = new Regex(@"\A[0-9]{1,5}\z");
+            s_pathnamePattern = new Regex(@"\A/[A-Za-z0-9._~/-]*\z");
             Run(args);
         }
         catch
