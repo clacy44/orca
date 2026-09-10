@@ -226,6 +226,50 @@ export async function requestChairRestore(
     launchGeneration: currentLaunchGeneration
   })
 
+  // [G1-10o B6/C38 fix, extended per D-R170 M11/M12/M13] The supersede DELETE inside
+  // ensureAgentSession below commits (agent-launch-sessions.ts:186-189) whenever it succeeds —
+  // so every exit from here on, INCLUDING ensureAgentSession itself throwing after that commit,
+  // is a window where the holder's binding is gone and must be audited. Defined above the try
+  // (not just above newPaneKey) so the catch below can also call it. `exit` names the specific
+  // outcome for the reasonCode; `actorPaneKey` is explicit because it may be null (pre-mint) or
+  // the holder's own key (mint succeeded but no pane key came back).
+  const writeAdoptionAudit = (
+    agentId: string | null,
+    actorPaneKey: string | null,
+    exit: string
+  ): void => {
+    if (holderPaneKey === null || adoptionSignal === null) {
+      return
+    }
+    const outcome =
+      exit === 'ensure_agent_session_failed'
+        ? 'adopted_ensure_failed'
+        : agentId
+          ? 'adopted'
+          : 'adopted_unregistered'
+    const reasonCode =
+      `signal=${adoptionSignal} holder=${holderPaneKey} ` +
+      `holder_generation=${holderGenerationForAudit} session=${request.sessionId} exit=${exit}`
+    db.writeAgentAudit({
+      agentId,
+      actorPaneKey,
+      actorHostId: hostId,
+      verb: 'session_adopted',
+      outcome,
+      reasonCode
+    })
+    if (holderRegisteredForAudit) {
+      db.writeAgentAudit({
+        agentId: holderRegisteredForAudit.id,
+        actorPaneKey: holderPaneKey,
+        actorHostId: hostId,
+        verb: 'superseded',
+        outcome: 'superseded',
+        reasonCode: `superseded by pane=${actorPaneKey ?? 'unknown'} agent=${agentId ?? 'unregistered'}`
+      })
+    }
+  }
+
   let created: RuntimeEnsureAgentSessionResult
   try {
     created = await deps.runtime.ensureAgentSession(
@@ -248,52 +292,15 @@ export async function requestChairRestore(
       { restoreProvenance: { kind: 'host-restore', ticket, evidence: 'host_restore' } }
     )
   } catch (err) {
+    writeAdoptionAudit(null, null, 'ensure_agent_session_failed')
     return {
       ok: false,
       reason: `ensure_agent_session_failed: ${err instanceof Error ? err.message : String(err)}`
     }
   }
   const newPaneKey = created.terminal.paneKey ?? null
-  // [G1-10o B6/C38 fix] The supersede DELETE inside ensureAgentSession above has already
-  // committed by this point (agent-launch-sessions.ts:182-188) whenever it succeeded — so every
-  // exit from here on is a window where the holder's binding is gone and must be audited, not
-  // only the success path. Loud trace for every adoption — new-pane 'session_adopted' + holder
-  // 'superseded' audit rows + a pane notice (a plain HOST_RESUME writes none of this).
-  const writeAdoptionAudit = (agentId: string | null): void => {
-    if (holderPaneKey === null || adoptionSignal === null) {
-      return
-    }
-    const reasonCode =
-      `signal=${adoptionSignal} holder=${holderPaneKey} ` +
-      `holder_generation=${holderGenerationForAudit} session=${request.sessionId}`
-    db.writeAgentAudit({
-      agentId,
-      actorPaneKey: newPaneKey,
-      actorHostId: hostId,
-      verb: 'session_adopted',
-      outcome: agentId ? 'adopted' : 'adopted_unregistered',
-      reasonCode
-    })
-    if (holderRegisteredForAudit) {
-      db.writeAgentAudit({
-        agentId: holderRegisteredForAudit.id,
-        actorPaneKey: holderPaneKey,
-        actorHostId: hostId,
-        verb: 'superseded',
-        outcome: 'superseded',
-        reasonCode: `superseded by pane=${newPaneKey ?? 'unknown'} agent=${agentId ?? 'unregistered'}`
-      })
-    }
-    if (newPaneKey) {
-      deps.runtime.writeHostNoticeToPane(
-        newPaneKey,
-        `Session adopted from ${holderPaneKey} (${adoptionSignal}).`,
-        { rateKey: 'session_adopted' }
-      )
-    }
-  }
   if (!newPaneKey) {
-    writeAdoptionAudit(null)
+    writeAdoptionAudit(null, newPaneKey ?? holderPaneKey, 'restore_pane_key_missing')
     return { ok: false, reason: 'restore_pane_key_missing' }
   }
   const newTerminalHandle = created.terminal.handle
@@ -305,10 +312,21 @@ export async function requestChairRestore(
     role: request.role
   })
   if (!registration.ok) {
-    writeAdoptionAudit(null)
+    writeAdoptionAudit(null, newPaneKey, `register_failed:${registration.reason}`)
     return { ok: false, reason: `register_failed: ${registration.reason}` }
   }
-  writeAdoptionAudit(registration.agent.id)
+  writeAdoptionAudit(registration.agent.id, newPaneKey, 'ok')
+  // [D-R170 M13] Only on the success path, same guard as writeAdoptionAudit — the closure used
+  // to also fire this from the register-failed exit, printing a success banner into a pane
+  // whose restore was refused. holderPaneKey/adoptionSignal are both null on an unheld restore
+  // (DEC-2, no adoption to announce).
+  if (holderPaneKey !== null && adoptionSignal !== null) {
+    deps.runtime.writeHostNoticeToPane(
+      newPaneKey,
+      `Session adopted from ${holderPaneKey} (${adoptionSignal}).`,
+      { rateKey: 'session_adopted' }
+    )
+  }
   return {
     ok: true,
     paneKey: newPaneKey,

@@ -376,7 +376,7 @@ describe('D-R163 M3 negatives 1/2/6: dead-holder adoption, wired end to end', ()
     ).toEqual({ pane_key: holderPaneKey })
   })
 
-  it('[G1-10o B6/C38 fix] register-failed-after-supersede still writes an audit row naming the holder and the failure', async () => {
+  it('[G1-10o B6/C38 fix, D-R170 M12] register-failed-after-supersede writes an audit row naming the holder AND the specific register failure', async () => {
     db = new OrchestrationDb(':memory:')
     const runtime = makeRuntime()
     runtime.setOrchestrationDb(db)
@@ -399,12 +399,17 @@ describe('D-R163 M3 negatives 1/2/6: dead-holder adoption, wired end to end', ()
       terminalIdentityByPtyId: new Map()
     }
     vi.spyOn(runtime, 'takeControllerInventoryForSweep').mockResolvedValue(deadInventory)
+    const noticeSpy = vi.spyOn(runtime, 'writeHostNoticeToPane')
 
     const result = await runtime.requestChairRestore({
       worktreeSelector: 'id:wt-1',
       sessionId: SESSION_ID,
       displayName: 'chair-dead'
     })
+
+    // [D-R170 M13] The "Session adopted" pane notice must never fire on the register-failed
+    // exit — a refused restore must not print a success banner into the pane it refused.
+    expect(noticeSpy).not.toHaveBeenCalled()
 
     expect(result.ok).toBe(false)
     if (result.ok) {
@@ -421,7 +426,10 @@ describe('D-R163 M3 negatives 1/2/6: dead-holder adoption, wired end to end', ()
     expect(sessionRow?.pane_key).toBeDefined()
     expect(sessionRow?.pane_key).not.toBe(holderPaneKey)
 
-    // A session_adopted audit row still exists, naming the failure rather than a real agent.
+    // [D-R170 M12] A session_adopted audit row still exists, and (unlike before) its
+    // reason_code names the specific failure (register_failed:name_taken) rather than only the
+    // holder — distinguishing it from restore_pane_key_missing and from the other register
+    // failure reasons (directory_full, invalid_name).
     const adoptedAudit = rawDb()
       .prepare(`SELECT * FROM agent_audit WHERE verb = 'session_adopted' AND actor_pane_key = ?`)
       .get(sessionRow?.pane_key) as
@@ -430,6 +438,7 @@ describe('D-R163 M3 negatives 1/2/6: dead-holder adoption, wired end to end', ()
     expect(adoptedAudit?.agent_id).toBeNull()
     expect(adoptedAudit?.outcome).toBe('adopted_unregistered')
     expect(adoptedAudit?.reason_code).toContain(`holder=${holderPaneKey}`)
+    expect(adoptedAudit?.reason_code).toContain('exit=register_failed:name_taken')
 
     // The superseded audit row still names the holder's identity.
     const supersededAudit = rawDb()
