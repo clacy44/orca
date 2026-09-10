@@ -375,4 +375,67 @@ describe('D-R163 M3 negatives 1/2/6: dead-holder adoption, wired end to end', ()
         .get(HOST_ID, SESSION_ID)
     ).toEqual({ pane_key: holderPaneKey })
   })
+
+  it('[G1-10o B6/C38 fix] register-failed-after-supersede still writes an audit row naming the holder and the failure', async () => {
+    db = new OrchestrationDb(':memory:')
+    const runtime = makeRuntime()
+    runtime.setOrchestrationDb(db)
+    stubLaunchScope(runtime)
+    installRecordingPtyController(runtime, db)
+
+    const holderPtyId = `pty-${randomUUID()}`
+    const holderIncarnationId = randomUUID()
+    const { holderPaneKey } = await seedHolder(holderPtyId, holderIncarnationId)
+    const holderAgentIdBefore = db.getAgentByPaneKey(HOST_ID, holderPaneKey)?.id
+    expect(holderAgentIdBefore).toBeDefined()
+
+    // Quarantine the holder's identity: registerAgentForPane's name-collision guard locks the
+    // name regardless of pane liveness (agent-directory.ts:215-226), so the eventual register
+    // for the new pane returns name_taken even though the holder pane itself is dead.
+    db.setAgentQuarantine({ id: holderAgentIdBefore!, quarantined: true, reasonCode: 'test' })
+
+    const deadInventory: ControllerInventory = {
+      allLivePtyIds: new Set(),
+      terminalIdentityByPtyId: new Map()
+    }
+    vi.spyOn(runtime, 'takeControllerInventoryForSweep').mockResolvedValue(deadInventory)
+
+    const result = await runtime.requestChairRestore({
+      worktreeSelector: 'id:wt-1',
+      sessionId: SESSION_ID,
+      displayName: 'chair-dead'
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) {
+      throw new Error('unreachable')
+    }
+    expect(result.reason).toContain('register_failed')
+    expect(result.reason).toContain('name_taken')
+
+    // The supersede already committed (destructive act happened inside ensureAgentSession before
+    // registration was attempted) — the session now names a pane with no registered agent.
+    const sessionRow = rawDb()
+      .prepare('SELECT pane_key FROM current_sessions WHERE host_id = ? AND session_id = ?')
+      .get(HOST_ID, SESSION_ID) as { pane_key: string } | undefined
+    expect(sessionRow?.pane_key).toBeDefined()
+    expect(sessionRow?.pane_key).not.toBe(holderPaneKey)
+
+    // A session_adopted audit row still exists, naming the failure rather than a real agent.
+    const adoptedAudit = rawDb()
+      .prepare(`SELECT * FROM agent_audit WHERE verb = 'session_adopted' AND actor_pane_key = ?`)
+      .get(sessionRow?.pane_key) as
+      | { agent_id: string | null; outcome: string; reason_code: string }
+      | undefined
+    expect(adoptedAudit?.agent_id).toBeNull()
+    expect(adoptedAudit?.outcome).toBe('adopted_unregistered')
+    expect(adoptedAudit?.reason_code).toContain(`holder=${holderPaneKey}`)
+
+    // The superseded audit row still names the holder's identity.
+    const supersededAudit = rawDb()
+      .prepare(`SELECT * FROM agent_audit WHERE verb = 'superseded' AND actor_pane_key = ?`)
+      .get(holderPaneKey) as { agent_id: string | null; outcome: string } | undefined
+    expect(supersededAudit?.outcome).toBe('superseded')
+    expect(supersededAudit?.agent_id).toBe(holderAgentIdBefore)
+  })
 })
