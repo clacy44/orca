@@ -62,7 +62,9 @@ type RestoreResult = {
 
 type StatusResult = { path: string; plan: ChairsRestorePlan }
 
-type ExportResult = { path: string; manifest: ChairsManifest }
+type ExportSkipReason = 'no_pane' | 'no_launch_row' | 'no_worktree'
+type ExportSkip = { name: string; reason: ExportSkipReason }
+type ExportResult = { path: string; manifest: ChairsManifest; skipped: ExportSkip[] }
 
 function formatPlanLine(action: ChairsRestorePlan['actions'][number]): string {
   switch (action.kind) {
@@ -120,8 +122,21 @@ function formatStatusResult(result: StatusResult): string {
   return lines.join('\n') || 'Nothing to do.'
 }
 
+const EXPORT_SKIP_REASON_TEXT: Record<ExportSkipReason, string> = {
+  no_pane: 'no pane recorded',
+  no_launch_row: 'no launch row recorded',
+  no_worktree: 'no worktree recorded'
+}
+
 function formatExportResult(result: ExportResult): string {
-  return `Wrote ${result.manifest.chairs.length} chair(s) to ${result.path}`
+  const base = `Wrote ${result.manifest.chairs.length} chair(s) to ${result.path}`
+  if (result.skipped.length === 0) {
+    return base
+  }
+  const detail = result.skipped
+    .map((s) => `${s.name} (${EXPORT_SKIP_REASON_TEXT[s.reason]})`)
+    .join(', ')
+  return `${base}; skipped ${result.skipped.length}: ${detail}`
 }
 
 export const CHAIRS_HANDLERS: Record<string, CommandHandler> = {

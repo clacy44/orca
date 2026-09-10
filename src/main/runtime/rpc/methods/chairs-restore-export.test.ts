@@ -11,6 +11,7 @@ import type { RpcContext } from '../core'
 import { OrchestrationDb } from '../../orchestration/db'
 import { OrcaRuntimeService } from '../../orca-runtime'
 import type { ChairsManifest } from '../../orchestration/chairs-manifest'
+import { OrchestrationError } from '../../orchestration/orchestration-error'
 
 vi.mock('electron', () => ({
   BrowserWindow: { fromId: vi.fn(() => null) },
@@ -47,7 +48,7 @@ describe('S10-21d bD C1: orchestration.chairs.export captures pref_model/pref_ef
     dir = await mkdtemp(join(tmpdir(), 'chairs-export-test-'))
   }
 
-  function registerChair(name: string, paneKey: string): void {
+  function registerChair(name: string, paneKey: string, worktreeId: string | null = 'wt-1'): void {
     db.upsertAgentByPaneSuffix({
       displayName: name,
       role: null,
@@ -55,7 +56,7 @@ describe('S10-21d bD C1: orchestration.chairs.export captures pref_model/pref_ef
       paneKey,
       terminalHandle: null,
       processIncarnation: null,
-      worktreeId: 'wt-1',
+      worktreeId,
       worktreePath: null,
       branch: null,
       title: null,
@@ -65,14 +66,24 @@ describe('S10-21d bD C1: orchestration.chairs.export captures pref_model/pref_ef
     })
   }
 
-  async function runExport(force: boolean): Promise<ChairsManifest> {
+  type ExportHandlerResult = {
+    manifest: ChairsManifest
+    skipped: { name: string; reason: 'no_pane' | 'no_launch_row' | 'no_worktree' }[]
+  }
+
+  async function runExportFull(force: boolean): Promise<ExportHandlerResult> {
     const path = join(dir, 'chairs.json')
-    const result = (await exportMethod!.handler({ manifestPath: path, force }, ctx)) as {
-      manifest: ChairsManifest
-    }
+    const result = (await exportMethod!.handler(
+      { manifestPath: path, force },
+      ctx
+    )) as ExportHandlerResult
     const onDisk = JSON.parse(await readFile(path, 'utf8')) as ChairsManifest
     expect(onDisk).toEqual(result.manifest)
-    return result.manifest
+    return result
+  }
+
+  async function runExport(force: boolean): Promise<ChairsManifest> {
+    return (await runExportFull(force)).manifest
   }
 
   it('a newest launch row carrying pref_model + pref_effort emits both keys in the manifest entry', async () => {
@@ -134,5 +145,99 @@ describe('S10-21d bD C1: orchestration.chairs.export captures pref_model/pref_ef
     expect(manifest.chairs).toHaveLength(1)
     expect(manifest.chairs[0].model).toBe('opus')
     expect(manifest.chairs[0]).not.toHaveProperty('effort')
+  })
+})
+
+describe('G1-10o B4/C28 fix: export loudly reports chairs it cannot represent', () => {
+  let db: OrchestrationDb
+  let runtime: OrcaRuntimeService
+  let ctx: RpcContext
+  let dir: string
+  const hostId = 'local'
+
+  afterEach(async () => {
+    db?.close()
+    if (dir) {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  async function setup(): Promise<void> {
+    db = new OrchestrationDb(':memory:')
+    runtime = new OrcaRuntimeService()
+    runtime.setOrchestrationDb(db)
+    vi.spyOn(runtime, 'getOrchestrationCompatibilityHostId').mockReturnValue(hostId)
+    ctx = { runtime }
+    dir = await mkdtemp(join(tmpdir(), 'chairs-export-skip-test-'))
+  }
+
+  function registerChair(name: string, paneKey: string, worktreeId: string | null): void {
+    db.upsertAgentByPaneSuffix({
+      displayName: name,
+      role: null,
+      hostId,
+      paneKey,
+      terminalHandle: null,
+      processIncarnation: null,
+      worktreeId,
+      worktreePath: null,
+      branch: null,
+      title: null,
+      agentLabel: null,
+      originHandle: null,
+      originHostId: hostId
+    })
+  }
+
+  it('a chair with a worktree but no worktree recorded is skipped and reported; others still export', async () => {
+    await setup()
+    registerChair('chair-good', 'tab1:leaf-a', 'wt-1')
+    db.recordLaunch({
+      hostId,
+      paneKey: 'tab1:leaf-a',
+      agentType: 'claude',
+      sessionId: 'sess-good',
+      launchGeneration: 'gen-1',
+      executionHostId: hostId,
+      evidence: 'host_launch'
+    })
+    registerChair('chair-no-worktree', 'tab1:leaf-b', null)
+    db.recordLaunch({
+      hostId,
+      paneKey: 'tab1:leaf-b',
+      agentType: 'claude',
+      sessionId: 'sess-no-worktree',
+      launchGeneration: 'gen-1',
+      executionHostId: hostId,
+      evidence: 'host_launch'
+    })
+    const path = join(dir, 'chairs.json')
+    const result = (await exportMethod!.handler({ manifestPath: path, force: false }, ctx)) as {
+      manifest: ChairsManifest
+      skipped: { name: string; reason: string }[]
+    }
+    expect(result.manifest.chairs.map((c) => c.name)).toEqual(['chair-good'])
+    expect(result.skipped).toEqual([{ name: 'chair-no-worktree', reason: 'no_worktree' }])
+  })
+
+  it('a directory at the listAgents hard cap (200) refuses rather than writing a silently short manifest', async () => {
+    await setup()
+    for (let i = 0; i < 200; i++) {
+      const paneKey = `tab1:leaf-${i}`
+      registerChair(`chair-${i}`, paneKey, 'wt-1')
+      db.recordLaunch({
+        hostId,
+        paneKey,
+        agentType: 'claude',
+        sessionId: `sess-${i}`,
+        launchGeneration: 'gen-1',
+        executionHostId: hostId,
+        evidence: 'host_launch'
+      })
+    }
+    const path = join(dir, 'chairs.json')
+    await expect(exportMethod!.handler({ manifestPath: path, force: false }, ctx)).rejects.toThrow(
+      OrchestrationError
+    )
   })
 })

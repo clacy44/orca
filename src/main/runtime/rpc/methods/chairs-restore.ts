@@ -256,14 +256,36 @@ export const CHAIRS_RESTORE_METHODS: RpcMethod[] = [
           `${path} already exists; pass --force to overwrite`
         )
       }
-      const { agents } = db.listAgents({ hostId, includeDerived: false, includeQuarantined: false })
+      // [G1-10o B4/C28 fix] Pass the DB layer's own hard cap explicitly so the *default* of 100
+      // (agent-directory.ts:378) cannot silently shorten the manifest below that cap. The cap
+      // itself is still 200 (Math.min(..., 200) in listAgents) — if a host ever has more than
+      // 200 registered, non-quarantined, non-derived chairs, refuse rather than write a
+      // silently-short manifest; retrying with `--only` scoping is the operator's escape hatch.
+      const AGENT_DIRECTORY_HARD_CAP = 200
+      const { agents } = db.listAgents({
+        hostId,
+        includeDerived: false,
+        includeQuarantined: false,
+        limit: AGENT_DIRECTORY_HARD_CAP
+      })
+      if (agents.length >= AGENT_DIRECTORY_HARD_CAP) {
+        throw new OrchestrationError(
+          'chairs_export_truncated',
+          `${agents.length} registered chairs meets or exceeds the directory's hard cap of ` +
+            `${AGENT_DIRECTORY_HARD_CAP}; refusing to write a manifest that may silently omit ` +
+            'chairs. Narrow the export or raise the directory cap.'
+        )
+      }
       const chairs: ChairsManifestEntry[] = []
+      const skipped: { name: string; reason: 'no_pane' | 'no_launch_row' | 'no_worktree' }[] = []
       for (const agent of agents) {
         if (!agent.pane_key) {
+          skipped.push({ name: agent.display_name, reason: 'no_pane' })
           continue
         }
         const launch = db.newestLaunchForPane(hostId, agent.pane_key)
         if (!launch) {
+          skipped.push({ name: agent.display_name, reason: 'no_launch_row' })
           continue
         }
         const worktree = agent.worktree_id
@@ -272,6 +294,7 @@ export const CHAIRS_RESTORE_METHODS: RpcMethod[] = [
             ? `path:${agent.worktree_path}`
             : null
         if (!worktree) {
+          skipped.push({ name: agent.display_name, reason: 'no_worktree' })
           continue
         }
         chairs.push({
@@ -298,7 +321,7 @@ export const CHAIRS_RESTORE_METHODS: RpcMethod[] = [
       const manifest: ChairsManifest = { version: 1, chairs }
       await mkdir(dirname(path), { recursive: true })
       await writeFileAtomic(path, `${JSON.stringify(manifest, null, 2)}\n`)
-      return { path, manifest }
+      return { path, manifest, skipped }
     }
   })
 ]
