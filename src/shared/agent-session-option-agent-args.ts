@@ -27,7 +27,7 @@ export function removeAgentArgOption(
       result.push(token)
       continue
     }
-    if (exact && tokens[index + 1] && !tokens[index + 1].startsWith('-')) {
+    if (exact && tokens[index + 1] !== undefined && tokens[index + 1] !== '--') {
       index += 1
     }
   }

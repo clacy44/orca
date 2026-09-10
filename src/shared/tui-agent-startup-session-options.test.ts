@@ -180,4 +180,52 @@ describe('tui agent startup session options', () => {
     expect(plan).not.toBeNull()
     expect(plan?.launchCommand).toBe("claude '--model' 'pref' '--resume' 'sess-1'")
   })
+
+  // [D-R170 M-B7c] A model-only preference on resume must not silently drop the catalog's
+  // default effort (M16). State the defaults explicitly: claude's catalog default effort is
+  // 'high' (agent-session-option-catalog-claude-codex.ts:81-83).
+  it('still injects the catalog default effort for a model-only preference on resume (D-R170 M-B7c)', () => {
+    const plan = buildAgentResumeStartupPlan({
+      agent: 'claude',
+      providerSession: { key: 'session_id', id: 'sess-1' },
+      cmdOverrides: {},
+      platform: 'linux',
+      sessionOptions: { model: 'opus' }
+    })
+    expect(plan?.launchCommand).toBe(
+      "claude '--effort' 'high' '--model' 'opus' '--resume' 'sess-1'"
+    )
+  })
+
+  // [D-R170 M-B7d] Precedence: an operator-typed --model in agentArgs must not win over a
+  // persisted sessionOptions preference on resume.
+  it('lets a persisted model preference beat an operator --model in agentArgs on resume (D-R170 M-B7d)', () => {
+    const plan = buildAgentResumeStartupPlan({
+      agent: 'claude',
+      providerSession: { key: 'session_id', id: 'sess-1' },
+      cmdOverrides: {},
+      platform: 'linux',
+      agentArgs: '--model operator-pin',
+      sessionOptions: { model: 'pref-model' }
+    })
+    expect(plan?.launchCommand).toContain("'--model' 'pref-model'")
+    expect(plan?.launchCommand).not.toContain('operator-pin')
+  })
+
+  // [D-R170 M-B7d] Second precedence variant: the same preference must still win when the
+  // conflicting --model is authored via a command override rather than agentArgs — pinned to
+  // the H1 resolution (a cmdOverride disarms sessionOptionsOverrideAgentArgs so the plan is
+  // not refused, and buildAgentResumeLaunchCommand's own claude-resume splice still cuts the
+  // override's --model token and replaces it with the preference).
+  it('lets a persisted model preference beat a conflicting cmdOverride --model on resume (D-R170 M-B7d)', () => {
+    const plan = buildAgentResumeStartupPlan({
+      agent: 'claude',
+      providerSession: { key: 'session_id', id: 'sess-1' },
+      cmdOverrides: { claude: 'claude --model operator-pin' },
+      platform: 'linux',
+      sessionOptions: { model: 'pref-model' }
+    })
+    expect(plan).not.toBeNull()
+    expect(plan?.launchCommand).toBe("claude '--model' 'pref-model' '--resume' 'sess-1'")
+  })
 })
