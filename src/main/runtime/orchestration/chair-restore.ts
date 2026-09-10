@@ -13,6 +13,7 @@ import { resolveResumeTranscript } from '../../startup/resolve-resume-transcript
 import { preflightResumeTranscript } from '../../ipc/agent-launch-admission-support'
 import { resolveIncumbentDeath, type IncumbentVerdict } from '../incumbent-death'
 import { parsePaneKey } from '../../../shared/stable-pane-id'
+import { LaunchAdmissionRefusedError } from '../../ipc/agent-launch-admission-errors'
 import {
   LOCAL_EXECUTION_HOST_ID,
   getRepoExecutionHostId,
@@ -244,11 +245,11 @@ export async function requestChairRestore(
     agentId: string | null,
     actorPaneKey: string | null,
     exit: WriteAdoptionAuditExit,
-    // [D-R171 NM-2 fix] Set true only from the ensure_agent_session_failed catch, after
-    // re-reading db.paneHoldingSession: when the holder's binding is still intact (the throw
-    // landed before the supersede DELETE committed, e.g. checkHostResumeHolderUnmoved's own
-    // refusal), the holder was never actually superseded and must not be stamped as such on its
-    // own append-only audit trail. The adoption-attempt row below is still written either way.
+    // [D-R171 NM-2 fix, corrected D-R172 MEDIUM-1] Set true only from the
+    // ensure_agent_session_failed catch, when the throw is a `LaunchAdmissionRefusedError` —
+    // that class is only ever thrown before any recordLaunch write, so the holder's binding is
+    // still intact and must not be stamped as superseded on its own append-only audit trail.
+    // The adoption-attempt row below is still written either way.
     holderBindingIntact = false
   ): void => {
     if (holderPaneKey === null || adoptionSignal === null) {
@@ -259,9 +260,15 @@ export async function requestChairRestore(
       : agentId
         ? 'adopted'
         : 'adopted_unregistered'
-    const reasonCode =
+    // [D-R172 MEDIUM-2 fix] `agent_audit.reason_code` is append-only (db.ts's ABORT triggers on
+    // UPDATE/DELETE) and `exit` now carries an unbounded, environment-controlled `err.message`
+    // (D-R171 M12) — capped at 200 chars to match the same table's other two writers
+    // (pty.ts:930-933, restore-sweep-desktop-materialize-queue.ts:292) rather than trusting the
+    // message to stay short forever.
+    const reasonCode = (
       `signal=${adoptionSignal} holder=${holderPaneKey} ` +
       `holder_generation=${holderGenerationForAudit} session=${request.sessionId} exit=${exit}`
+    ).slice(0, 200)
     db.writeAgentAudit({
       agentId,
       actorPaneKey,
@@ -309,11 +316,22 @@ export async function requestChairRestore(
     // instead of collapsing ~10 causes into the one bare literal. Matched with startsWith
     // above and below since the message is appended.
     const exit: `ensure_agent_session_failed:${string}` = `ensure_agent_session_failed:${err instanceof Error ? err.message : String(err)}`
-    // [D-R171 NM-2 fix] Re-read the holder binding rather than trusting the pre-call snapshot:
-    // many throws that reach this catch (e.g. checkHostResumeHolderUnmoved's own refusal) fire
-    // BEFORE the supersede DELETE inside ensureAgentSession commits, so the holder was never
-    // actually superseded.
-    const holderBindingIntact = db.paneHoldingSession(hostId, request.sessionId) === holderPaneKey
+    // [D-R172 MEDIUM-1 fix] The prior gate re-read `db.paneHoldingSession` lock-free after the
+    // throw, which is the exact complement of `restore_holder_moved` — that refusal fires
+    // BECAUSE the holder has already moved, so the re-read always disagrees with `holderPaneKey`
+    // and `holderBindingIntact` was false by construction on the one refusal it names as its own
+    // motivating case (D-R172-g1-A3-review.md MEDIUM-1). The chair's prescribed shape is a
+    // `supersedeCommitted` flag set only once `recordLaunch`/`recordLaunchInTransaction` itself
+    // returns — but that commit point sits inside `deps.runtime.ensureAgentSession` (down through
+    // `resolveHostResumeRecordLaunch` in agent-launch-admission-host-resume.ts), not observable
+    // from this file without threading a new out-param through `ensureAgentSession`'s signature.
+    // Implementing the review's named interim instead: every hard refusal on this path throws a
+    // `LaunchAdmissionRefusedError` (agent-launch-admission.ts:144-147) BEFORE any recordLaunch
+    // write, by construction of `refuse()` there — so catching that class is a sound proxy for
+    // "binding intact" without a lock-free re-read. Any other error (e.g. a DB error after the
+    // supersede DELETE committed) still falls through to the conservative default: superseded row
+    // written.
+    const holderBindingIntact = err instanceof LaunchAdmissionRefusedError
     writeAdoptionAudit(null, null, exit, holderBindingIntact)
     return {
       ok: false,
