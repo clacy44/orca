@@ -860,9 +860,10 @@ export class AgentHookServer {
    * pane kept only for destructive liveness checks — this IS one) — they only stop counting once
    * stale. [D-R170 M9 correction] This is deliberately UNLIKE the house freshness predicates
    * (`isFreshNonDoneAgentStatus`, agent-status-types.ts:282-287) and unlike this file's own
-   * inference gates (:965, :1057), which disqualify `restoredUnconfirmed` unconditionally. This
-   * one is a destructive-action guard, so recency is the only bound and the flag alone must
-   * never suppress it. [D-R170 M6] That bounds rather than closes the hole in both directions:
+   * inference gates (`inferInterrupt`, `inferQuestionAnswered`), which disqualify
+   * `restoredUnconfirmed` unconditionally. This one is a destructive-action guard, so recency is
+   * the only bound and the flag alone must never suppress it. [D-R170 M6] That bounds rather
+   * than closes the hole in both directions:
    * an idle live pane emits no events, so a row can go stale while its process lives; this
    * bounds the hole to AGENT_STATUS_STALE_AFTER_MS rather than closing it. */
   hasLiveReportOfSession(sessionId: string, opts?: { excludePaneKey?: string }): boolean {

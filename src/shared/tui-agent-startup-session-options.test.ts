@@ -228,4 +228,28 @@ describe('tui agent startup session options', () => {
     expect(plan).not.toBeNull()
     expect(plan?.launchCommand).toBe("claude '--model' 'pref-model' '--resume' 'sess-1'")
   })
+
+  // [D-R172 MEDIUM-3 fix, NH-1 revert pin] The create path with a catalog model plus a benign
+  // override must launch. Before the D-R171 NH-1 fix (and if the reverted B7 edit (3) at
+  // tui-agent-launch-command.ts:54 were ever re-applied), a picker preference naming a CATALOG
+  // model id (one findCatalogModel actually resolves — 'sonnet', not an arbitrary string) with
+  // no effort, plus ANY agentCmdOverrides entry at all, made resolveAgentLaunchCommand refuse
+  // with "Agent command override conflicts with the requested launch preferences..." even
+  // though the override here names neither model nor effort. No test in this file used a
+  // catalog model id at a create call site (D-R171-g1-A2-review.md:62; D-R172-g1-A3-review.md
+  // MEDIUM-3) — re-applying literal `true` at tui-agent-launch-command.ts:54 leaves every OTHER
+  // test in this file green, so this is the one fixture that catches it.
+  it('creates with a catalog model preference plus a benign command override (D-R172 MEDIUM-3, NH-1 revert pin)', () => {
+    const plan = buildAgentStartupPlan({
+      agent: 'claude',
+      prompt: '',
+      allowEmptyPromptLaunch: true,
+      cmdOverrides: { claude: 'claude --dangerously-skip-permissions' },
+      platform: 'linux',
+      sessionOptions: { model: 'sonnet' },
+      sessionOptionsOverrideAgentArgs: true
+    })
+    expect(plan).not.toBeNull()
+    expect(plan?.launchCommand).toContain('sonnet')
+  })
 })
