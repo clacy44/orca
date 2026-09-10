@@ -159,6 +159,7 @@ describe('tui agent startup session options', () => {
     expect(plan?.launchCommand).toBe(
       "codex '-m' 'gpt-5.5' '-c' 'model_reasoning_effort=high' 'resume' 'thread-1'"
     )
+    expect(plan?.sessionOptions).toEqual({ model: 'gpt-5.5', effort: 'high' })
   })
 
   // [D-R170 H1 regression] Before the fix, sessionOptionsOverrideAgentArgs was

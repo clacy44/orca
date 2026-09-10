@@ -9,7 +9,9 @@
 // M4: this is a LOGIC mirror (Node's `fetch`), not a WIRE mirror of `HttpWebRequest` — it proves
 // parsing/encoding/guard behavior, not HttpWebRequest-specific transport details (redirect
 // handling, Expect: 100-continue, proxy resolution). Those are covered only by the
-// Windows-only `describe.skipIf` spawn test in the same test file.
+// Windows-only `describe.skipIf` spawn test in the same test file. Timeouts are also
+// LOGIC-only here: the native host's Timeout/ReadWriteTimeout are per-phase (connect,
+// response, body write), not a single whole-call budget.
 
 import { cancelUnreadResponseBody } from '../lib/unread-response-body'
 

@@ -38,9 +38,12 @@ console is ever allocated for it) that reads stdin and does the HTTP POST to Orc
   **M4 — this is a LOGIC mirror, not a WIRE mirror:** the TS side POSTs via Node's `fetch`; the
   C# side POSTs via `HttpWebRequest`. The mirror's tests prove parsing/encoding/guard behavior
   identical to the C#, never `HttpWebRequest`-specific transport details (redirect handling,
-  `Expect: 100-continue`, proxy resolution, .NET's own request-size limits) — those are provable
-  only by the `describe.skipIf(win32)` spawn test in `windows-hook-host-mirror.test.ts`, which
-  runs the real compiled `.exe` and is gated to actual Windows CI.
+  `Expect: 100-continue`, proxy resolution, .NET's own request-size limits, or timeouts — the
+  C# side bounds each phase independently via `Timeout`/`ReadWriteTimeout`, not a single
+  whole-call budget) — those are provable only by the `describe.skipIf(win32)` spawn test in
+  `windows-hook-host-mirror.test.ts`, which runs the real compiled `.exe` and is gated to actual
+  Windows CI: `pr.yml`'s `package_windows` job runs it in the "Test Windows hook host" step,
+  after "Package unpacked app", against the unpacked `dist/win-unpacked/resources` dir.
 - **SignPath scope (R3 — OWNER ACTION ITEM, unverified from this repo):** SignPath signs the
   packaged Windows build externally, from outside this repo, so this cannot be confirmed here.
   Before shipping a build containing `orca-hook-host.exe`, the owner must confirm SignPath's

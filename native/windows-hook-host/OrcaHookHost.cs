@@ -32,9 +32,10 @@ internal static class OrcaHookHost
     // (agent-hook-listener.ts:82) bounds that larger encoded body server-side — the two limits
     // are deliberately different quantities, not a shared cap.
     private const int StdinCapBytes = 1000000;
-    // Why: HttpWebRequest has no separate connect/total timeout knobs for a plain synchronous
-    // request; 1500ms approximates the spec's "connect 500ms, total 1500ms" as one total budget
-    // (see docs/windows-hook-host.md — R-note, unverified on this box).
+    // Why: HttpWebRequest bounds each phase (connect, response) independently via Timeout, and
+    // the body write via ReadWriteTimeout (set alongside Timeout below); 1500ms approximates
+    // the spec's "connect 500ms, total 1500ms" as a per-phase budget rather than one total
+    // budget (see b1c-r105b-winexe-hook-host.md:25).
     private const int RequestTimeoutMilliseconds = 1500;
     // Source of truth: hook-settings.ts WINDOWS_HOOK_HOST_DESCRIPTOR_FIELDS — keep in sync by hand (D-R167 M-4).
     private static readonly string[] DefaultDescriptorFields =
@@ -57,8 +58,12 @@ internal static class OrcaHookHost
         // surface an error to Claude.
         try
         {
-            s_portPattern = new Regex(@"^\d{1,5}$");
-            s_pathnamePattern = new Regex(@"^/[A-Za-z0-9._~/-]*$");
+            // Pinned to match the mirror's ASCII-only, newline-strict guard exactly
+            // (source of truth: src/main/agent-hooks/windows-hook-host-mirror.ts:23-24) —
+            // \A/\z anchor the whole string (unlike ^/$, which also matches before a
+            // trailing newline), and [0-9] is ASCII-only (unlike \d, which is \p{Nd}).
+            s_portPattern = new Regex(@"\A[0-9]{1,5}\z");
+            s_pathnamePattern = new Regex(@"\A/[A-Za-z0-9._~/-]*\z");
             Run(args);
         }
         catch
@@ -450,8 +455,10 @@ internal static class OrcaHookHost
         request.ServicePoint.Expect100Continue = false;
         request.AllowAutoRedirect = false;
         // Why: HttpWebRequest has no independent connect-phase timeout for a plain sync
-        // request; this bounds the whole call (see RequestTimeoutMilliseconds comment above).
+        // request; this bounds each phase (connect, response), and with ReadWriteTimeout
+        // below, the body write (see RequestTimeoutMilliseconds comment above).
         request.Timeout = RequestTimeoutMilliseconds;
+        request.ReadWriteTimeout = RequestTimeoutMilliseconds;
 
         byte[] bodyBytes = Encoding.UTF8.GetBytes(body);
         request.ContentLength = bodyBytes.Length;
