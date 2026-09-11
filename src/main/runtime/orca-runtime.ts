@@ -33637,6 +33637,9 @@ export class OrcaRuntimeService {
       this.incumbentSettleObservations.forget(droppedPaneKey)
       // [S10-21f b2b-10q M2] The sibling absence-clock needs the same final-removal cleanup.
       this.holderAbsenceSettleObservations.forget(droppedPaneKey)
+      // [N1] agentTurnBoundaryLastFiredAtByPaneKey is a plain unbounded Map, unlike the two
+      // bounded observation stores above — its own final-removal cleanup was missing entirely.
+      this.agentTurnBoundaryLastFiredAtByPaneKey.delete(droppedPaneKey)
     }
     this.ptysById.delete(ptyId)
     this.recentPtyOutputById.delete(ptyId)

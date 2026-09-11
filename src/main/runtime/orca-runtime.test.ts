@@ -13739,6 +13739,33 @@ describe('OrcaRuntimeService', () => {
     expect(internals.incumbentSettleObservations.firstNotLiveAt(paneKey)).toBeNull()
   })
 
+  // N1: agentTurnBoundaryLastFiredAtByPaneKey is a plain unbounded Map with no LRU of its own —
+  // dropDisconnectedPtyRecord is the pane-removal site every other paneKey-keyed sibling map
+  // forgets at, and this one was missing from that list.
+  it('forgets the turn-boundary debounce entry when a disconnected PTY record is pruned', () => {
+    const runtime = new OrcaRuntimeService(store)
+    const internals = runtime as unknown as {
+      recordPtyWorktree: (
+        ptyId: string,
+        worktreeId: string,
+        state: Record<string, unknown>
+      ) => unknown
+      dropDisconnectedPtyRecord: (ptyId: string) => void
+      agentTurnBoundaryLastFiredAtByPaneKey: Map<string, number>
+    }
+    const paneKey = makePaneKey('host-tab', HEADLESS_LEAF_ID)
+    internals.recordPtyWorktree('pty-turnboundary-pruned', TEST_WORKTREE_ID, {
+      connected: false,
+      paneKey
+    })
+    internals.agentTurnBoundaryLastFiredAtByPaneKey.set(paneKey, 1_000_000)
+    expect(internals.agentTurnBoundaryLastFiredAtByPaneKey.has(paneKey)).toBe(true)
+
+    internals.dropDisconnectedPtyRecord('pty-turnboundary-pruned')
+
+    expect(internals.agentTurnBoundaryLastFiredAtByPaneKey.has(paneKey)).toBe(false)
+  })
+
   it('drops an out-of-order aggregate inventory after a newer SSH inventory', async () => {
     const targetId = 'ssh-1'
     const ptyId = `ssh:${targetId}@@persisted-pty`
