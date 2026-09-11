@@ -15,6 +15,7 @@
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { OrcaRuntimeService } from './orca-runtime'
+import { OrchestrationDb } from './orchestration/db'
 import { HEADLESS_RUNTIME_WINDOW_ID } from '../../shared/runtime-types'
 import { AGENT_PROMPT_SUBMIT_DELAY_MS } from '../../shared/agent-prompt-injection'
 import { makePaneKey } from '../../shared/stable-pane-id'
@@ -433,6 +434,80 @@ describe('S10-21f b4, R147: delivery-starvation bound', () => {
       runtime.deliverPendingMessagesForHandle(handle)
       await vi.advanceTimersByTimeAsync(DELIVERY_STARVATION_BOUND_MS + 60_000)
 
+      expect(enterCalls(write, ptyId)).toHaveLength(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('7. M2: notifyRebindDelivery clears a crossed starvation record so the rebound pane gets a fresh grace period, not an immediate force-write', async () => {
+    vi.useFakeTimers()
+    try {
+      const runtime = makeRuntimeWithFreshClaudeHookStatus()
+      const write = vi.fn((_ptyId: string, _data: string) => true)
+      runtime.setPtyController(makeController(write) as never)
+      runtime.syncWindowGraph(HEADLESS_RUNTIME_WINDOW_ID, { tabs: [], leaves: [] })
+
+      const db = new OrchestrationDb(':memory:')
+      runtime.setOrchestrationDb(db as never)
+
+      const created = db.upsertAgentByPaneSuffix({
+        displayName: 'rebind-r147-agent',
+        role: null,
+        hostId: 'local',
+        paneKey: PANE_KEY,
+        terminalHandle: 'term_pre_rebind_r147',
+        processIncarnation: 'inc1',
+        worktreeId: null,
+        worktreePath: null,
+        branch: null,
+        title: null,
+        agentLabel: null,
+        originHandle: 'term_pre_rebind_r147',
+        originHostId: 'local'
+      })
+      if (created.outcome === 'name_taken') {
+        throw new Error('fixture setup failed')
+      }
+      const agentId = created.agent.id
+      const handle = `agent:${agentId}`
+
+      const ptyId = 'pty-r147-rebind-1'
+      const record = internals(runtime).recordPtyWorktree(ptyId, WORKTREE_ID, {
+        connected: true,
+        paneKey: PANE_KEY
+      })
+      internals(runtime).issuePtyHandle(record)
+      vi.spyOn(internals(runtime), 'isPtyRunningAgent').mockResolvedValue(true)
+      driveWorkingTitle(runtime, ptyId)
+
+      // Seed a crossed starvation record as if it survived from the pane's PRE-rebind
+      // incarnation (e.g. the old pane went busy, aged well past the bound, and the identity
+      // was then adopted onto a freshly rebound pane) — this is the case armAgentMailbox-
+      // DeliveryAfterRebind (notifyRebindDelivery) must not inherit.
+      const now = Date.now()
+      internals(runtime).withheldDeliveryAttemptsByHandle.set(handle, {
+        firstAt: now - DELIVERY_STARVATION_BOUND_MS - 60_000,
+        at: now - 60_000,
+        count: 5,
+        reason: 'pane_busy'
+      })
+
+      // RED today: notifyRebindDelivery's own deliverPendingMessagesForHandle call re-records
+      // onto the STALE (already-crossed) entry, so the very first busy observation after the
+      // rebind force-delivers immediately instead of getting a fresh grace period.
+      runtime.notifyRebindDelivery(agentId)
+      await vi.advanceTimersByTimeAsync(0)
+
+      // notifyRebindDelivery makes TWO delivery attempts by design (its own doc comment): an
+      // explicit synchronous deliverPendingMessagesForHandle call, plus notifyMessageArrived's
+      // queued-microtask one — so a freshly-cleared record reads count 2, not 1, once both have
+      // run. What the fix actually proves is `firstAt` resetting to now instead of staying
+      // pinned to the stale pre-rebind timestamp (which is what let it already read as crossed).
+      const record2 = internals(runtime).withheldDeliveryAttemptsByHandle.get(handle)
+      expect(record2?.count).toBe(2)
+      expect(record2?.firstAt).toBeGreaterThanOrEqual(now)
+      expect(pointerCalls(write, ptyId)).toHaveLength(0)
       expect(enterCalls(write, ptyId)).toHaveLength(0)
     } finally {
       vi.useRealTimers()

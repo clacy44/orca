@@ -36242,6 +36242,10 @@ export class OrcaRuntimeService {
   // edge (applyTrackedPtyTitle) delivers it — no register required.
   notifyRebindDelivery(agentId: string): void {
     const handle = `agent:${agentId}`
+    // R147 M2: a rebind/adoption gives the mailbox a fresh pane — any starvation record
+    // accumulated against the OLD pane must not survive the move, or the freshly adopted pane's
+    // very first busy observation force-writes instead of getting its own grace period.
+    this.withheldDeliveryAttemptsByHandle.delete(handle)
     this.notifyMessageArrived(handle, 'status', null, null)
     this.deliverPendingMessagesForHandle(handle)
   }
