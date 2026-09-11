@@ -776,7 +776,10 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           )
         }
       }
-      const from = params.from ?? 'unknown'
+      // C4: reassigned below, once, when the recipient resolves to an agent: — bound to the
+      // attested caller's own terminal handle instead of the unauthenticated params.from/pane
+      // fallback computed here.
+      let from = params.from ?? 'unknown'
       const attestedCaller =
         orchestrationCompatibilityCallerAuthority?.terminalHandle === from
           ? orchestrationCompatibilityCallerAuthority
@@ -791,7 +794,8 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
       // behavior (`getTerminalPaneKey(from)`, same as before); a caller that proved attestation
       // for a DIFFERENT handle than it's claiming as `from` gets that disagreeing claim ignored
       // instead — ends up with no resolved pane, same as an unregistered sender.
-      const senderPaneKey = attestedCaller
+      // C4: reassigned alongside `from` below for an agent: recipient.
+      let senderPaneKey = attestedCaller
         ? attestedCaller.paneKey
         : orchestrationCompatibilityCallerAuthority
           ? undefined
@@ -1067,6 +1071,75 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
             agentRecipient = requireAddressableAgentRecipient(db, named.id)
             to = `agent:${named.id}`
           }
+        }
+        // C4 (F5, D-R177): the recipient is now known to be an agent (explicit `agent:<id>` or
+        // a bare name that just resolved above) — fail closed on the SENDER's authorship the
+        // same way reply's identity branch does (C2/C3 above). Unlike reply, `from` stays the
+        // caller's TERMINAL handle (never rewritten to `agent:` — :567/:580/:1214 key
+        // dispatch/run resolution on the terminal-handle shape), so this only overrides `from`/
+        // `senderPaneKey` for the write below, never resolveMessageRun's earlier routing.
+        if (agentRecipient) {
+          const sendPreAttested = runtime.verifyOrchestrationCompatibilityCaller(
+            orchestrationCompatibilityEvidence,
+            { currentRuntimeLaunchSufficient: true }
+          )
+          let caller: ReturnType<typeof resolveCallerAgent>
+          try {
+            caller = resolveCallerAgent(db, runtime, orchestrationCompatibilityEvidence)
+          } catch (err) {
+            if (err instanceof OrchestrationError) {
+              db.writeAgentAudit({
+                agentId: null,
+                actorPaneKey:
+                  err.code === 'no_registered_identity' ? (sendPreAttested?.paneKey ?? null) : null,
+                actorHostId: senderHostId,
+                verb: 'send',
+                outcome: err.code,
+                reasonCode: null
+              })
+            }
+            throw err
+          }
+          // Mirrors C2's derived-caller check for reply, applied to send's sender side.
+          const callerRow = db.getAgentById(caller.id)
+          if (callerRow?.derived === 1) {
+            db.writeAgentAudit({
+              agentId: caller.id,
+              actorPaneKey: caller.pane_key,
+              actorHostId: caller.host_id,
+              verb: 'send',
+              outcome: 'derived_agent_unaddressable',
+              reasonCode: null
+            })
+            throw new OrchestrationError(
+              'derived_agent_unaddressable',
+              `Agent ${callerRow.display_name} is not registered — agent:${caller.id} has no reader.`,
+              {
+                nextSteps: [
+                  'orca agents register --name <slug> --role "<your role>" (run on this pane to make it addressable)'
+                ]
+              }
+            )
+          }
+          // A caller-claimed --from that disagrees with the attested identity is a forgery
+          // attempt, not a hint to fall back on — refused rather than silently overridden.
+          if (params.from !== undefined && params.from !== caller.terminal_handle) {
+            db.writeAgentAudit({
+              agentId: caller.id,
+              actorPaneKey: caller.pane_key,
+              actorHostId: caller.host_id,
+              verb: 'send',
+              outcome: 'forbidden',
+              reasonCode: null
+            })
+            throw new OrchestrationError(
+              'forbidden',
+              `Claimed sender "${params.from}" does not match your attested identity "${caller.terminal_handle}".`,
+              { effectsApplied: false }
+            )
+          }
+          from = caller.terminal_handle ?? from
+          senderPaneKey = caller.pane_key
         }
         // Point-to-point — existing single-recipient behavior
         revalidateLegacyCoordinator?.()
@@ -2473,8 +2546,6 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         throw noReturnRoute(original, healthForNoReturnRoute(db, original.peer_link_device_id))
       }
 
-      db.markAsRead([original.id])
-
       if (workerDispatchId && federatedWorker) {
         const relay = db.enqueueFederationRelay({
           dispatchId: workerDispatchId,
@@ -2493,6 +2564,9 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
             payload: null
           })
         })
+        // C1 (M1): mark the original read only once the relay enqueue has actually happened —
+        // this branch returns before reaching the shared markAsRead below the local-insert path.
+        db.markAsRead([original.id])
         runtime.ensureOrchestrationFederationRelay(original.run_id)
         return {
           relay: {
@@ -2517,20 +2591,135 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
       if (original.from_handle.startsWith('agent:')) {
         requireAddressableAgentRecipient(db, original.from_handle.slice('agent:'.length))
       }
-      const replyFrom = params.from ?? original.to_handle
-      const replyAttestedCaller =
-        orchestrationCompatibilityCallerAuthority?.terminalHandle === replyFrom
-          ? orchestrationCompatibilityCallerAuthority
-          : undefined
-      // Adversarial review major #4 fix — same shape as send's senderPaneKey above: an
-      // attestation that disagrees with the claimed replyFrom must never fall back to trusting
-      // replyFrom's own pane (that resolves and stamps a real, impersonated sender_agent_id).
-      const replySenderPaneKey = replyAttestedCaller
-        ? replyAttestedCaller.paneKey
-        : orchestrationCompatibilityCallerAuthority
-          ? undefined
-          : (runtime.getTerminalPaneKey(replyFrom) ?? undefined)
-      const replySenderHostId = runtime.getOrchestrationCompatibilityHostId() ?? 'local'
+      // D-R177 F1-F4: a plain local reply to an `agent:`-addressed thread (either side) must
+      // bind authorship to the ATTESTED caller, never to params.from/original.to_handle — those
+      // are caller-supplied or forged-from data (Amendment B's own comment above, applied to the
+      // sender side this time). Run/Dispatch/term_-addressed mail is untouched: it falls to the
+      // else branch below exactly as before.
+      let replyFrom: string
+      let replySenderPaneKey: string | undefined
+      let replySenderHostId: string
+      if (original.to_handle.startsWith('agent:') || original.from_handle.startsWith('agent:')) {
+        const replyHostId = runtime.getOrchestrationCompatibilityHostId() ?? 'local'
+        // C2: attest BEFORE resolveCallerAgent (smaller change than threading a data.paneKey
+        // through OrchestrationError, and scoped to this one call site rather than
+        // orchestration-caller-identity.ts's shared throw, which every other resolveCallerAgent
+        // caller also relies on) — solely so the no_registered_identity audit below can carry
+        // the attested pane key: the pane IS attested at that point (unlike no_pane_identity,
+        // where no attestation exists to name), and the prior code always audited it as null.
+        const replyPreAttested = runtime.verifyOrchestrationCompatibilityCaller(
+          orchestrationCompatibilityEvidence,
+          { currentRuntimeLaunchSufficient: true }
+        )
+        let caller: ReturnType<typeof resolveCallerAgent>
+        try {
+          caller = resolveCallerAgent(db, runtime, orchestrationCompatibilityEvidence)
+        } catch (err) {
+          if (err instanceof OrchestrationError) {
+            db.writeAgentAudit({
+              agentId: null,
+              actorPaneKey:
+                err.code === 'no_registered_identity' ? (replyPreAttested?.paneKey ?? null) : null,
+              actorHostId: replyHostId,
+              verb: 'reply',
+              outcome: err.code,
+              reasonCode: null
+            })
+          }
+          throw err
+        }
+        // C2: a derived row (restart-minted, never `orca agents register`ed) is refused at the
+        // source rather than surfacing as the misleading not_the_addressee/attribution errors
+        // further down — mirrors requireAddressableAgentRecipient's own derived check for the
+        // RECIPIENT side, applied here to the SENDER side.
+        const callerRow = db.getAgentById(caller.id)
+        if (callerRow?.derived === 1) {
+          db.writeAgentAudit({
+            agentId: caller.id,
+            actorPaneKey: caller.pane_key,
+            actorHostId: caller.host_id,
+            verb: 'reply',
+            outcome: 'derived_agent_unaddressable',
+            reasonCode: null
+          })
+          throw new OrchestrationError(
+            'derived_agent_unaddressable',
+            `Agent ${callerRow.display_name} is not registered — agent:${caller.id} has no reader.`,
+            {
+              nextSteps: [
+                'orca agents register --name <slug> --role "<your role>" (run on this pane to make it addressable)'
+              ]
+            }
+          )
+        }
+        replyFrom = `agent:${caller.id}`
+        // C3 (N2): identity-based self-authorship — a string compare against the
+        // freshly-computed replyFrom (`original.from_handle === replyFrom`) missed a self-reply
+        // to a row the caller authored under its bare terminal handle (term_-addressed, no
+        // agent: prefix), since replyFrom is always `agent:${caller.id}`. Match by directory
+        // identity instead: the row's resolved sender_agent_id, or either handle form the
+        // caller can appear as.
+        const selfAuthored =
+          original.sender_agent_id === caller.id ||
+          original.from_handle === `agent:${caller.id}` ||
+          original.from_handle === caller.terminal_handle
+        // C3: addressee conjunct — an agent:-addressed original must be replied to by its
+        // addressee; a third, uninvolved agent cannot reply into a thread merely by knowing the
+        // message id. term_/run:/dispatch: addressees keep today's rule (unrestricted here).
+        const notTheAddressee =
+          original.to_handle.startsWith('agent:') && original.to_handle !== `agent:${caller.id}`
+        // F2: a reply to your OWN latest message on the thread is not a reply — refuse it
+        // rather than silently letting the thread's roles swap.
+        if (selfAuthored || notTheAddressee) {
+          db.writeAgentAudit({
+            agentId: caller.id,
+            actorPaneKey: caller.pane_key,
+            actorHostId: caller.host_id,
+            verb: 'reply',
+            outcome: 'not_the_addressee',
+            reasonCode: null
+          })
+          throw new OrchestrationError(
+            'not_the_addressee',
+            selfAuthored
+              ? `You authored message ${params.id}; a reply is addressed to its sender.`
+              : `Message ${params.id} is addressed to a different agent; only its addressee may reply.`,
+            {
+              nextSteps: selfAuthored
+                ? [
+                    'orca agents reply --id <a message from the other agent>',
+                    'orca orchestration send --to agent:<their-id> --thread-id <thread> --subject "…" --body "…"'
+                  ]
+                : ['orca agents reply --id <a message addressed to you>']
+            }
+          )
+        }
+        // F1/F3: bind to the attested caller's own pane — no unauthenticated
+        // runtime.getTerminalPaneKey(replyFrom) fallback on this branch.
+        replySenderPaneKey = caller.pane_key
+        replySenderHostId = caller.host_id
+      } else {
+        replyFrom = params.from ?? original.to_handle
+        const replyAttestedCaller =
+          orchestrationCompatibilityCallerAuthority?.terminalHandle === replyFrom
+            ? orchestrationCompatibilityCallerAuthority
+            : undefined
+        // Adversarial review major #4 fix — same shape as send's senderPaneKey above: an
+        // attestation that disagrees with the claimed replyFrom must never fall back to trusting
+        // replyFrom's own pane (that resolves and stamps a real, impersonated sender_agent_id).
+        replySenderPaneKey = replyAttestedCaller
+          ? replyAttestedCaller.paneKey
+          : orchestrationCompatibilityCallerAuthority
+            ? undefined
+            : (runtime.getTerminalPaneKey(replyFrom) ?? undefined)
+        replySenderHostId = runtime.getOrchestrationCompatibilityHostId() ?? 'local'
+      }
+
+      // C1 (M1): mark the original read only immediately before the insert that commits this
+      // reply — every guard above (federated-worker relay excepted, which marks read itself on
+      // its own accepted path) can still throw, and a refused reply must leave the original
+      // unread rather than consuming it.
+      db.markAsRead([original.id])
 
       // Amendment A: the plain reply insert routes through the single write choke too.
       const insertedReply = db.insertGatedMessage({

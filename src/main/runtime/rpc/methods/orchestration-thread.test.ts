@@ -239,6 +239,69 @@ describe('orchestration.thread (BUG 4, hardened per S10-2 ruling 1)', () => {
     expect(theirs?.delivery).toBeUndefined()
   })
 
+  // C5 (N4, S10-21f Q1): annotateSenderDeliveryHonesty compared message.from_handle only
+  // against the caller's bare terminal handle — a registered agent's own message, stored under
+  // its durable `agent:<id>` form (every peer-relayed row, and every plain send/reply once the
+  // caller is registered — F1/F2/F3 above), never matched, so the caller's own mail silently
+  // lost its delivery annotation. Match both forms, exactly as degradeAddresses (:109) already
+  // does for the non-participant path.
+  it('C5: annotates the caller’s own agent:<id>-addressed message too, not just its bare handle', async () => {
+    db = new OrchestrationDb(':memory:')
+    const { dispatcher } = dispatcherFor(db)
+
+    const registerResponse = await dispatcher.dispatch(
+      request(
+        'register-sender',
+        'orchestration.agents.register',
+        { name: 'agent-sender', role: 'test agent' },
+        evidenceFor('term_sender')
+      )
+    )
+    expect(registerResponse.ok).toBe(true)
+    const agentId = (registerResponse as { result: { agent: { id: string } } }).result.agent.id
+
+    const { thread } = db.createThread({
+      subject: 'test thread',
+      createdByAgentId: agentId,
+      participants: [
+        { participantKey: agentId, agentId, handle: 'term_sender' },
+        { participantKey: 'term_b', handle: 'term_b' }
+      ]
+    })
+    const mine = db.insertMessage({
+      from: `agent:${agentId}`,
+      to: 'term_b',
+      subject: 'from sender',
+      threadId: thread.id
+    })
+    db.bumpThreadOnMessage(thread.id, mine)
+    const theirsMsg = db.insertMessage({
+      from: 'term_b',
+      to: `agent:${agentId}`,
+      subject: 'from b',
+      threadId: thread.id
+    })
+    db.bumpThreadOnMessage(thread.id, theirsMsg)
+
+    const response = await dispatcher.dispatch(
+      request(
+        'thread-delivery-agent',
+        'orchestration.thread',
+        { id: thread.id },
+        evidenceFor('term_sender')
+      )
+    )
+
+    expect(response.ok).toBe(true)
+    const messages = (
+      response as { result: { messages: { subject: string; delivery?: string }[] } }
+    ).result.messages
+    const mineRow = messages.find((m) => m.subject === 'from sender')
+    const theirsRow = messages.find((m) => m.subject === 'from b')
+    expect(mineRow?.delivery).toBeDefined()
+    expect(theirsRow?.delivery).toBeUndefined()
+  })
+
   // T1 (s10-2-spec.md acceptance table): a caller who does NOT participate in a thread gets a
   // recipient-filtered replay, never the other participants' conversation. Mutation this kills:
   // restoring orchestration-thread.ts's old unguarded `db.getThreadMessages(params.id)` call
