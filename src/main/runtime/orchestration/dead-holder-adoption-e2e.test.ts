@@ -645,10 +645,13 @@ describe('D-R163 M3 negatives 1/2/6: dead-holder adoption, wired end to end', ()
     expect(adoptedAudit!.reason_code.length).toBeLessThanOrEqual(200)
   })
 
-  // [S10-21f b2-10q R142] Same-generation dead holder: chained through the real predicate ->
-  // admission -> db write, proving the settle-window gate specifically (the pure-function tests
-  // in dead-holder-adoption.test.ts already prove the boolean logic; this proves D3's real clock
-  // wiring via evidenceBundle.incumbentEvidence.d3).
+  // [S10-21f b2-10q R142; reshaped in b2b-10q M2] Same-generation dead holder: chained through
+  // the real predicate -> admission -> db write, proving the settle-window gate specifically (the
+  // pure-function tests in dead-holder-adoption.test.ts already prove the boolean logic; this
+  // proves the REAL clock wiring). [M2] No leaf is ever synced in this fixture (no window graph),
+  // matching a headless `serve` process exactly — the settle proof must (and, per this test, does)
+  // still work from D2 inventory-absence alone, never D3's leaf-based clock (which reads
+  // permanently not-live here regardless of the holder's real state, proving nothing on its own).
   it('R142: a same-generation IDENTITY-dead holder refuses until settled, then adopts SAME_GEN_PTY_ABSENCE', async () => {
     db = new OrchestrationDb(':memory:')
     const runtime = makeRuntime()
@@ -712,7 +715,10 @@ describe('D-R163 M3 negatives 1/2/6: dead-holder adoption, wired end to end', ()
     try {
       vi.setSystemTime(1_700_000_000_000)
 
-      // First call: D3's settle clock has just started (firstObservedNotLiveAt == now) -> refused.
+      // First call: the D2-absence settle clock has just started (firstAbsentAt == now) -> refused.
+      // [reshaped, M2] OLD comment ("D3's settle clock has just started") described the leaf-based
+      // clock this brief replaces; the assertion itself (refused same_generation_settling) is
+      // unchanged, since a non-null absent round on both the old and new mechanism refuses here.
       const firstAttempt = await runtime.requestChairRestore({
         worktreeSelector: 'id:wt-1',
         sessionId,
@@ -740,6 +746,126 @@ describe('D-R163 M3 negatives 1/2/6: dead-holder adoption, wired end to end', ()
       expect(result.holderPaneKey).toBe(holderPaneKey)
       expect(result.adoptionSignal).toBe('SAME_GEN_PTY_ABSENCE')
       expect(db.newestLaunchForPane(HOST_ID, result.paneKey)?.evidence).toBe('host_restore')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // [S10-21f b2b-10q M2] A round that reads the holder pty back PRESENT mid-settle must CLEAR the
+  // absence clock (refusing current_generation, not same_generation_settling — the
+  // identity+absence conjunct itself fails) and a later disconnect must RESTART it from zero, not
+  // resume counting from the very first observation.
+  it('M2: a holder pty reconnecting mid-settle clears the absence clock; a later disconnect restarts it', async () => {
+    db = new OrchestrationDb(':memory:')
+    const runtime = makeRuntime()
+    runtime.setOrchestrationDb(db)
+    stubLaunchScope(runtime)
+    installRecordingPtyController(runtime, db)
+
+    tempHome = await mkdtemp(join(tmpdir(), 'orca-dead-holder-e2e-m2-'))
+    process.env.HOME = tempHome
+    const projectDir = join(tempHome, '.claude', 'projects', 'proj')
+    await mkdir(projectDir, { recursive: true })
+    const sessionId = 'sess-m2'
+    await writeFile(
+      join(projectDir, `${sessionId}.jsonl`),
+      `${JSON.stringify({ type: 'user', message: { role: 'user', content: 'hi' } })}\n`
+    )
+
+    const sameGen = runtime.getLaunchGenerationId()
+    const holderPaneKey = `tab-old:${randomUUID()}`
+    const holderPtyId = `pty-${randomUUID()}`
+    const holderIncarnationId = randomUUID()
+    const created = db.upsertAgentByPaneSuffix({
+      displayName: 'chair-m2',
+      role: null,
+      hostId: HOST_ID,
+      paneKey: holderPaneKey,
+      terminalHandle: null,
+      processIncarnation: `${holderPtyId}:${holderIncarnationId}`,
+      worktreeId: null,
+      worktreePath: null,
+      branch: null,
+      title: null,
+      agentLabel: null,
+      originHandle: null,
+      originHostId: HOST_ID
+    })
+    if (created.outcome === 'name_taken') {
+      throw new Error('fixture setup failed')
+    }
+    const launched = db.recordLaunch({
+      hostId: HOST_ID,
+      paneKey: holderPaneKey,
+      agentType: 'claude',
+      sessionId,
+      launchGeneration: sameGen,
+      executionHostId: HOST_ID,
+      evidence: 'host_launch'
+    })
+    if (!launched.ok) {
+      throw new Error('fixture launch row failed')
+    }
+
+    // Identity present but ABSENT from every round taken (the mocked inventory below) -> IDENTITY
+    // dead throughout; only `holderHasConnectedPty` (mocked separately) varies across calls.
+    const deadInventory: ControllerInventory = {
+      allLivePtyIds: new Set(),
+      terminalIdentityByPtyId: new Map()
+    }
+    vi.spyOn(runtime, 'takeControllerInventoryForSweep').mockResolvedValue(deadInventory)
+    let holderPtyConnected = false
+    vi.spyOn(runtime, 'findConnectedPtyForPane').mockImplementation((paneKey: string) =>
+      paneKey === holderPaneKey && holderPtyConnected ? { paneKey, ptyId: holderPtyId } : undefined
+    )
+
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(1_700_000_000_000)
+      const first = await runtime.requestChairRestore({
+        worktreeSelector: 'id:wt-1',
+        sessionId,
+        displayName: 'chair-m2'
+      })
+      expect(first).toEqual({ ok: false, reason: 'same_generation_settling', holderPaneKey })
+
+      // Before the settle window elapses, the holder pty reconnects -> presence CLEARS the
+      // absence clock and refuses current_generation.
+      vi.setSystemTime(1_700_000_000_000 + 5_000)
+      holderPtyConnected = true
+      const secondPresent = await runtime.requestChairRestore({
+        worktreeSelector: 'id:wt-1',
+        sessionId,
+        displayName: 'chair-m2'
+      })
+      expect(secondPresent).toEqual({ ok: false, reason: 'current_generation', holderPaneKey })
+
+      // The pty disconnects again -> the clock RESTARTS (not "already >= 10s since the very
+      // first observation") -- an immediate re-check still refuses same_generation_settling.
+      holderPtyConnected = false
+      const thirdRestarted = await runtime.requestChairRestore({
+        worktreeSelector: 'id:wt-1',
+        sessionId,
+        displayName: 'chair-m2'
+      })
+      expect(thirdRestarted).toEqual({
+        ok: false,
+        reason: 'same_generation_settling',
+        holderPaneKey
+      })
+
+      // 11s after the restart -> settled again -> adopted.
+      vi.setSystemTime(1_700_000_000_000 + 5_000 + 11_000)
+      const fourthAdopted = await runtime.requestChairRestore({
+        worktreeSelector: 'id:wt-1',
+        sessionId,
+        displayName: 'chair-m2'
+      })
+      expect(fourthAdopted.ok).toBe(true)
+      if (!fourthAdopted.ok) {
+        throw new Error('unreachable')
+      }
+      expect(fourthAdopted.adoptionSignal).toBe('SAME_GEN_PTY_ABSENCE')
     } finally {
       vi.useRealTimers()
     }

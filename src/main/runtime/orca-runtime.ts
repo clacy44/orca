@@ -36,7 +36,11 @@ import {
 } from '../../shared/terminal-output-side-effects'
 import { getDecorativeAgentTitleSignature } from '../../shared/agent-decorative-title-signature'
 import { createCommandCodeOutputStatusDetector } from '../../shared/command-code-output-status'
-import { SettleObservations, type IncumbentEvidence } from './incumbent-death'
+import {
+  SettleObservations,
+  holderAbsenceSettledNotLive,
+  type IncumbentEvidence
+} from './incumbent-death'
 import type { ControllerInventory } from './orchestration/agent-process-identity'
 import type {
   TerminalSideEffectBatch,
@@ -3387,6 +3391,10 @@ export class OrcaRuntimeService {
   // iterates in insertion order, so the first entry is always the oldest.
   private exitedPtyIdsThisGeneration = new Set<string>()
   private readonly incumbentSettleObservations = new SettleObservations()
+  // [S10-21f b2b-10q M2] A SIBLING clock, not a reuse of the instance above — keyed by holder
+  // pane, driven by D2 inventory-absence rather than D3 leaf liveness (see
+  // `holderAbsenceSettledNotLive`'s own doc for why the two signals cannot share one clock).
+  private readonly holderAbsenceSettleObservations = new SettleObservations()
   private recentPtyPathCandidatesById = new Map<string, string[]>()
   // Why: candidates only feed mobile file-tap provenance; desktop-only
   // sessions skip the 3-regex extraction on every PTY chunk until a
@@ -14154,6 +14162,26 @@ export class OrcaRuntimeService {
         return roundSeq === undefined ? true : record.seq > roundSeq
       }
     }
+  }
+
+  /** [S10-21f b2b-10q M2] Thin wrapper over the module-level pure function, holding this
+   * runtime's own `holderAbsenceSettleObservations` clock (never `incumbentSettleObservations`
+   * above — see that field's own comment for why the two signals cannot share a Map). */
+  holderSettledByAbsence(
+    holderPaneKey: string,
+    inventoryRoundNonNull: boolean,
+    d2Inventory: 'present' | 'absent' | 'unknown',
+    holderHasConnectedPty: boolean,
+    now: number = Date.now()
+  ): boolean {
+    return holderAbsenceSettledNotLive(
+      this.holderAbsenceSettleObservations,
+      holderPaneKey,
+      inventoryRoundNonNull,
+      d2Inventory,
+      holderHasConnectedPty,
+      now
+    )
   }
 
   /** [S10-21a C7i, Ruling 34 Addendum 27] ONE controller-inventory round for the whole restore
@@ -33557,6 +33585,8 @@ export class OrcaRuntimeService {
     const droppedPaneKey = this.ptysById.get(ptyId)?.paneKey
     if (droppedPaneKey) {
       this.incumbentSettleObservations.forget(droppedPaneKey)
+      // [S10-21f b2b-10q M2] The sibling absence-clock needs the same final-removal cleanup.
+      this.holderAbsenceSettleObservations.forget(droppedPaneKey)
     }
     this.ptysById.delete(ptyId)
     this.recentPtyOutputById.delete(ptyId)

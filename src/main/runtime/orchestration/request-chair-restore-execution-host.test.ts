@@ -167,4 +167,72 @@ describe('D-R163 H3: requestChairRestore refuses a non-local worktree target', (
         .get()
     ).toEqual({ n: 1 })
   })
+
+  // [S10-21f b2b-10q M1] A holder pane named by `current_sessions` with NO backing launch row at
+  // all is a DIFFERENT data inconsistency than one whose row merely omits execution_host_id —
+  // the pure predicate (dead-holder-adoption.ts conjunct C) already has its own
+  // `holder_launch_row_missing` code for exactly this case; the combined `?.` guard above
+  // collapsed both into `holder_execution_host_missing`, so this proves the split reaches it.
+  it('M1: a holder pane with NO launch row at all is refused holder_launch_row_missing, not holder_execution_host_missing', async () => {
+    db = new OrchestrationDb(':memory:')
+    const runtime = makeRuntime()
+    runtime.setOrchestrationDb(db)
+    stubLaunchScope(runtime, { connectionId: null, repo: null })
+    const spawnSpy = vi.fn()
+    runtime.setPtyController({
+      spawn: spawnSpy,
+      write: () => true,
+      kill: () => true,
+      getForegroundProcess: async () => null
+    })
+
+    const hostId = runtime.getOrchestrationCompatibilityHostId()
+    const holderPaneKey = `tab-old:${randomUUID()}`
+    const created = db.upsertAgentByPaneSuffix({
+      displayName: 'chair-m1',
+      role: null,
+      hostId,
+      paneKey: holderPaneKey,
+      terminalHandle: null,
+      processIncarnation: null,
+      worktreeId: null,
+      worktreePath: null,
+      branch: null,
+      title: null,
+      agentLabel: null,
+      originHandle: null,
+      originHostId: hostId
+    })
+    if (created.outcome === 'name_taken') {
+      throw new Error('fixture setup failed')
+    }
+    const launched = db.recordLaunch({
+      hostId,
+      paneKey: holderPaneKey,
+      agentType: 'claude',
+      sessionId: 'sess-m1',
+      launchGeneration: 'gen-m1-prior',
+      executionHostId: hostId,
+      evidence: 'host_launch'
+    })
+    if (!launched.ok) {
+      throw new Error('fixture launch row failed')
+    }
+    // `paneHoldingSession` still resolves the holder (a separate current_sessions read); only
+    // `newestLaunchForPane` is stubbed away to simulate the backing row's absence.
+    vi.spyOn(db, 'newestLaunchForPane').mockReturnValue(undefined)
+
+    const result = await runtime.requestChairRestore({
+      worktreeSelector: 'id:wt-1',
+      sessionId: 'sess-m1',
+      displayName: 'chair-m1'
+    })
+
+    expect(result).toEqual({
+      ok: false,
+      reason: 'holder_launch_row_missing',
+      holderPaneKey
+    })
+    expect(spawnSpy).not.toHaveBeenCalled()
+  })
 })

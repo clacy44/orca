@@ -5,14 +5,13 @@ import type { OrcaRuntimeService } from '../orca-runtime'
 import type { RuntimeEnsureAgentSessionResult } from '../../../shared/agent-session-host-authority'
 import type { AgentRow } from './types'
 import { decideEarlyRows } from './restore-sweep-decision'
-import { collectSweepEvidence } from './restore-sweep-evidence'
+import { resolveHolderIncumbentEvidence } from './chair-restore-holder-evidence'
 import { resolveHolderAdoption, type HolderAdoptionRefusalReason } from './dead-holder-adoption'
 import { liveReportStandsElsewhere } from './live-report-liveness'
 import { registerAgentForPane } from './register-agent-for-pane'
 import { isRestoreSweepLockHeld } from '../restore-sweep-lock'
 import { resolveResumeTranscript } from '../../startup/resolve-resume-transcript'
 import { preflightResumeTranscript } from '../../ipc/agent-launch-admission-support'
-import { resolveIncumbentDeath, d3SettledNotLive, type IncumbentVerdict } from '../incumbent-death'
 import { parsePaneKey } from '../../../shared/stable-pane-id'
 import { LaunchAdmissionRefusedError } from '../../ipc/agent-launch-admission-errors'
 import {
@@ -108,46 +107,39 @@ export async function requestChairRestore(
     holderRegisteredForAudit = holderRegistered
     const early = decideEarlyRows(holderRegistered?.process_incarnation ?? null, inventory)
 
-    let incumbent: IncumbentVerdict
-    let d2Inventory: 'present' | 'absent' | 'unknown'
-    let inventoryRoundNonNull: boolean
-    let holderHasConnectedPty = deps.runtime.findConnectedPtyForPane(holderPaneKey) !== undefined
-    // [R142] Fails closed: no D3 evidence bundle on the early-return branches -> not settled.
-    let holderSettledNotLive = false
-    if (early.kind === 'skipped_daemon_survived') {
-      incumbent = { dead: false, reason: 'live' }
-      d2Inventory = 'present'
-      inventoryRoundNonNull = true
-    } else if (early.kind === 'layer3') {
-      // [JUDGMENT CALL, see RETURN] 'layer3' covers a null round AND an ambiguous-pty identity
-      // — collapsed to "insufficient evidence" either way: never wrongly grants, may over-refuse.
-      incumbent = { dead: false, reason: 'inventory_unknown' }
-      d2Inventory = 'unknown'
-      inventoryRoundNonNull = false
-    } else {
-      const evidenceBundle = await collectSweepEvidence(
-        deps.runtime,
-        holderPaneKey,
-        parsed.tabId,
-        parsed.leafId,
-        hostId,
-        inventory,
-        early.identity,
-        early.status
-      )
-      incumbent = resolveIncumbentDeath(evidenceBundle.incumbentEvidence)
-      d2Inventory = evidenceBundle.incumbentEvidence.d2.inventory
-      inventoryRoundNonNull = true
-      holderHasConnectedPty = holderHasConnectedPty || evidenceBundle.occupantLiveness === 'present'
-      holderSettledNotLive = d3SettledNotLive(evidenceBundle.incumbentEvidence.d3)
-    }
+    // [S10-21f b2b-10q M2, MAX-LINES] incumbent/d2Inventory/inventoryRoundNonNull/
+    // holderHasConnectedPty/holderSettledNotLive assembly moved to
+    // chair-restore-holder-evidence.ts to keep this file's own effective-line ratchet.
+    const {
+      incumbent,
+      d2Inventory,
+      inventoryRoundNonNull,
+      holderHasConnectedPty,
+      holderSettledNotLive
+    } = await resolveHolderIncumbentEvidence(
+      deps.runtime,
+      early,
+      holderPaneKey,
+      parsed.tabId,
+      parsed.leafId,
+      hostId,
+      inventory
+    )
 
     if (!incumbent.dead && incumbent.reason === 'live') {
       return { ok: false, reason: 'restore_target_live_elsewhere', holderPaneKey }
     }
 
+    // [S10-21f b2b-10q M1] Split from the combined `?.` guard: a MISSING launch row (a data
+    // inconsistency — current_sessions named a pane with no backing row) and a row present but
+    // missing its execution_host_id are different failures with different refusal codes. The
+    // pure predicate's own conjunct C (dead-holder-adoption.ts) already defines
+    // holder_launch_row_missing for exactly the first case — this makes that code reachable from
+    // the caller again instead of collapsing both into holder_execution_host_missing.
     // [R142] No silent `?? hostId` local guess — refuse when the launch row omits its host.
-    if (!holderLaunchRow?.execution_host_id) {
+    if (!holderLaunchRow) {
+      return { ok: false, reason: 'holder_launch_row_missing', holderPaneKey }
+    } else if (!holderLaunchRow.execution_host_id) {
       return { ok: false, reason: 'holder_execution_host_missing', holderPaneKey }
     }
     // [JUDGMENT CALL, see RETURN; S10-21d b3b, D-R163 LOW fix] Conjunct F: every live

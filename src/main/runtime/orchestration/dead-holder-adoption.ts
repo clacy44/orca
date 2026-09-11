@@ -43,11 +43,14 @@ export type HolderAdoptionInput = {
   d2Inventory: 'present' | 'absent' | 'unknown'
   inventoryRoundNonNull: boolean
   holderHasConnectedPty: boolean
-  /** [R142] True once the holder's D3 settle window has elapsed (now - firstObservedNotLiveAt >=
-   * REBIND_SETTLE_MS) — read from the evidence directly, since `resolveIncumbentDeath` returns
-   * IDENTITY before D3 is even consulted. Required (in addition to the IDENTITY+D2 proof below)
-   * before a SAME-generation holder is ever adoptable — D3 alone never sufficed, and here it
-   * gates a stricter case than GEN_ABSENCE's, never a looser one. */
+  /** [R142; S10-21f b2b-10q M2] True once the holder's D2 inventory-absence has held for at
+   * least REBIND_SETTLE_MS: two (or more) `d2Inventory === 'absent' && !holderHasConnectedPty`
+   * readings, taken over NON-NULL rounds, with `now` at the later one at least REBIND_SETTLE_MS
+   * past `now` at the first — NOT D3's leaf-based settle window (that signal is always false on
+   * a headless `serve` process, where no window ever publishes a leaf record, so it proved only
+   * "time since first look"). Required (in addition to the IDENTITY+D2 proof below) before a
+   * SAME-generation holder is ever adoptable — this proof alone never sufficed on its own, and
+   * here it gates a stricter case than GEN_ABSENCE's, never a looser one. */
   holderSettledNotLive: boolean
   /** True iff the hook server's live provider-session set names session X on ANY pane whose
    * report is not itself resolved as a dead pane's stale report (live-report-liveness.ts). [R143]
@@ -113,10 +116,12 @@ export function resolveHolderAdoption(input: HolderAdoptionInput): HolderAdoptio
   }
   let signal: 'IDENTITY' | 'D1' | 'GEN_ABSENCE' | 'SAME_GEN_PTY_ABSENCE' | null = null
   if (sameGeneration) {
-    // [R142] The launcher itself minted this generation, so an ordinary death signal (even
-    // IDENTITY alone) is not trusted here — require identity-death AND independently the SAME
-    // D2/pty-absence proof GEN_ABSENCE uses AND the D3 settle window, or refuse loudly rather
-    // than adopt a pane out from under a still-settling same-generation agent.
+    // [R142; S10-21f b2b-10q M2] The launcher itself minted this generation, so an ordinary
+    // death signal (even IDENTITY alone) is not trusted here — require identity-death AND the
+    // SAME D2/pty-absence proof GEN_ABSENCE uses (IDENTITY and D2 share the ONE round this
+    // predicate's caller took, not two independent reads) AND the D2-absence settle window
+    // (`holderSettledNotLive`, above), or refuse loudly rather than adopt a pane out from under
+    // a still-settling same-generation agent.
     const identityDeadWithPtyAbsence =
       input.incumbent.dead &&
       input.incumbent.signal === 'IDENTITY' &&
