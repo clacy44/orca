@@ -28085,6 +28085,11 @@ export class OrcaRuntimeService {
       leafId: request.placement?.leafId,
       persistHostSessionBinding: true,
       agentSessionClaim: claim,
+      // [S10-21d C1] Mirror worker-dispatch callers (orchestration-worker-topology.ts,
+      // orchestration-federation-existing-worktree.ts): thread the request's launchPreferences
+      // through to createTerminal so a relaunch (host-restore or caller resume) records what it
+      // launched with instead of nulling pref_model/pref_effort on every cold restart.
+      ...(request.launchPreferences ? { launchPreferences: request.launchPreferences } : {}),
       signal: caller.signal
     })
     return {
@@ -28289,6 +28294,9 @@ export class OrcaRuntimeService {
           viewMode: request.viewMode,
           persistHostSessionBinding: true,
           agentSessionCreateOperationId: executionOperationId,
+          // [S10-21d C1] Same rationale as ensureAgentSession above: thread launchPreferences
+          // through so the HOST_MINTED row records pref_model/pref_effort.
+          ...(request.launchPreferences ? { launchPreferences: request.launchPreferences } : {}),
           signal: caller.signal,
           onPtySpawnCommitted: () => {
             retainReplayFence = true
