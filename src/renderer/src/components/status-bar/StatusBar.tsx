@@ -46,6 +46,7 @@ import type {
 import type {
   ProviderRateLimits,
   RateLimitRuntimeTarget,
+  RateLimitState,
   RateLimitWindow
 } from '../../../../shared/rate-limit-types'
 import { resolveLocalAccountRuntimeTarget } from '../../../../shared/local-account-runtime'
@@ -103,6 +104,7 @@ import {
   type UsagePercentageDisplay
 } from '../../../../shared/usage-percentage-display'
 import { formatUsagePercentageLabel } from './usage-percentage-label'
+import { buildClaudeSwitcherAccountRows } from './claude-switcher-account-rows'
 import {
   normalizeStatusBarUsageMode,
   type StatusBarUsageMode
@@ -697,6 +699,10 @@ export function ClaudeSwitcherMenu({
     activeAccountId: null,
     activeAccountIdsByRuntime: { host: null, wsl: {} }
   })
+  // Why: the accounts snapshot carries a remote-paired RateLimitState (D2) —
+  // the local store's rateLimits belong to this desktop, not the paired
+  // environment, so a remote pairing must read usage from here instead.
+  const [remoteRateLimits, setRemoteRateLimits] = useState<RateLimitState | null>(null)
   const [isSwitching, setIsSwitching] = useState(false)
   const mountedRef = useRef(true)
   const openSettingsPage = useAppStore((s) => s.openSettingsPage)
@@ -750,6 +756,7 @@ export function ClaudeSwitcherMenu({
     }
     if (mountedRef.current) {
       setAccounts(snapshot.claude)
+      setRemoteRateLimits(snapshot.rateLimits)
     }
   }, [activeRuntimeEnvironmentId])
 
@@ -775,8 +782,12 @@ export function ClaudeSwitcherMenu({
     setAccountsExpanded(nextExpanded)
     if (nextExpanded) {
       void fetchInactiveClaudeAccountUsage()
+      // Why: refreshes the remote-paired rateLimits snapshot (D2) alongside
+      // the account roster so an expansion after the initial mount still
+      // picks up a since-arrived remote inactive-account fetch.
+      void loadAccounts()
     }
-  }, [accountsExpanded, fetchInactiveClaudeAccountUsage])
+  }, [accountsExpanded, fetchInactiveClaudeAccountUsage, loadAccounts])
 
   const handleSelectAccount = async (
     accountId: string | null,
@@ -846,6 +857,27 @@ export function ClaudeSwitcherMenu({
   const selectedGroup =
     switchGroups.find((group) => group.key === selectedRuntimeKey) ?? switchGroups[0]
   const activeTarget = selectedGroup?.targets.find((target) => target.active)
+  // Why: a fallback group (selectedGroup.key !== selectedRuntimeKey) means no
+  // group matched the current runtime target — its `active` target isn't
+  // really the live account, so it must not render `claude`'s live snapshot.
+  const isActiveGroup = selectedGroup?.key === selectedRuntimeKey
+  // Why: D2 — a remote-paired snapshot's rateLimits are the paired
+  // environment's usage; the local store's inactiveClaudeAccounts/claude
+  // belong to this desktop and must not stand in for them.
+  const activeInactiveClaudeAccounts =
+    hasActiveRuntimeEnvironment && remoteRateLimits
+      ? remoteRateLimits.inactiveClaudeAccounts
+      : inactiveClaudeAccounts
+  const activeClaudeLimits =
+    hasActiveRuntimeEnvironment && remoteRateLimits ? remoteRateLimits.claude : claude
+  const nowForUsageAge = useNowTicker(30_000)
+  const accountRows = buildClaudeSwitcherAccountRows(
+    selectedGroup?.targets ?? [],
+    activeClaudeLimits,
+    isActiveGroup,
+    activeInactiveClaudeAccounts,
+    nowForUsageAge
+  )
 
   return (
     <ProviderDetailsMenu
@@ -902,50 +934,63 @@ export function ClaudeSwitcherMenu({
                 {translate('auto.components.status.bar.StatusBar.c98ea88392', 'No other accounts')}
               </div>
             ) : null}
-            {selectedGroup?.targets.map((target) => {
-              const inactiveUsage = target.id
-                ? inactiveClaudeAccounts.find((a) => a.accountId === target.id)
-                : null
-
-              return (
-                <DropdownMenuItem
-                  key={`${selectedGroup.key}:${target.id ?? 'system'}`}
-                  disabled={isSwitching || target.active}
-                  onSelect={(event) => {
-                    event.preventDefault()
-                    if (!target.active) {
-                      void handleSelectAccount(target.id, target.runtimeTarget)
-                    }
-                  }}
-                >
-                  <div className="flex w-full flex-col gap-0.5">
-                    <div className="flex min-w-0 items-center gap-2">
-                      <span className="min-w-0 flex-1 truncate">{target.label}</span>
-                      {target.active ? (
-                        <span className="shrink-0 text-[10px] font-medium text-muted-foreground">
-                          {translate('auto.components.status.bar.StatusBar.ff0fbe9311', 'Active')}
-                        </span>
-                      ) : null}
-                    </div>
-                    {inactiveUsage?.isFetching && !inactiveUsage.rateLimits ? (
-                      <InlineUsageSkeleton />
-                    ) : inactiveUsage?.rateLimits ? (
-                      <>
-                        <InlineUsageBars
-                          limits={inactiveUsage.rateLimits}
-                          isFetching={inactiveUsage.isFetching}
-                        />
-                        {Date.now() - inactiveUsage.updatedAt > INACTIVE_USAGE_STALE_AFTER_MS ? (
+            {selectedGroup
+              ? accountRows.map((row, index) => {
+                  const target = selectedGroup.targets[index]
+                  if (!target) {
+                    return null
+                  }
+                  return (
+                    <DropdownMenuItem
+                      key={`${selectedGroup.key}:${row.id}`}
+                      disabled={isSwitching || target.active}
+                      onSelect={(event) => {
+                        event.preventDefault()
+                        if (!target.active) {
+                          void handleSelectAccount(target.id, target.runtimeTarget)
+                        }
+                      }}
+                    >
+                      <div className="flex w-full flex-col gap-0.5">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <span className="min-w-0 flex-1 truncate">{row.label}</span>
+                          {row.active ? (
+                            <span className="shrink-0 text-[10px] font-medium text-muted-foreground">
+                              {translate(
+                                'auto.components.status.bar.StatusBar.ff0fbe9311',
+                                'Active'
+                              )}
+                            </span>
+                          ) : null}
+                        </div>
+                        {/* Why: D1/D4 — every row renders a body (bars, a loading
+                        skeleton, or an explicit "no usage yet" caption) instead of
+                        silently rendering nothing when no cache entry exists yet. */}
+                        {row.limits ? (
+                          <InlineUsageBars limits={row.limits} isFetching={row.isFetching} />
+                        ) : row.isFetching ? (
+                          <InlineUsageSkeleton />
+                        ) : (
+                          <span className="text-[10px] text-muted-foreground">
+                            {translate(
+                              'auto.components.status.bar.StatusBar.inactiveUsageNoData',
+                              'No usage yet'
+                            )}
+                          </span>
+                        )}
+                        {/* Why: D5 — the age caption always renders once there is a
+                        snapshot to date, ticked live by useNowTicker instead of a
+                        >30-minute gate that only ever painted on the next remount. */}
+                        {row.ageMs !== null ? (
                           <span className="text-[9px] text-muted-foreground/70">
-                            {formatInactiveUsageAge(inactiveUsage.updatedAt, Date.now())}
+                            {formatInactiveUsageAge(row.ageMs)}
                           </span>
                         ) : null}
-                      </>
-                    ) : null}
-                  </div>
-                </DropdownMenuItem>
-              )
-            })}
+                      </div>
+                    </DropdownMenuItem>
+                  )
+                })
+              : null}
           </div>
           <div className="px-2 py-1.5 text-[10px] leading-4 text-muted-foreground">
             {translate(
@@ -1064,23 +1109,47 @@ function isUnavailableInactiveUsage(limits: ProviderRateLimits | null | undefine
   return limits?.status === 'error' && !limits.session && !limits.weekly && !limits.fableWeekly
 }
 
-// Why: mirrors service.ts STALE_THRESHOLD_MS — past this age a cached inactive-account
-// snapshot still renders, but with an "N min ago" caption instead of looking live.
-const INACTIVE_USAGE_STALE_AFTER_MS = 30 * 60 * 1000
-
-function formatInactiveUsageAge(updatedAt: number, now: number): string {
-  const minutes = Math.max(0, Math.round((now - updatedAt) / 60000))
+// Why: D5 — an inactive-account row's age caption always renders (owner
+// intent: every row shows an age, always) instead of gating on a >30-minute
+// threshold that, without a ticker driving a re-render, effectively never
+// painted. Takes ageMs directly (not updatedAt/now) so callers thread the
+// same `now` the row model was built with.
+function formatInactiveUsageAge(ageMs: number): string {
+  const minutes = Math.max(0, Math.round(ageMs / 60000))
   if (minutes < 1) {
     return translate('auto.components.status.bar.StatusBar.inactiveUsageAgeNow', 'just now')
   }
   if (minutes === 1) {
     return translate('auto.components.status.bar.StatusBar.inactiveUsageAgeOneMin', '1 min ago')
   }
+  if (minutes < 60) {
+    return translate(
+      'auto.components.status.bar.StatusBar.inactiveUsageAgeMins',
+      '{{value0}} min ago',
+      { value0: minutes }
+    )
+  }
+  const hours = Math.max(1, Math.round(minutes / 60))
   return translate(
-    'auto.components.status.bar.StatusBar.inactiveUsageAgeMins',
-    '{{value0}} min ago',
-    { value0: minutes }
+    'auto.components.status.bar.StatusBar.inactiveUsageAgeHours',
+    '{{value0}}h ago',
+    {
+      value0: hours
+    }
   )
+}
+
+// Why: drives the switcher's age captions live (30 s cadence is plenty for a
+// "N min/h ago" label) — a plain setInterval clock, deliberately not
+// useResetCountdownClock, which schedules against reset-window boundaries
+// that have nothing to do with cache-entry age.
+function useNowTicker(intervalMs: number): number {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), intervalMs)
+    return () => window.clearInterval(id)
+  }, [intervalMs])
+  return now
 }
 
 function InlineUsageSignInAction({

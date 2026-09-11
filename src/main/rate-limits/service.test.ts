@@ -1347,6 +1347,65 @@ describe('RateLimitService', () => {
     expect(service.getState().inactiveClaudeAccounts).toEqual([])
   })
 
+  it('M1 records an error entry for a rejecting inactive Claude fetch instead of dropping it', async () => {
+    const service = new RateLimitService()
+    const account = { id: 'account-1', managedAuthPath: '/tmp/account-1/auth' }
+    service.setInactiveClaudeAccountsResolver(() => [account])
+    vi.mocked(fetchManagedAccountUsage).mockRejectedValueOnce(new Error('keychain locked'))
+
+    await service.fetchInactiveClaudeAccountsOnOpen()
+
+    expect(service.getState().inactiveClaudeAccounts).toEqual([
+      {
+        accountId: 'account-1',
+        rateLimits: expect.objectContaining({ status: 'error', error: 'keychain locked' }),
+        updatedAt: expect.any(Number),
+        isFetching: false
+      }
+    ])
+  })
+
+  it('M2 triggers an inactive Claude preview fetch from start()', async () => {
+    const service = new RateLimitService()
+    const account = { id: 'account-1', managedAuthPath: '/tmp/account-1/auth' }
+    service.setInactiveClaudeAccountsResolver(() => [account])
+    vi.mocked(fetchManagedAccountUsage).mockResolvedValue(okProvider('claude', 10))
+
+    service.start({ fetchImmediately: false })
+    await flushMicrotasks()
+
+    expect(fetchManagedAccountUsage).toHaveBeenCalledTimes(1)
+
+    service.stop()
+  })
+
+  it('M3 triggers an inactive Claude preview fetch on active-window focus', async () => {
+    vi.mocked(fetchClaudeRateLimits).mockResolvedValue(okProvider('claude', 12))
+    vi.mocked(fetchCodexRateLimits).mockResolvedValue(okProvider('codex', 24))
+    const service = new RateLimitService()
+    const window = new FakeRateLimitWindow()
+    service.attach(asRateLimitWindow(window))
+    // Why: start() itself now also kicks the inactive-account preview fetch (M2)
+    // — no resolver is set yet here, so that call no-ops without consuming the
+    // debounce window, isolating the assertion below to the focus path (M3).
+    service.start({ fetchImmediately: false })
+    await flushMicrotasks()
+
+    const account = { id: 'account-1', managedAuthPath: '/tmp/account-1/auth' }
+    service.setInactiveClaudeAccountsResolver(() => [account])
+    vi.mocked(fetchManagedAccountUsage).mockResolvedValue(okProvider('claude', 10))
+
+    window.emit('focus')
+    // Why: the focus handler runs a full active-window refresh across every
+    // provider before reaching the inactive-Claude call this asserts on —
+    // more microtask turns than the default flush covers.
+    await flushMicrotasks(20)
+
+    expect(fetchManagedAccountUsage).toHaveBeenCalledTimes(1)
+
+    service.stop()
+  })
+
   it('aborts inactive Codex preview fetches on stop', async () => {
     const service = new RateLimitService()
     const account = { id: 'account-1', managedHomePath: '/tmp/account-1/home' }

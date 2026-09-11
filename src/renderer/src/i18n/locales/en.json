@@ -3482,7 +3482,9 @@
             "floatingTerminalNewActivity": "{{label}}, new activity",
             "inactiveUsageAgeNow": "just now",
             "inactiveUsageAgeOneMin": "1 min ago",
-            "inactiveUsageAgeMins": "{{value0}} min ago"
+            "inactiveUsageAgeMins": "{{value0}} min ago",
+            "inactiveUsageNoData": "No usage yet",
+            "inactiveUsageAgeHours": "{{value0}}h ago"
           },
           "StatusBarUsageEmptyCta": {
             "828c764a79": "Connect an account",

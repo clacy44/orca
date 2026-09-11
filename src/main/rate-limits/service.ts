@@ -381,6 +381,11 @@ export class RateLimitService {
     } else {
       this.scheduleDeferredStartupRefresh()
     }
+    // Why: R146 — the per-account preview fetch previously ran only on the
+    // switcher's own expansion, so every account other than the active one
+    // showed no usage until the owner opened the menu at least once. Kick it
+    // off at startup too, same as the active-window refresh below.
+    void this.fetchInactiveClaudeAccountsOnOpen()
     this.startTimer()
   }
 
@@ -642,7 +647,7 @@ export class RateLimitService {
           }
           const cached = this.inactiveClaudeCache.get(account.id) ?? null
           this.inactiveClaudeCache.set(account.id, this.applyStalePolicy(fresh, cached))
-        } catch {
+        } catch (error) {
           // Why: per-account try/catch keeps one Keychain/network error from aborting the remaining accounts in the batch.
           if (
             signal.aborted ||
@@ -650,6 +655,27 @@ export class RateLimitService {
             !this.isCurrentInactiveClaudeAccount(account.id)
           ) {
             this.inactiveClaudeCache.delete(account.id)
+          } else {
+            // Why: D3 — a rejecting fetch (thrown, not the fetcher's own error-status
+            // return) previously wrote nothing, so the account silently reverted to
+            // no row at all instead of surfacing the failure. Route it through the
+            // same applyStalePolicy a normal error-status result gets, so a recent
+            // cached snapshot still shows (with an error) instead of the row
+            // vanishing — loud degradation instead of a silent blank.
+            const cachedOnError = this.inactiveClaudeCache.get(account.id) ?? null
+            const errorSnapshot: ProviderRateLimits = {
+              provider: 'claude',
+              session: null,
+              weekly: null,
+              fableWeekly: null,
+              updatedAt: Date.now(),
+              error: error instanceof Error ? error.message : String(error),
+              status: 'error'
+            }
+            this.inactiveClaudeCache.set(
+              account.id,
+              this.applyStalePolicy(errorSnapshot, cachedOnError)
+            )
           }
         }
         this.inactiveClaudeFetching.delete(account.id)
@@ -990,6 +1016,11 @@ export class RateLimitService {
     }
     const plan = this.getActiveWindowRefreshPlan(Date.now())
     await this.runActiveWindowRefreshPlan(plan)
+    // Why: R146 — same gap as start(); a focus/show/restore event previously
+    // only refreshed the active provider snapshots, leaving every inactive
+    // account's switcher preview stale until the next poll tick or an
+    // explicit switcher expansion.
+    void this.fetchInactiveClaudeAccountsOnOpen()
   }
 
   private async fetchAll(options?: { force?: boolean }): Promise<void> {
