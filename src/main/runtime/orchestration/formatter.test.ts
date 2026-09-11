@@ -443,6 +443,34 @@ describe('formatMessagePointer', () => {
     expect(result).not.toContain('more; run orca orchestration check')
   })
 
+  // Gate-1 M3: deliveredWhileBusy must FOLD onto the footer, never replace it — a busy-
+  // delivered peer ask must keep its "Answer:" command, and a busy-delivered overflow must
+  // keep its "— N more" line. RED today: the marker replaced buildPointerFooter's output
+  // outright, so neither element below was present.
+  it("M3: deliveredWhileBusy folds onto the footer, keeping a peer ask's Answer command", () => {
+    const overflowOldest = makeMessage({ id: 'msg_1', from_handle: 'term_c', subject: 'third' })
+    const first = makeMessage({ id: 'msg_2', from_handle: 'term_a', subject: 'first' })
+    const ask = makeMessage({
+      id: 'msg_3',
+      from_handle: 'agent:agt_asker',
+      subject: 'blocked question',
+      type: 'question',
+      thread_id: 'thr_ask2'
+    })
+    const result = formatMessagePointer([overflowOldest, first, ask], undefined, undefined, true)
+    expect(result).toContain('Answer: orca agents reply --thread thr_ask2 --body "..."')
+    expect(result).toContain('[delivered while busy — your pane never reported idle]')
+  })
+
+  it('M3: deliveredWhileBusy folds onto the footer, keeping the "— N more" overflow line', () => {
+    const messages = Array.from({ length: 3 }, (_, i) =>
+      makeMessage({ id: `msg_${i}`, sequence: i + 1, subject: `msg ${i}` })
+    )
+    const result = formatMessagePointer(messages, undefined, undefined, true)
+    expect(result).toContain('— 1 more; run orca orchestration check')
+    expect(result).toContain('[delivered while busy — your pane never reported idle]')
+  })
+
   // SENSITIVE THREADS §: no subject at all reaches the pointer — a body/subject leak here would
   // be exactly what T13 (federation/pane/group-expansion) polices at every other surface too.
   it('T13: shows no subject at all for a message on a sensitive thread', () => {

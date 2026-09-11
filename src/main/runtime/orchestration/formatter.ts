@@ -258,14 +258,15 @@ export function formatMessagePointer(
   messages: readonly MessageRow[],
   resolveSenderAgent?: ResolveMessagePointerSenderAgent,
   resolveThreadSensitive?: ResolveThreadSensitive,
-  // [S10-21f b4, R147] Set only by the starvation-bound forced-delivery path
+  // [S10-21f b4, R147; Gate-1 M3] Set only by the starvation-bound forced-delivery path
   // (attemptForcedBusyDelivery -> attemptMidTurnClaudeDelivery -> deliverPendingMessages) — this
   // push landed only because the pane's own idle/turn-boundary edges never fired within
   // DELIVERY_STARVATION_BOUND_MS, so the pane's own chair should know its idle reporting is the
-  // thing that's actually broken, not just that mail arrived. Deviation from the brief's literal
-  // instruction (add a 4th line): the 3-line cap at POINTER_MAX_SHOWN/buildPointerFooter above
-  // (2 message lines + 1 footer) DOES apply here — a bare 4th line would widen the pointer past
-  // what DELIVERY § caps it at — so this REPLACES the footer instead of appending to it.
+  // thing that's actually broken, not just that mail arrived. Folded onto its own line ALONGSIDE
+  // the ordinary footer (not in place of it, M3 fix) — the DELIVERY § 3-line cap bounds the
+  // MESSAGE lines (POINTER_MAX_SHOWN), not this kind of host framing; the footer line is already
+  // exempt from that count ("POINTER_MAX_SHOWN message lines plus exactly one contextual footer
+  // line"), and this marker is framing of the same kind, not a third message.
   deliveredWhileBusy?: boolean
 ): string {
   // F-16 (Ruling 32 Addendum 5): filter to UNREAD rows defensively — this composer must never
@@ -291,10 +292,11 @@ export function formatMessagePointer(
     return formatMessagePointerLine(msg, resolveSenderAgent, sensitiveCount)
   })
   const lastShown = shown.at(-1) as MessageRow
-  lines.push(
-    deliveredWhileBusy
-      ? '[delivered while busy — your pane never reported idle]'
-      : buildPointerFooter(lastShown, overflow, resolveThreadSensitive)
-  )
+  // M3 fix: fold the marker in alongside the footer — never in place of it, or a busy-delivered
+  // peer ask loses its "Answer:" command and a busy-delivered overflow loses its "— N more".
+  lines.push(buildPointerFooter(lastShown, overflow, resolveThreadSensitive))
+  if (deliveredWhileBusy) {
+    lines.push('[delivered while busy — your pane never reported idle]')
+  }
   return `\n${lines.join('\n')}\n`
 }
