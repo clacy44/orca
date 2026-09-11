@@ -286,7 +286,11 @@ import {
   seedLiveClaudePtysFromPersistence
 } from './claude-accounts/live-pty-gate'
 import { StarNagService } from './star-nag/service'
-import { agentHookServer, type AgentHookProviderSessionIdentity } from './agent-hooks/server'
+import {
+  agentHookServer,
+  TURN_BOUNDARY_DELIVERY_HOOK_EVENTS,
+  type AgentHookProviderSessionIdentity
+} from './agent-hooks/server'
 import { raiseSessionIdentityMismatchAlarms } from './startup/session-identity-mismatch-alarm'
 import { createHookProviderSessionInvalidator } from './agent-hooks/hook-provider-session-invalidation'
 import { createHookStatusSessionTabsInvalidator } from './agent-hooks/hook-status-session-tabs-invalidation'
@@ -2511,6 +2515,18 @@ void app.whenReady().then(async () => {
   const unsubscribeHookStatusSessionTabs = agentHookServer.subscribeEnrichedStatus((enriched) => {
     if (hookStatusChangedSessionTabs(enriched)) {
       runtime?.touchMobileSessionTabsForPane(enriched.paneKey, enriched.worktreeId ?? null)
+    }
+    // [S10-21f b4, R147] Turn-boundary delivery edge: a tool-call boundary (Stop/PostToolUse/
+    // PostToolUseFailure) or a hydrated 'done' state is a point where a continuously-busy Claude
+    // pane (no synthetic idle title exists for it) briefly surfaces — attempt pointer delivery
+    // through the same gated paths the idle-title edge already uses, rather than waiting on the
+    // 5-minute slow retry or the starvation bound.
+    if (
+      (enriched.hookEventName !== undefined &&
+        TURN_BOUNDARY_DELIVERY_HOOK_EVENTS.has(enriched.hookEventName)) ||
+      enriched.payload.state === 'done'
+    ) {
+      runtime?.notifyAgentTurnBoundaryForPane(enriched.paneKey)
     }
   })
   // Teardown: agent exit, pane close, and the SSH transient-disconnect batch all land

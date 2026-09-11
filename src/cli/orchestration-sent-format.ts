@@ -34,9 +34,11 @@ export function formatOrchestrationSent(
       ? 'recipient not currently resolvable'
       : `recipient ${delivery.recipient.state}`
   const state =
-    delivery.state === 'queued_awaiting_pane'
-      ? 'queued, delivery withheld (pane busy or unconfirmed idle)'
-      : delivery.state
+    delivery.state === 'queued_starved'
+      ? `queued, delivery withheld for ${delivery.starvedMinutes ?? 0}m (${delivery.starvedAttempts ?? 0} attempts) — pane never reported idle`
+      : delivery.state === 'queued_awaiting_pane'
+        ? 'queued, delivery withheld (pane busy or unconfirmed idle)'
+        : delivery.state
   const headline = `${messageId}: ${state} (${recipient}).`
   // V-6: `environment` is set only for a 'relayed'/'relay_pending' row (the saved-environment
   // id parsed out of its `remote:<environmentId>:<agentId>` to_handle) — print it on its own

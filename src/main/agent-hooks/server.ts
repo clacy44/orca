@@ -258,6 +258,20 @@ const STATUS_PERSIST_DEBOUNCE_MS = 250
 const REATTEST_RATE_WINDOW_MS = 60_000
 const REATTEST_RATE_LIMIT = 5
 const TOOL_PROGRESS_HOOK_EVENTS = new Set(['PreToolUse', 'PostToolUse', 'PostToolUseFailure'])
+// [S10-21f b4, R147] Deviation from the brief's citation: the brief named this set
+// TOOL_PROGRESS_HOOK_EVENTS at this same line, expecting it to already hold
+// {'Stop','PostToolUse','PostToolUseFailure'}. The actual constant at this location (above) is
+// {'PreToolUse','PostToolUse','PostToolUseFailure'} — no 'Stop', includes 'PreToolUse' — and is
+// used by a different, unrelated gate (isToolProgressEvent, line ~549: whether a hook event is
+// tool-progress-only for session-tabs invalidation coalescing). Reusing it would both pull in an
+// event ('PreToolUse') the turn-boundary delivery edge should not fire on and miss 'Stop', which
+// it must fire on. Defined as its own exported set instead of mutating the existing one's
+// membership or meaning.
+export const TURN_BOUNDARY_DELIVERY_HOOK_EVENTS = new Set([
+  'Stop',
+  'PostToolUse',
+  'PostToolUseFailure'
+])
 const AGENT_PROMPT_SENT_AGENT_KINDS = new Set<AgentKind>(AGENT_KIND_VALUES)
 
 // Why: bound file growth from PTYs that never re-attach; 7 days is the "still relevant?" horizon beyond which entries shouldn't resurrect on hydrate.

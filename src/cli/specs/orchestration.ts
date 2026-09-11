@@ -136,7 +136,7 @@ export const ORCHESTRATION_COMMAND_SPECS: CommandSpec[] = [
     usage: 'orca orchestration sent --id <message_id> [--json]',
     allowedFlags: [...GLOBAL_FLAGS, 'id'],
     notes: [
-      'delivery.state is one of: queued (not yet pushed), queued_awaiting_pane (a push was attempted and withheld — pane busy or unconfirmed idle), pointed (pushed to the recipient pane, not yet read), or read.',
+      'delivery.state is one of: queued (not yet pushed), queued_awaiting_pane (a push was attempted and withheld — pane busy or unconfirmed idle), queued_starved (withheld continuously past the starvation bound — the pane never reported idle), pointed (pushed to the recipient pane, not yet read), or read.',
       'This replaces reading the send receipt as a delivery confirmation — it never was one.',
       "A message relayed to a peer host (a cross-host ask) is not in this host's own store — retry with --environment <name of that host>."
     ]

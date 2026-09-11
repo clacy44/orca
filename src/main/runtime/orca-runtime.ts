@@ -240,6 +240,12 @@ import {
   type FederationSyncHealth
 } from './orchestration/federation-sync-health'
 import { formatMessagePointer } from './orchestration/formatter'
+import {
+  recordWithheld as recordDeliveryStarvationWithheld,
+  hasCrossedBound as hasDeliveryStarvationCrossedBound,
+  shouldLog as shouldLogDeliveryStarvation,
+  type DeliveryStarvationRecord
+} from './orchestration/delivery-starvation'
 import { RUNTIME_NOTIFICATION_SENDER } from './orchestration/runtime-notification'
 import { resolveStaleBarePeerHandle } from './orchestration/stale-handle-resolution'
 import { MailPointerRepointScheduler } from './orchestration/mail-pointer-repoint-scheduler'
@@ -8026,6 +8032,50 @@ export class OrcaRuntimeService {
     // Why: title/status flips several times a second under spinner-in-title
     // agents. Coalesce the emit instead of fanning out every version.
     this.mobileSessionTabsNotifyCoalescer.schedule(worktreeId)
+  }
+
+  // [S10-21f b4, R147] Per-pane debounce for notifyAgentTurnBoundaryForPane — a burst of
+  // PreToolUse/PostToolUse/Stop hook events for the same pane must not each attempt a delivery;
+  // one attempt per pane per window is enough, since the mailbox itself hasn't changed between
+  // events in the same burst.
+  private readonly agentTurnBoundaryLastFiredAtByPaneKey = new Map<string, number>()
+  private static readonly AGENT_TURN_BOUNDARY_DEBOUNCE_MS = 2000
+
+  /** [S10-21f b4, R147] Turn-boundary delivery edge: Stop/PostToolUse/PostToolUseFailure hook
+   *  events (and a hydrated `state === 'done'`) already reach main (agent-hooks/server.ts's
+   *  subscribeEnrichedStatus, wired at src/main/index.ts) but were never used as a delivery edge
+   *  — a Claude pane that works continuously has no synthetic-title idle edge to wait for
+   *  (synthetic-agent-title.ts:12-59 carries no Claude profile), so pointer delivery otherwise
+   *  waits only on the 5-minute slow retry or the starvation-bound forced path. This is
+   *  additive: it only ATTEMPTS delivery through the existing gated paths
+   *  (deliverPendingMessagesForLeaf/deliverPendingMessagesForPty, which themselves still enforce
+   *  every existing safety gate — modal, agent-pane, Cursor, write serialization); it never
+   *  bypasses them.
+   */
+  notifyAgentTurnBoundaryForPane(paneKey: string): void {
+    const now = Date.now()
+    const lastFiredAt = this.agentTurnBoundaryLastFiredAtByPaneKey.get(paneKey)
+    if (
+      lastFiredAt !== undefined &&
+      now - lastFiredAt < OrcaRuntimeService.AGENT_TURN_BOUNDARY_DEBOUNCE_MS
+    ) {
+      return
+    }
+    this.agentTurnBoundaryLastFiredAtByPaneKey.set(paneKey, now)
+    const parsed = parsePaneKey(paneKey)
+    const leaf = parsed ? this.leaves.get(this.getLeafKey(parsed.tabId, parsed.leafId)) : undefined
+    if (leaf) {
+      this.deliverPendingMessagesForLeaf(leaf)
+      return
+    }
+    // Why getPtyRecordForPaneKey, mirroring getTerminalWorktreeIdForPaneKey's own fallback
+    // (~:18730): a leafless pane (headless `orca serve`, or a desktop pane hidden from the
+    // renderer graph) has no leaf at all, but still has a live pty record this hook event can
+    // resolve to.
+    const pty = this.getPtyRecordForPaneKey(paneKey)
+    if (pty) {
+      this.deliverPendingMessagesForPty(pty)
+    }
   }
 
   /** Republish the workspace snapshot after a pane's hook status changed.
@@ -35893,6 +35943,30 @@ export class OrcaRuntimeService {
     return (pty?.launchAgent ?? pty?.foregroundAgent) === 'claude'
   }
 
+  // [S10-21f b4, R147] Alternative Claude-identity signal for the starvation-bound forced-
+  // delivery routing ONLY — a pane attached externally (never Orca-launched, so
+  // launchAgent/foregroundAgent were never stamped 'claude') can still be positively identified
+  // as Claude by a fresh hook status row's own agentType, the same snapshot
+  // getFreshExplicitAgentStatusForHandle reads (bounded by AGENT_STATUS_STALE_AFTER_MS so a
+  // stale/exited pane's last-known agentType can't authorize a forced write forever).
+  private hasFreshClaudeHookStatus(paneKey: string | null): boolean {
+    if (!paneKey) {
+      return false
+    }
+    const now = Date.now()
+    for (const entry of this.getAgentStatusSnapshotFn?.() ?? []) {
+      if (
+        entry.paneKey === paneKey &&
+        entry.agentType === 'claude' &&
+        typeof entry.receivedAt === 'number' &&
+        now - entry.receivedAt <= AGENT_STATUS_STALE_AFTER_MS
+      ) {
+        return true
+      }
+    }
+    return false
+  }
+
   // Why (S10-15 F9): the one hard gate that survives relaxing the busy check for Claude
   // panes — an injected Enter into a live permission/trust prompt would answer the dialog,
   // not the pane. Same modal detection probeTuiIdleForDelivery uses (detectTerminalWaitBlockedReason
@@ -35914,6 +35988,10 @@ export class OrcaRuntimeService {
       // confirmForegroundProcess read already ran for this push — tells the deliverPendingMessages
       // call at the bottom of this method not to re-arm that same async scan, which would loop.
       foregroundConfirmed?: boolean
+      // [S10-21f b4, R147] Set only by attemptForcedBusyDelivery — carried through to
+      // formatMessagePointer so the pointer's footer names the starvation-bound reason instead
+      // of the ordinary resume-command footer.
+      deliveredWhileBusy?: boolean
     }
   ): void {
     const waitText = buildTerminalWaitText(
@@ -35927,6 +36005,37 @@ export class OrcaRuntimeService {
     }
     this.withheldDeliveryAttemptsByHandle.delete(mailboxHandle)
     this.deliverPendingMessages(target, { mailboxHandle, ...options })
+  }
+
+  // [S10-21f b4, R147] Forced delivery once a Claude pane's withheld record has crossed
+  // DELIVERY_STARVATION_BOUND_MS — the pane never yielded an idle-edge (or a mid-turn
+  // attemptMidTurnClaudeDelivery attempt) on its own within the bound, so this fires the same
+  // mid-turn path proactively rather than waiting for the next incidental trigger. Precondition
+  // mirrors R2 gate 1 (isPtyRunningAgent, ~:36152-36161): `isClaudeCodePane` reads a spawn-time
+  // record that survives the agent exiting to a shell, so a starved record for a pane that has
+  // since exited to a shell must not get an Enter forced into it. It MUST go through
+  // attemptMidTurnClaudeDelivery (not deliverPendingMessages directly) — that method's own modal
+  // guard (detectTerminalWaitBlockedReason) and, transitively, deliverPendingMessages' own hard
+  // Cursor refusal (cursorTitleSources.some(isCursorAgentTitle), unconditional for every
+  // delivery target) are what make forcing a busy-pane write safe at all.
+  private attemptForcedBusyDelivery(
+    pty: RuntimePtyWorktreeRecord,
+    leaf: RuntimeLeafRecord | null,
+    target: PendingMessageDeliveryTarget,
+    mailboxHandle: string,
+    options: { reservedTypes?: ReadonlySet<string>; notifiedThreadIdKnown?: boolean }
+  ): void {
+    void (async () => {
+      const knownAgentPane = await this.isPtyRunningAgent(pty, leaf)
+      if (!knownAgentPane) {
+        this.recordWithheldDelivery(mailboxHandle, 'not_agent_pane')
+        return
+      }
+      this.attemptMidTurnClaudeDelivery(target, leaf ?? pty, mailboxHandle, {
+        ...options,
+        deliveredWhileBusy: true
+      })
+    })()
   }
 
   deliverPendingMessagesForHandle(
@@ -35989,6 +36098,40 @@ export class OrcaRuntimeService {
           // is the routine "tracking resumed" path — arming a repeating retry unconditionally
           // there would fire it on every non-agent pane.
           this.recordWithheldDelivery(handle, 'awaiting_idle_edge')
+        } else if (
+          pty.lastAgentStatus !== null &&
+          (this.isClaudeCodePane(pty) || this.hasFreshClaudeHookStatus(pty.paneKey))
+        ) {
+          // [S10-21f b4, R147] Was an unconditional delete for EVERY busy pane reaching this
+          // branch — including a routine busy non-Claude pane, which s10-15-midturn-delivery.
+          // test.ts and orca-runtime.test.ts ("leaves later delivery to the idle edge instead of
+          // polling a working mailbox") both pin as arming NO retry timer at all, relying purely
+          // on its own idle-title edge. Deviation from the brief's literal instruction (which
+          // read this split as `lastAgentStatus !== null` alone, with no Claude gate): narrowed
+          // here to a Claude-identified pane ONLY — recordWithheldDelivery unconditionally arms
+          // scheduleSlowMailboxRetry, so applying it to every busy pane would have started
+          // polling a plain working Codex/shell pane too, breaking that pinned invariant for no
+          // benefit (a non-Claude agent has a real idle-title edge coming; only Claude lacks a
+          // synthetic-title profile, synthetic-agent-title.ts:12-59). A Claude pane not
+          // `connected` (or otherwise not yet resolvable as Claude by either signal) still keeps
+          // the old plain-delete behavior via the final `else` below.
+          this.recordWithheldDelivery(handle, 'pane_busy')
+          // The withhold above may have just crossed (or already crossed, on an earlier retry)
+          // the starvation bound — check the record AFTER recording it, since
+          // recordWithheldDelivery is what advances `count`/`at`.
+          const starvation = this.getDeliveryStarvation(handle)
+          if (
+            starvation &&
+            hasDeliveryStarvationCrossedBound(starvation, Date.now(), DELIVERY_STARVATION_BOUND_MS)
+          ) {
+            this.attemptForcedBusyDelivery(
+              pty,
+              null,
+              { deliveryKind: 'pty', ptyId: pty.ptyId },
+              handle,
+              { reservedTypes, notifiedThreadIdKnown }
+            )
+          }
         } else {
           // Normal live tracking has resumed — any earlier fallback-withheld record is stale.
           // (The R1/R2 hydrated-probe fallback below stays leaf-scoped; a leafless pane's own
@@ -36035,6 +36178,41 @@ export class OrcaRuntimeService {
           reservedTypes,
           notifiedThreadIdKnown
         })
+      } else if (
+        leaf.lastAgentStatus !== null &&
+        (() => {
+          const leafPty = leaf.ptyId ? this.ptysById.get(leaf.ptyId) : null
+          return (
+            (leafPty && this.isClaudeCodePane(leafPty)) ||
+            this.hasFreshClaudeHookStatus(`${leaf.tabId}:${leaf.leafId}`)
+          )
+        })()
+      ) {
+        // [S10-21f b4, R147] Same narrowing as the pty branch above, leaf-scoped and for the
+        // same reason: an unconditional recordWithheldDelivery for every busy leaf here would
+        // have armed a slow-retry poll for a routine busy non-Claude leaf too — the pinned
+        // "leaves later delivery to the idle edge instead of polling" invariant
+        // (orca-runtime.test.ts) covers exactly that case. Narrowed to a Claude-identified leaf.
+        // Why a plain template, not makePaneKey (S10-21f b4 fix): makePaneKey validates
+        // leafId as a UUID and throws otherwise — this is a read-only lookup key, not a
+        // freshly-minted pane identity, so it must never throw on an unexpected shape (a
+        // thrown error here would be caught by this method's outer try/catch and recorded
+        // as a spurious 'no_live_pane' withhold, arming an unwanted retry timer even for a
+        // routine non-Claude leaf). Mirrors deliverPendingMessagesForLeaf's own
+        // `${leaf.tabId}:${leaf.leafId}` pane-key construction for the same reason.
+        this.recordWithheldDelivery(handle, 'pane_busy')
+        const starvation = this.getDeliveryStarvation(handle)
+        const leafPty = leaf.ptyId ? this.ptysById.get(leaf.ptyId) : null
+        if (
+          starvation &&
+          hasDeliveryStarvationCrossedBound(starvation, Date.now(), DELIVERY_STARVATION_BOUND_MS) &&
+          leafPty
+        ) {
+          this.attemptForcedBusyDelivery(leafPty, leaf, leaf, handle, {
+            reservedTypes,
+            notifiedThreadIdKnown
+          })
+        }
       } else {
         // Normal live tracking has resumed — any earlier fallback-withheld record is stale;
         // the standard idle-edge push (not this fallback) owns delivery from here.
@@ -36288,8 +36466,27 @@ export class OrcaRuntimeService {
   // BOTH unread mail and the withheld record (proof of a live-but-failing pane) still hold at
   // fire time; anything else (delivered, read, pane gone) lets the chain end on its own.
   private recordWithheldDelivery(mailboxHandle: string, reason: WithheldDeliveryReason): void {
-    this.withheldDeliveryAttemptsByHandle.set(mailboxHandle, { at: Date.now(), reason })
-    console.warn('[orchestration] pointer delivery withheld', { mailboxHandle, reason })
+    const now = Date.now()
+    const prev = this.withheldDeliveryAttemptsByHandle.get(mailboxHandle)
+    // Why wasCrossed off prev.at, not off `now` (S10-21f b4): the crossing-edge check below must
+    // compare "had this record already crossed the bound as of its own last withhold" against
+    // "has it crossed as of this one" — using `now` for both sides of that comparison would make
+    // wasCrossed trivially equal to the new state and the edge would never fire.
+    const wasCrossed = prev
+      ? hasDeliveryStarvationCrossedBound(prev, prev.at, DELIVERY_STARVATION_BOUND_MS)
+      : false
+    const record = recordDeliveryStarvationWithheld(prev, reason, now)
+    const isCrossed = hasDeliveryStarvationCrossedBound(record, now, DELIVERY_STARVATION_BOUND_MS)
+    const crossedEdge = isCrossed && !wasCrossed
+    this.withheldDeliveryAttemptsByHandle.set(mailboxHandle, { ...record, reason })
+    if (shouldLogDeliveryStarvation(record, crossedEdge)) {
+      console.warn('[orchestration] pointer delivery withheld', {
+        mailboxHandle,
+        reason,
+        count: record.count,
+        starvedMs: now - record.firstAt
+      })
+    }
     this.scheduleSlowMailboxRetry(mailboxHandle)
   }
 
@@ -36298,6 +36495,13 @@ export class OrcaRuntimeService {
   // surface one host-constant notice on the recipient's own host (F-6's silent-degradation gap).
   hasParkedDelivery(mailboxHandle: string): boolean {
     return this.withheldDeliveryAttemptsByHandle.has(mailboxHandle)
+  }
+
+  // [S10-21f b4, R147] Read-only accessor for getMessageDeliverySnapshot (queued_starved) and
+  // any future caller that needs to know whether THIS mailbox's withheld record has crossed
+  // DELIVERY_STARVATION_BOUND_MS, without reaching into the private map directly.
+  private getDeliveryStarvation(mailboxHandle: string): DeliveryStarvationRecord | undefined {
+    return this.withheldDeliveryAttemptsByHandle.get(mailboxHandle)
   }
 
   private scheduleSlowMailboxRetry(mailboxHandle: string): void {
@@ -36446,6 +36650,9 @@ export class OrcaRuntimeService {
      *  accepted, not the far side's receipt). Without it that branch was indistinguishable from
      *  relay_pending's honest "delivery state unknown". */
     deliveryConfirmed?: true
+    /** [S10-21f b4, R147] Set only when `delivery` is 'queued_starved'. */
+    starvedMinutes?: number
+    starvedAttempts?: number
   } {
     // S10-15 verifier V-4 (was F4): a relayed-send mirror row (to_handle
     // `remote:<environmentId>:<agentId>`, S10-15 F1 R6) is never "pointed" to a live pane on
@@ -36561,11 +36768,30 @@ export class OrcaRuntimeService {
     // R4 honesty (S10-9): 'queued' after an actual push attempt was withheld (busy pane,
     // failed probe, non-agent pane, no hydrated status) must say so — never read the same as
     // mail nobody has tried to push yet.
-    const delivery: MessageDeliveryState =
-      baseDelivery === 'queued' && this.withheldDeliveryAttemptsByHandle.has(message.to_handle)
+    // [S10-21f b4, R147] 'queued_starved' takes precedence over 'queued_awaiting_pane' once the
+    // withheld record has crossed DELIVERY_STARVATION_BOUND_MS — a strictly stronger claim
+    // (continuous, bounded starvation, not just "withheld right now").
+    const starvation = this.getDeliveryStarvation(message.to_handle)
+    const now = Date.now()
+    const isStarved =
+      baseDelivery === 'queued' &&
+      starvation !== undefined &&
+      hasDeliveryStarvationCrossedBound(starvation, now, DELIVERY_STARVATION_BOUND_MS)
+    const delivery: MessageDeliveryState = isStarved
+      ? 'queued_starved'
+      : baseDelivery === 'queued' && this.withheldDeliveryAttemptsByHandle.has(message.to_handle)
         ? 'queued_awaiting_pane'
         : baseDelivery
-    return { delivery, recipient }
+    return {
+      delivery,
+      recipient,
+      ...(isStarved && starvation
+        ? {
+            starvedMinutes: Math.floor((now - starvation.firstAt) / 60_000),
+            starvedAttempts: starvation.count
+          }
+        : {})
+    }
   }
 
   // Why: wake blocking orchestration.check --wait calls on this handle so they return the new message immediately instead of polling.
@@ -37305,9 +37531,14 @@ export class OrcaRuntimeService {
 
   // Why (S10-9 R4): proof an actual delivery attempt was withheld this mailbox — vs. mail
   // nobody has tried to push yet — so getMessageDeliverySnapshot never conflates the two.
+  // [S10-21f b4, R147] Widened from { at, reason } to the full DeliveryStarvationRecord shape
+  // (firstAt/at/count/reason) — firstAt is the anchor hasCrossedBound reads to decide whether a
+  // repeatedly-withheld Claude pane has starved past DELIVERY_STARVATION_BOUND_MS; count is what
+  // shouldLog checks to fire console.warn only on the very first withhold, never on every ~5 min
+  // retry after it.
   private readonly withheldDeliveryAttemptsByHandle = new Map<
     string,
-    { at: number; reason: WithheldDeliveryReason }
+    DeliveryStarvationRecord & { reason: WithheldDeliveryReason }
   >()
 
   // Why (S10-9 review, finding: forged live-idle stamp): a probe-observed idle authorizes
@@ -37509,6 +37740,9 @@ export class OrcaRuntimeService {
       // S10-20 (Ruling 22 scope 3): set ONLY by the guard's own continuation below, after a fresh
       // confirmForegroundProcess read proved an agent owns this pty. Never set by an external caller.
       foregroundConfirmed?: boolean
+      // [S10-21f b4, R147] Set only by attemptForcedBusyDelivery via attemptMidTurnClaudeDelivery
+      // — passed to formatMessagePointer's 4th arg below.
+      deliveredWhileBusy?: boolean
     } = {}
   ): void {
     if (!this._orchestrationDb) {
@@ -37813,7 +38047,8 @@ export class OrcaRuntimeService {
         // enforce the read-side half. `db?.getThread?.` (not just `db?.getThread(...)`): a test
         // double or a runtime attached to a pre-v34 db may not implement it at all — absence
         // reads as "not sensitive", never a thrown exception that would abort the whole push.
-        (threadId) => db?.getThread?.(threadId)?.sensitive === 1
+        (threadId) => db?.getThread?.(threadId)?.sensitive === 1,
+        options.deliveredWhileBusy === true
       )
       const wrote = this.ptyController?.write(deliveryPtyId, payload) ?? false
       if (!wrote) {
@@ -42173,6 +42408,13 @@ const TUI_IDLE_QUIESCENCE_MS = 3000
 // so N stuck mailboxes never synchronize into one thundering sweep.
 const AGENT_MAILBOX_SLOW_RETRY_INTERVAL_MS = 5 * 60 * 1000
 const AGENT_MAILBOX_SLOW_RETRY_JITTER_MS = 60 * 1000
+// [S10-21f b4, R147] How long a withheld pointer-delivery record must stand, from its FIRST
+// withhold, before a Claude pane's continuous busyness (no idle edge ever coming — no synthetic
+// title profile exists for Claude, synthetic-agent-title.ts:12-59) is treated as starvation
+// rather than an ordinary short withhold on the way to a real idle edge. No new timer: the slow
+// retry above (AGENT_MAILBOX_SLOW_RETRY_INTERVAL_MS, ~5 min) is the only clock that re-checks a
+// withheld record, so this bound is read at that cadence, not polled independently.
+const DELIVERY_STARVATION_BOUND_MS = 10 * 60 * 1000
 const EXPLICIT_IDLE_TITLE_RE = /(^|\s)(ready|idle|done)(\s|$|[.!?])/i
 const CLAUDE_IDLE_PREFIX = '\u2733'
 const GEMINI_IDLE_PREFIX = '\u25c7'
