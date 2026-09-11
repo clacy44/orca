@@ -95,6 +95,11 @@ describe('D-R177 F1-F4: orchestration.reply local branch fail-closed authorship'
     return (raw(db).prepare('SELECT COUNT(*) as n FROM messages').get() as { n: number }).n
   }
 
+  function readFlag(id: string): number {
+    return (raw(db).prepare('SELECT read FROM messages WHERE id = ?').get(id) as { read: number })
+      .read
+  }
+
   function auditRows(verb: string): AuditRow[] {
     return raw(db)
       .prepare(
@@ -167,6 +172,8 @@ describe('D-R177 F1-F4: orchestration.reply local branch fail-closed authorship'
     ).rejects.toMatchObject({ code: 'not_the_addressee' })
 
     expect(messageCount()).toBe(before)
+    // C1 (M1): a refusal must not consume the original — markAsRead must not have run.
+    expect(readFlag(originalId)).toBe(0)
     const rows = auditRows('reply')
     expect(rows.length).toBe(1)
     expect(rows[0].outcome).toBe('not_the_addressee')

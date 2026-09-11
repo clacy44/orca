@@ -2473,8 +2473,6 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         throw noReturnRoute(original, healthForNoReturnRoute(db, original.peer_link_device_id))
       }
 
-      db.markAsRead([original.id])
-
       if (workerDispatchId && federatedWorker) {
         const relay = db.enqueueFederationRelay({
           dispatchId: workerDispatchId,
@@ -2493,6 +2491,9 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
             payload: null
           })
         })
+        // C1 (M1): mark the original read only once the relay enqueue has actually happened —
+        // this branch returns before reaching the shared markAsRead below the local-insert path.
+        db.markAsRead([original.id])
         runtime.ensureOrchestrationFederationRelay(original.run_id)
         return {
           relay: {
@@ -2585,6 +2586,12 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
             : (runtime.getTerminalPaneKey(replyFrom) ?? undefined)
         replySenderHostId = runtime.getOrchestrationCompatibilityHostId() ?? 'local'
       }
+
+      // C1 (M1): mark the original read only immediately before the insert that commits this
+      // reply — every guard above (federated-worker relay excepted, which marks read itself on
+      // its own accepted path) can still throw, and a refused reply must leave the original
+      // unread rather than consuming it.
+      db.markAsRead([original.id])
 
       // Amendment A: the plain reply insert routes through the single write choke too.
       const insertedReply = db.insertGatedMessage({
