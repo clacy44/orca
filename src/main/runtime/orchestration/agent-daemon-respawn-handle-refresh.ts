@@ -17,6 +17,7 @@ import {
   recordLaunchInTransaction,
   setLaunchAgentId
 } from './agent-launch-sessions'
+import { carryForwardPrefs } from './agent-launch-prefs-carry-forward'
 
 export type RefreshAgentHandleAfterRespawnParams = {
   hostId: string
@@ -132,7 +133,13 @@ export function refreshAgentHandleAfterRespawn(
           sessionId: newest.session_id,
           launchGeneration: params.currentLaunchGeneration,
           executionHostId: newest.execution_host_id,
-          evidence: 'daemon_survived'
+          evidence: 'daemon_survived',
+          // [S10-21d Gate-3 fix, R110 follow-up] Same-pane handle refresh, not a new session —
+          // must never silently null out pref_model/pref_effort/pref_source (that dropped a
+          // chair's stored model/effort on every daemon-survived relaunch and defeated DEC-9's
+          // preserveUltracode). `carryForwardPrefs` echoes the row's own source, never inventing
+          // one (agent-launch-sessions.ts).
+          prefs: carryForwardPrefs(newest)
         })
         if (launchResult.ok) {
           // [S10-21d D-R162 M-1] Every sibling writer of a launch row binds agent_id

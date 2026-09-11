@@ -38,11 +38,8 @@ import {
   repointMailboxOnSuccession
 } from './agent-mailbox-repoint'
 import { writeAgentAudit } from './agent-audit-log'
-import {
-  newestLaunchForPane,
-  recordLaunchInTransaction,
-  setLaunchAgentId
-} from './agent-launch-sessions'
+import { newestLaunchForPane, setLaunchAgentId } from './agent-launch-sessions'
+import { recordSweepRecordLaunch } from './agent-launch-prefs-carry-forward'
 import { prunePaneRows, pruneGlobalRows } from './agent-launch-sessions-retention'
 import {
   evaluateRebindPredicate,
@@ -356,19 +353,20 @@ export function rebindRestoredPane(
     if (isAdmissionsOwnRow) {
       setLaunchAgentId(db, { seq: existingForPane.seq }, row.id)
     } else {
-      const launchResult = recordLaunchInTransaction(db, {
+      // [S10-21d Gate-3 fix follow-up] SAME session/agent continuing under a moved pane key, not
+      // a new session — `recordSweepRecordLaunch` carries the predecessor pane's own prefs
+      // forward (same rule, same reasoning, as the daemon-survived fix in
+      // agent-daemon-respawn-handle-refresh.ts), split out to a sibling module (max-lines).
+      const launchResult = recordSweepRecordLaunch(db, {
         hostId: params.hostId,
-        paneKey: params.newPaneKey,
-        agentType: 'claude',
+        newPaneKey: params.newPaneKey,
         sessionId: params.ticketPayload.sessionId,
         launchGeneration: params.launchGeneration,
         executionHostId: params.executionHostId,
-        evidence: 'sweep_record',
-        // [S10-21d b3] `predecessorPaneKey` is `string | null` on the shared ticket payload type
-        // now (the launcher's own unheld-session ticket) — evaluateRebindPredicate's own null
-        // guard above already refuses before this call is ever reached with a null value; `??
-        // undefined` keeps that guarantee type-sound here without a cast.
-        supersedePaneKey: params.ticketPayload.predecessorPaneKey ?? undefined
+        // [S10-21d b3] `string | null` on the shared ticket payload type (the launcher's own
+        // unheld-session ticket) — evaluateRebindPredicate's own null guard above already
+        // refuses before this call is ever reached with a null value.
+        predecessorPaneKey: params.ticketPayload.predecessorPaneKey ?? undefined
       })
       if (!launchResult.ok) {
         db.exec('ROLLBACK')
