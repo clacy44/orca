@@ -10,9 +10,15 @@
 // void" symptom this slice exists to remove.
 // S10-16 C5, R19.2: 'sending'/'refused'/'abandoned'/'cancelled' — the reply-outbox's own state
 // union, surfaced on a row that has a `peer_reply_outbox` entry (orca-runtime.ts's relay branch).
+// [S10-21f b4, R147] 'queued_starved' — distinct from 'queued_awaiting_pane': the withheld
+// record for this mailbox has crossed DELIVERY_STARVATION_BOUND_MS (orca-runtime.ts) — a Claude
+// pane that has been busy, withheld, continuously, past the bound, with no idle/turn-boundary
+// edge landing it. 'queued_awaiting_pane' covers every OTHER withheld disposition (ordinary
+// pane_busy still inside the bound, no_live_pane, blocked_modal, etc.) unchanged.
 export type OrchestrationDeliveryState =
   | 'queued'
   | 'queued_awaiting_pane'
+  | 'queued_starved'
   | 'pointed'
   | 'read'
   | 'relayed'
@@ -39,6 +45,12 @@ export type OrchestrationMessageDelivery = {
    *  the far side itself accepted this reply, a resolvability claim stronger than the plain
    *  relay mirror's peer_relayed_at. Additive/optional — every other branch omits it. */
   deliveryConfirmed?: true
+  /** [S10-21f b4, R147] Set only when state is 'queued_starved': how many whole minutes since
+   *  the withheld record's firstAt, and how many withhold attempts (recordWithheldDelivery
+   *  calls) have accumulated on it since. Lets the CLI render "for Nm (M attempts)" honestly
+   *  instead of a fixed "10m+" that stays wrong for a mailbox starved much longer. */
+  starvedMinutes?: number
+  starvedAttempts?: number
 }
 
 export type OrchestrationSentResult = {
