@@ -1,7 +1,7 @@
 // D6: Linux-runnable e2e of the Windows hook host's logic (via its TS mirror) against a real
 // AgentHookServer, plus a Windows-only spawn of the exact produced entry. See
 // windows-hook-host-mirror.ts and native/windows-hook-host/OrcaHookHost.cs.
-import { execFileSync } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -442,22 +442,35 @@ describe.skipIf(process.platform !== 'win32')('windows-only: the produced exe en
         throw new Error('orca-hook-host.exe not found — did build:native run before this test?')
       }
 
-      const stdout = execFileSync(hook.command, hook.args ?? [], {
-        env: {
-          ...process.env,
-          ORCA_AGENT_HOOK_PORT: env.ORCA_AGENT_HOOK_PORT,
-          ORCA_AGENT_HOOK_TOKEN: env.ORCA_AGENT_HOOK_TOKEN,
-          ORCA_AGENT_HOOK_ENV: env.ORCA_AGENT_HOOK_ENV,
-          ORCA_AGENT_HOOK_VERSION: env.ORCA_AGENT_HOOK_VERSION,
-          ORCA_PANE_KEY: paneKey,
-          ORCA_TAB_ID: 'tab-1',
-          ORCA_WORKTREE_ID: 'wt-1'
-        },
-        input: JSON.stringify({ hook_event_name: 'SessionStart', source: 'startup' }),
-        encoding: 'utf-8'
-      })
+      // Why: the exe POSTs to the AgentHookServer running on THIS worker's event loop. A sync
+      // spawn would block that loop, so the server could not answer until the exe gave up at
+      // its 1.5s timeout, and the pane would register only after the assertion below ran.
+      const { stdout, stderr } = await new Promise<{ stdout: string; stderr: string }>(
+        (resolve, reject) => {
+          const child = execFile(
+            hook.command,
+            hook.args ?? [],
+            {
+              env: {
+                ...process.env,
+                ORCA_AGENT_HOOK_PORT: env.ORCA_AGENT_HOOK_PORT,
+                ORCA_AGENT_HOOK_TOKEN: env.ORCA_AGENT_HOOK_TOKEN,
+                ORCA_AGENT_HOOK_ENV: env.ORCA_AGENT_HOOK_ENV,
+                ORCA_AGENT_HOOK_VERSION: env.ORCA_AGENT_HOOK_VERSION,
+                ORCA_PANE_KEY: paneKey,
+                ORCA_TAB_ID: 'tab-1',
+                ORCA_WORKTREE_ID: 'wt-1'
+              },
+              encoding: 'utf-8'
+            },
+            (error, out, err) => (error ? reject(error) : resolve({ stdout: out, stderr: err }))
+          )
+          child.stdin?.end(JSON.stringify({ hook_event_name: 'SessionStart', source: 'startup' }))
+        }
+      )
 
       expect(stdout).toBe('')
+      expect(stderr).toBe('')
       const snapshot = server.getStatusSnapshot()
       expect(snapshot.some((entry) => entry.paneKey === paneKey)).toBe(true)
     } finally {
