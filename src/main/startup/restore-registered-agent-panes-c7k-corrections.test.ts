@@ -85,6 +85,115 @@ describe('S10-21a C7k: decision-table corrections (Ruling 34 Addendum 28)', () =
     expect(noteRows).toHaveLength(1)
   })
 
+  // [S10-21e review C5, D-R176 test pin, additive] Same row-5/6 shape, pinned for the two
+  // launch-evidence values D-R176 cares about: a current-generation admitted row without a
+  // live occupant proceeds regardless of which evidence recorded it.
+  it('D-R176 test pin: launch row admitted THIS generation, evidence=daemon_survived, NO occupant — proceeds to row 8, sweep_note admitted_launch_without_live_pty, never skipped_leaf_held', async () => {
+    const db = rawDb()
+    const paneKey = 'tab1:00000000-0000-4000-8000-00000000a017'
+    insertAgent(db, {
+      id: 'agent-row5-daemon-survived',
+      display_name: 'chair-row5-daemon-survived',
+      pane_key: paneKey
+    })
+    recordLaunch(db, {
+      hostId: HOST_ID,
+      paneKey,
+      agentType: 'claude',
+      sessionId: 'sess-row5-daemon-survived',
+      launchGeneration: LAUNCH_GEN,
+      executionHostId: EXEC_HOST_ID,
+      evidence: 'daemon_survived'
+    })
+    const launchRow = orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!
+    const ensureAgentSession = vi.fn().mockResolvedValue({
+      terminal: {
+        handle: 'handle-row5-daemon-survived',
+        paneKey,
+        worktreeId: 'wt-1',
+        title: null,
+        executionHostId: EXEC_HOST_ID
+      },
+      disposition: 'created'
+    })
+    // Default fixture: no occupant at all.
+    const outcome = await restoreOneRegisteredPane(
+      baseDeps(orchestrationDb!, { ensureAgentSession }),
+      orchestrationDb!,
+      HOST_ID,
+      'agent-row5-daemon-survived',
+      null,
+      'wt-1',
+      launchRow,
+      emptyInventory()
+    )
+    expect(outcome.kind).toBe('layer1')
+    expect(ensureAgentSession).toHaveBeenCalled()
+    const heldRows = db
+      .prepare(
+        `SELECT * FROM agent_audit WHERE verb = 'sweep_skip' AND reason_code LIKE 'leaf_held:%'`
+      )
+      .all()
+    expect(heldRows).toHaveLength(0)
+    const noteRows = db
+      .prepare(`SELECT * FROM agent_audit WHERE verb = 'sweep_note' AND reason_code = ?`)
+      .all(`admitted_launch_without_live_pty seq=${launchRow.seq} evidence=daemon_survived`)
+    expect(noteRows).toHaveLength(1)
+  })
+
+  it('D-R176 test pin: launch row admitted THIS generation, evidence=host_restore, NO occupant — proceeds to row 8, sweep_note admitted_launch_without_live_pty, never skipped_leaf_held', async () => {
+    const db = rawDb()
+    const paneKey = 'tab1:00000000-0000-4000-8000-00000000a018'
+    insertAgent(db, {
+      id: 'agent-row5-host-restore',
+      display_name: 'chair-row5-host-restore',
+      pane_key: paneKey
+    })
+    recordLaunch(db, {
+      hostId: HOST_ID,
+      paneKey,
+      agentType: 'claude',
+      sessionId: 'sess-row5-host-restore',
+      launchGeneration: LAUNCH_GEN,
+      executionHostId: EXEC_HOST_ID,
+      evidence: 'host_restore'
+    })
+    const launchRow = orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!
+    const ensureAgentSession = vi.fn().mockResolvedValue({
+      terminal: {
+        handle: 'handle-row5-host-restore',
+        paneKey,
+        worktreeId: 'wt-1',
+        title: null,
+        executionHostId: EXEC_HOST_ID
+      },
+      disposition: 'created'
+    })
+    // Default fixture: no occupant at all.
+    const outcome = await restoreOneRegisteredPane(
+      baseDeps(orchestrationDb!, { ensureAgentSession }),
+      orchestrationDb!,
+      HOST_ID,
+      'agent-row5-host-restore',
+      null,
+      'wt-1',
+      launchRow,
+      emptyInventory()
+    )
+    expect(outcome.kind).toBe('layer1')
+    expect(ensureAgentSession).toHaveBeenCalled()
+    const heldRows2 = db
+      .prepare(
+        `SELECT * FROM agent_audit WHERE verb = 'sweep_skip' AND reason_code LIKE 'leaf_held:%'`
+      )
+      .all()
+    expect(heldRows2).toHaveLength(0)
+    const noteRows2 = db
+      .prepare(`SELECT * FROM agent_audit WHERE verb = 'sweep_note' AND reason_code = ?`)
+      .all(`admitted_launch_without_live_pty seq=${launchRow.seq} evidence=host_restore`)
+    expect(noteRows2).toHaveLength(1)
+  })
+
   it('row 5/6 correction (C7k, Ruling 34 Addendum 28, item 4): launch row admitted THIS generation, an occupant exists but its pty is ABSENT from the round — proceeds to row 10, never skipped_leaf_held', async () => {
     const db = rawDb()
     const paneKey = 'tab1:00000000-0000-4000-8000-00000000a016'
