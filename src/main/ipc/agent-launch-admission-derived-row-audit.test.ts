@@ -79,6 +79,7 @@ describe('S10-21c B-final F5, D-R159 finding 5: derived registered row supersess
       launchGeneration: 'gen-1',
       notice: () => {},
       contestedLineage: () => {},
+      findConnectedPtyForPane: () => false,
       ...overrides
     }
   }

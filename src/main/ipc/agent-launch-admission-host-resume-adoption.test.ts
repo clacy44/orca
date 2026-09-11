@@ -47,6 +47,7 @@ describe('D-R163 M3 negatives 3/4: HOST_RESUME null-predecessor success, and hos
       launchGeneration: 'gen-1',
       notice: () => {},
       contestedLineage: () => {},
+      findConnectedPtyForPane: () => false,
       ...overrides
     }
   }
