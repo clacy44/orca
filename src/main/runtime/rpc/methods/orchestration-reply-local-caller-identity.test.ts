@@ -45,6 +45,7 @@ function raw(db: OrchestrationDb) {
         prepare: (sql: string) => {
           get: (...a: unknown[]) => unknown
           all: (...a: unknown[]) => unknown[]
+          run: (...a: unknown[]) => unknown
         }
       }
     }
