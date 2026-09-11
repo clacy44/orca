@@ -177,6 +177,9 @@ describe('D-R177 F1-F4: orchestration.reply local branch fail-closed authorship'
     const rows = auditRows('reply')
     expect(rows.length).toBe(1)
     expect(rows[0].outcome).toBe('not_the_addressee')
+    // C2: audit rows carry the resolved caller's identity, not blanks.
+    expect(rows[0].agent_id).toBe(agentAId)
+    expect(rows[0].actor_pane_key).toBe(PANE_A)
   })
 
   it('case 2: attribution — a reply to a message addressed to you stamps YOUR sender fields', async () => {
@@ -241,6 +244,9 @@ describe('D-R177 F1-F4: orchestration.reply local branch fail-closed authorship'
     const rows = auditRows('reply')
     expect(rows.length).toBe(1)
     expect(rows[0].outcome).toBe('no_pane_identity')
+    // C2: no attested pane exists at all — nothing to name.
+    expect(rows[0].agent_id).toBeNull()
+    expect(rows[0].actor_pane_key).toBeNull()
   })
 
   it('case 4: attested-but-unregistered caller refuses no_registered_identity', async () => {
@@ -275,6 +281,47 @@ describe('D-R177 F1-F4: orchestration.reply local branch fail-closed authorship'
     const rows = auditRows('reply')
     expect(rows.length).toBe(1)
     expect(rows[0].outcome).toBe('no_registered_identity')
+    // C2: the pane IS attested (unlike case 3) — the audit must carry that attested pane key
+    // even though no agent row exists to name.
+    expect(rows[0].agent_id).toBeNull()
+    expect(rows[0].actor_pane_key).toBe(PANE_UNREGISTERED)
+  })
+
+  it('case 6: derived caller is refused derived_agent_unaddressable at the source, with audit', async () => {
+    const originalId = 'msg_derived0000001'
+    db.insertGatedMessage({
+      id: originalId,
+      from: `agent:${agentBId}`,
+      to: `agent:${agentAId}`,
+      subject: 'from B to A',
+      body: 'hi A',
+      runId: 'run_test_local',
+      verb: 'send',
+      threadId: null
+    })
+    const before = messageCount()
+    // Derive a row for PANE_A's caller by minting it via `agents find`-style derivation rather
+    // than `agents register` — simplest reliable way to get derived === 1: mark the already
+    // registered agent-a row as derived directly.
+    raw(db).prepare('UPDATE agents SET derived = 1 WHERE id = ?').run(agentAId)
+
+    await expect(
+      call(
+        'orchestration.reply',
+        { id: originalId, body: 'reply from a derived row' },
+        {
+          runtime,
+          orchestrationCompatibilityEvidence: { terminalHandle: 'term_a', paneKey: PANE_A }
+        }
+      )
+    ).rejects.toMatchObject({ code: 'derived_agent_unaddressable' })
+
+    expect(messageCount()).toBe(before)
+    const rows = auditRows('reply')
+    expect(rows.length).toBe(1)
+    expect(rows[0].outcome).toBe('derived_agent_unaddressable')
+    expect(rows[0].agent_id).toBe(agentAId)
+    expect(rows[0].actor_pane_key).toBe(PANE_A)
   })
 
   it('case 5: scope guard — a run:/term_-addressed original still succeeds with no evidence, unchanged', async () => {

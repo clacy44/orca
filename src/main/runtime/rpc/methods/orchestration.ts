@@ -2528,6 +2528,16 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
       let replySenderHostId: string
       if (original.to_handle.startsWith('agent:') || original.from_handle.startsWith('agent:')) {
         const replyHostId = runtime.getOrchestrationCompatibilityHostId() ?? 'local'
+        // C2: attest BEFORE resolveCallerAgent (smaller change than threading a data.paneKey
+        // through OrchestrationError, and scoped to this one call site rather than
+        // orchestration-caller-identity.ts's shared throw, which every other resolveCallerAgent
+        // caller also relies on) — solely so the no_registered_identity audit below can carry
+        // the attested pane key: the pane IS attested at that point (unlike no_pane_identity,
+        // where no attestation exists to name), and the prior code always audited it as null.
+        const replyPreAttested = runtime.verifyOrchestrationCompatibilityCaller(
+          orchestrationCompatibilityEvidence,
+          { currentRuntimeLaunchSufficient: true }
+        )
         let caller: ReturnType<typeof resolveCallerAgent>
         try {
           caller = resolveCallerAgent(db, runtime, orchestrationCompatibilityEvidence)
@@ -2535,7 +2545,8 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           if (err instanceof OrchestrationError) {
             db.writeAgentAudit({
               agentId: null,
-              actorPaneKey: null,
+              actorPaneKey:
+                err.code === 'no_registered_identity' ? (replyPreAttested?.paneKey ?? null) : null,
               actorHostId: replyHostId,
               verb: 'reply',
               outcome: err.code,
@@ -2543,6 +2554,30 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
             })
           }
           throw err
+        }
+        // C2: a derived row (restart-minted, never `orca agents register`ed) is refused at the
+        // source rather than surfacing as the misleading not_the_addressee/attribution errors
+        // further down — mirrors requireAddressableAgentRecipient's own derived check for the
+        // RECIPIENT side, applied here to the SENDER side.
+        const callerRow = db.getAgentById(caller.id)
+        if (callerRow?.derived === 1) {
+          db.writeAgentAudit({
+            agentId: caller.id,
+            actorPaneKey: caller.pane_key,
+            actorHostId: caller.host_id,
+            verb: 'reply',
+            outcome: 'derived_agent_unaddressable',
+            reasonCode: null
+          })
+          throw new OrchestrationError(
+            'derived_agent_unaddressable',
+            `Agent ${callerRow.display_name} is not registered — agent:${caller.id} has no reader.`,
+            {
+              nextSteps: [
+                'orca agents register --name <slug> --role "<your role>" (run on this pane to make it addressable)'
+              ]
+            }
+          )
         }
         replyFrom = `agent:${caller.id}`
         // F2: a reply to your OWN latest message on the thread is not a reply — refuse it
@@ -2558,10 +2593,11 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           })
           throw new OrchestrationError(
             'not_the_addressee',
-            `You authored the latest message on this thread (${params.id}); reply to a specific message with a different addressee, or send directly.`,
+            `You authored message ${params.id}; a reply is addressed to its sender.`,
             {
               nextSteps: [
-                'you authored the latest message on this thread — reply to a specific message with orca agents reply --id <msg>, or send directly'
+                'orca agents reply --id <a message from the other agent>',
+                'orca orchestration send --to agent:<their-id> --thread-id <thread> --subject "…" --body "…"'
               ]
             }
           )
