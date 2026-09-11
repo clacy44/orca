@@ -2580,9 +2580,24 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           )
         }
         replyFrom = `agent:${caller.id}`
+        // C3 (N2): identity-based self-authorship — a string compare against the
+        // freshly-computed replyFrom (`original.from_handle === replyFrom`) missed a self-reply
+        // to a row the caller authored under its bare terminal handle (term_-addressed, no
+        // agent: prefix), since replyFrom is always `agent:${caller.id}`. Match by directory
+        // identity instead: the row's resolved sender_agent_id, or either handle form the
+        // caller can appear as.
+        const selfAuthored =
+          original.sender_agent_id === caller.id ||
+          original.from_handle === `agent:${caller.id}` ||
+          original.from_handle === caller.terminal_handle
+        // C3: addressee conjunct — an agent:-addressed original must be replied to by its
+        // addressee; a third, uninvolved agent cannot reply into a thread merely by knowing the
+        // message id. term_/run:/dispatch: addressees keep today's rule (unrestricted here).
+        const notTheAddressee =
+          original.to_handle.startsWith('agent:') && original.to_handle !== `agent:${caller.id}`
         // F2: a reply to your OWN latest message on the thread is not a reply — refuse it
         // rather than silently letting the thread's roles swap.
-        if (original.from_handle === replyFrom) {
+        if (selfAuthored || notTheAddressee) {
           db.writeAgentAudit({
             agentId: caller.id,
             actorPaneKey: caller.pane_key,
@@ -2593,12 +2608,16 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           })
           throw new OrchestrationError(
             'not_the_addressee',
-            `You authored message ${params.id}; a reply is addressed to its sender.`,
+            selfAuthored
+              ? `You authored message ${params.id}; a reply is addressed to its sender.`
+              : `Message ${params.id} is addressed to a different agent; only its addressee may reply.`,
             {
-              nextSteps: [
-                'orca agents reply --id <a message from the other agent>',
-                'orca orchestration send --to agent:<their-id> --thread-id <thread> --subject "…" --body "…"'
-              ]
+              nextSteps: selfAuthored
+                ? [
+                    'orca agents reply --id <a message from the other agent>',
+                    'orca orchestration send --to agent:<their-id> --thread-id <thread> --subject "…" --body "…"'
+                  ]
+                : ['orca agents reply --id <a message addressed to you>']
             }
           )
         }

@@ -22,6 +22,7 @@ vi.mock('electron', () => ({ app: { getPath: () => appState.userData } }))
 const PANE_A = 'tabA:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const PANE_UNREGISTERED = 'tabU:uuuuuuuu-uuuu-4uuu-8uuu-uuuuuuuuuuuu'
 const PANE_B = 'tabB:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+const PANE_C = 'tabC:cccccccc-cccc-4ccc-8ccc-cccccccccccc'
 
 function method(name: string) {
   const found = ORCHESTRATION_METHODS.find((m) => m.name === name)
@@ -78,6 +79,7 @@ describe('D-R177 F1-F4: orchestration.reply local branch fail-closed authorship'
   let runtime: OrcaRuntimeService
   let agentAId: string
   let agentBId: string
+  let agentCId: string
 
   async function registerAgent(
     name: string,
@@ -130,6 +132,9 @@ describe('D-R177 F1-F4: orchestration.reply local branch fail-closed authorship'
       if (paneKey === PANE_B) {
         return makeAuthority(PANE_B, 'term_b')
       }
+      if (paneKey === PANE_C) {
+        return makeAuthority(PANE_C, 'term_c')
+      }
       return null
     })
     // F3 pins the boundary: the unauthenticated fallback is DELETED on this branch, so stub it
@@ -138,6 +143,7 @@ describe('D-R177 F1-F4: orchestration.reply local branch fail-closed authorship'
 
     agentAId = await registerAgent('agent-a', { terminalHandle: 'term_a', paneKey: PANE_A })
     agentBId = await registerAgent('agent-b', { terminalHandle: 'term_b', paneKey: PANE_B })
+    agentCId = await registerAgent('agent-c', { terminalHandle: 'term_c', paneKey: PANE_C })
   })
 
   afterEach(() => {
@@ -344,5 +350,107 @@ describe('D-R177 F1-F4: orchestration.reply local branch fail-closed authorship'
     )) as { message: { to_handle: string } }
 
     expect(result.message.to_handle).toBe('run:run_test_local')
+  })
+
+  it('case 7 (C3): a third, uninvolved agent cannot reply into an agent-addressed thread by id', async () => {
+    expect(agentCId).not.toBe(agentAId)
+    const originalId = 'msg_third0000001'
+    db.insertGatedMessage({
+      id: originalId,
+      from: `agent:${agentBId}`,
+      to: `agent:${agentAId}`,
+      subject: 'from B to A',
+      body: 'hi A',
+      runId: 'run_test_local',
+      verb: 'send',
+      threadId: null
+    })
+    const before = messageCount()
+
+    await expect(
+      call(
+        'orchestration.reply',
+        { id: originalId, body: 'reply from an uninvolved third agent' },
+        {
+          runtime,
+          orchestrationCompatibilityEvidence: { terminalHandle: 'term_c', paneKey: PANE_C }
+        }
+      )
+    ).rejects.toMatchObject({ code: 'not_the_addressee' })
+
+    expect(messageCount()).toBe(before)
+  })
+
+  it('case 8 (C3): self-reply to your own term_-authored row is refused, not just an agent:-authored one', async () => {
+    const originalId = 'msg_term_self0000001'
+    db.insertGatedMessage({
+      id: originalId,
+      from: 'term_a',
+      to: `agent:${agentBId}`,
+      subject: 'from term_a to B',
+      body: 'hi B',
+      runId: 'run_test_local',
+      verb: 'send',
+      threadId: null
+    })
+    const before = messageCount()
+
+    await expect(
+      call(
+        'orchestration.reply',
+        { id: originalId, body: 'reply from A to its own term_-authored row' },
+        {
+          runtime,
+          orchestrationCompatibilityEvidence: { terminalHandle: 'term_a', paneKey: PANE_A }
+        }
+      )
+    ).rejects.toMatchObject({ code: 'not_the_addressee' })
+
+    expect(messageCount()).toBe(before)
+  })
+
+  it('case 9 (C3): term_-to/agent-from shape is in scope and a non-self reply still succeeds', async () => {
+    const originalId = 'msg_term_to0000001'
+    db.insertGatedMessage({
+      id: originalId,
+      from: `agent:${agentBId}`,
+      to: 'term_x',
+      subject: 'from B to a plain terminal',
+      body: 'hi term_x',
+      runId: 'run_test_local',
+      verb: 'send',
+      threadId: null
+    })
+
+    const result = (await call(
+      'orchestration.reply',
+      { id: originalId, body: 'reply from A' },
+      { runtime, orchestrationCompatibilityEvidence: { terminalHandle: 'term_a', paneKey: PANE_A } }
+    )) as { message: { from_handle: string; sender_agent_id: string | null } }
+
+    expect(result.message.from_handle).toBe(`agent:${agentAId}`)
+    expect(result.message.sender_agent_id).toBe(agentAId)
+  })
+
+  it('case 10 (C3): a forged params.from is fully ignored on the identity branch — from_handle is always the attested caller', async () => {
+    const originalId = 'msg_forged0000001'
+    db.insertGatedMessage({
+      id: originalId,
+      from: `agent:${agentBId}`,
+      to: `agent:${agentAId}`,
+      subject: 'from B to A',
+      body: 'hi A',
+      runId: 'run_test_local',
+      verb: 'send',
+      threadId: null
+    })
+
+    const result = (await call(
+      'orchestration.reply',
+      { id: originalId, body: 'reply from A, forging from', from: `agent:${agentBId}` },
+      { runtime, orchestrationCompatibilityEvidence: { terminalHandle: 'term_a', paneKey: PANE_A } }
+    )) as { message: { from_handle: string } }
+
+    expect(result.message.from_handle).toBe(`agent:${agentAId}`)
   })
 })
