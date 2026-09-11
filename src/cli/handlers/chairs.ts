@@ -35,8 +35,15 @@ type ChairsRestoreResultRow =
       autoRestoreArmed: boolean
       ok: boolean
     }
-  | { name: string; kind: 'refuse'; reason: string; holderPaneKey: string; ok: false }
-  | { name: string; kind: 'error'; reason: string; ok: false }
+  | {
+      name: string
+      kind: 'refuse'
+      reason: string
+      holderPaneKey: string
+      ok: false
+      detail?: string
+    }
+  | { name: string; kind: 'error'; reason: string; ok: false; detail?: string }
 
 export type ChairsManifestEntry = {
   name: string
@@ -95,10 +102,12 @@ function formatRemote(plan: ChairsRestorePlan): string[] {
 
 function formatRow(row: ChairsRestoreResultRow): string {
   if (row.kind === 'refuse') {
-    return `${row.name}  REFUSED  ${row.reason} (held on ${row.holderPaneKey})`
+    const detail = row.detail ? ` — ${row.detail}` : ''
+    return `${row.name}  REFUSED  ${row.reason} (held on ${row.holderPaneKey})${detail}`
   }
   if (row.kind === 'error') {
-    return `${row.name}  ERROR  ${row.reason}`
+    const detail = row.detail ? ` — ${row.detail}` : ''
+    return `${row.name}  ERROR  ${row.reason}${detail}`
   }
   const status = row.ok ? 'ok' : 'SHORT'
   return (

@@ -36,7 +36,11 @@ import {
 } from '../../shared/terminal-output-side-effects'
 import { getDecorativeAgentTitleSignature } from '../../shared/agent-decorative-title-signature'
 import { createCommandCodeOutputStatusDetector } from '../../shared/command-code-output-status'
-import { SettleObservations, type IncumbentEvidence } from './incumbent-death'
+import {
+  SettleObservations,
+  holderAbsenceSettledNotLive,
+  type IncumbentEvidence
+} from './incumbent-death'
 import type { ControllerInventory } from './orchestration/agent-process-identity'
 import type {
   TerminalSideEffectBatch,
@@ -1547,6 +1551,12 @@ type RuntimePtyWorktreeRecord = {
 
 type LiveReportOpts = { excludePaneKey?: string } // [S10-21d b3, DEC-3 D]
 type LiveReportCheckFn = (sessionId: string, opts?: LiveReportOpts) => boolean
+// [S10-21f b2-10q R143] Mirrors LiveReportCheckFn's pair, returning the reporter panes rather
+// than a collapsed boolean.
+type LiveReportPanesCheckFn = (
+  sessionId: string,
+  opts?: LiveReportOpts
+) => { paneKey: string; executionHostId: string }[]
 type ChairRestoreRequest = Parameters<typeof requestChairRestoreImpl>[1] // [b3b M4]
 type ChairRestoreResult = ReturnType<typeof requestChairRestoreImpl>
 
@@ -3267,6 +3277,7 @@ export class OrcaRuntimeService {
   // minted and redeemed entirely in-process (INV-P-021).
   private readonly restoreTickets = new RestoreTicketRegistry()
   private liveReportCheck: LiveReportCheckFn | null = null // [S10-21d b3, DEC-3 D]
+  private liveReportPanesCheck: LiveReportPanesCheckFn | null = null // [S10-21f b2-10q R143]
   // S10-16 C1 review F3: the device registry's R1.4 legacy-sweep audit rows have no sink until the
   // orchestration DB attaches (device-registry-load.ts runs before it exists) — RuntimeRpcServer
   // registers its DeviceRegistry here once pairing init succeeds, and this flushes it exactly once
@@ -3380,6 +3391,10 @@ export class OrcaRuntimeService {
   // iterates in insertion order, so the first entry is always the oldest.
   private exitedPtyIdsThisGeneration = new Set<string>()
   private readonly incumbentSettleObservations = new SettleObservations()
+  // [S10-21f b2b-10q M2] A SIBLING clock, not a reuse of the instance above — keyed by holder
+  // pane, driven by D2 inventory-absence rather than D3 leaf liveness (see
+  // `holderAbsenceSettledNotLive`'s own doc for why the two signals cannot share one clock).
+  private readonly holderAbsenceSettleObservations = new SettleObservations()
   private recentPtyPathCandidatesById = new Map<string, string[]>()
   // Why: candidates only feed mobile file-tap provenance; desktop-only
   // sessions skip the 3-regex extraction on every PTY chunk until a
@@ -14149,6 +14164,26 @@ export class OrcaRuntimeService {
     }
   }
 
+  /** [S10-21f b2b-10q M2] Thin wrapper over the module-level pure function, holding this
+   * runtime's own `holderAbsenceSettleObservations` clock (never `incumbentSettleObservations`
+   * above — see that field's own comment for why the two signals cannot share a Map). */
+  holderSettledByAbsence(
+    holderPaneKey: string,
+    inventoryRoundNonNull: boolean,
+    d2Inventory: 'present' | 'absent' | 'unknown',
+    holderHasConnectedPty: boolean,
+    now: number = Date.now()
+  ): boolean {
+    return holderAbsenceSettledNotLive(
+      this.holderAbsenceSettleObservations,
+      holderPaneKey,
+      inventoryRoundNonNull,
+      d2Inventory,
+      holderHasConnectedPty,
+      now
+    )
+  }
+
   /** [S10-21a C7i, Ruling 34 Addendum 27] ONE controller-inventory round for the whole restore
    * sweep — every candidate is judged from it, never a per-candidate round
    * (`collectIncumbentEvidence`'s own round above stays for every OTHER caller). Retries once on
@@ -14188,6 +14223,15 @@ export class OrcaRuntimeService {
   } // [S10-21d b3 DEC-3 D]
   hasLiveHookReportOfSession(sessionId: string, opts?: LiveReportOpts): boolean | null {
     return this.liveReportCheck ? this.liveReportCheck(sessionId, opts) : null // [b3b M1/M5]
+  }
+  setLiveReportPanesForSessionCheck(check: LiveReportPanesCheckFn): void {
+    this.liveReportPanesCheck = check
+  } // [S10-21f b2-10q R143]
+  liveReportPanesForSession(
+    sessionId: string,
+    opts?: LiveReportOpts
+  ): { paneKey: string; executionHostId: string }[] | null {
+    return this.liveReportPanesCheck ? this.liveReportPanesCheck(sessionId, opts) : null
   }
   requestChairRestore(request: ChairRestoreRequest): ChairRestoreResult {
     return requestChairRestoreImpl({ runtime: this }, request)
@@ -33541,6 +33585,8 @@ export class OrcaRuntimeService {
     const droppedPaneKey = this.ptysById.get(ptyId)?.paneKey
     if (droppedPaneKey) {
       this.incumbentSettleObservations.forget(droppedPaneKey)
+      // [S10-21f b2b-10q M2] The sibling absence-clock needs the same final-removal cleanup.
+      this.holderAbsenceSettleObservations.forget(droppedPaneKey)
     }
     this.ptysById.delete(ptyId)
     this.recentPtyOutputById.delete(ptyId)

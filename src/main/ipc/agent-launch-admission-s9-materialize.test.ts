@@ -57,7 +57,8 @@ describe('S10-21d b6, R119 fix: desktop fixture — 3 registered panes + 1 unreg
       executionHostId: HOST_ID,
       launchGeneration: 'gen-1',
       notice: () => {},
-      contestedLineage: () => {}
+      contestedLineage: () => {},
+      findConnectedPtyForPane: () => false
     }
   }
 

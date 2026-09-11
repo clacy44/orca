@@ -57,6 +57,11 @@ export type AgentLaunchAdmissionContext = {
     reportedSessionId: string,
     arm: 'self_resume' | 'caller_resume' | 'host_minted'
   ) => void
+  /** [S10-21f b2-10q, R143's sibling reason-code split] SYNC — the caller_resume collision arm
+   * (agent-launch-admission.ts ~:327) reads this to tell a live holder pane apart from a
+   * dead-looking one for its refusal's reason code, never for admissibility itself (no behaviour
+   * change — the arm still refuses `unrecorded` either way). */
+  findConnectedPtyForPane: (paneKey: string) => boolean
 }
 
 /** [S10-21a C7f, D-R114 fix 1] The admission outcome pty.ts's post-spawn-commit gate needs at

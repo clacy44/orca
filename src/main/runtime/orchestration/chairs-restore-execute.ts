@@ -22,9 +22,9 @@ export type RequestChairRestoreOutcome =
       paneKey: string
       agentId: string
       holderPaneKey: string | null
-      adoptionSignal: 'IDENTITY' | 'D1' | 'GEN_ABSENCE' | null
+      adoptionSignal: 'IDENTITY' | 'D1' | 'GEN_ABSENCE' | 'SAME_GEN_PTY_ABSENCE' | null
     }
-  | { ok: false; reason: string; holderPaneKey?: string }
+  | { ok: false; reason: string; holderPaneKey?: string; detail?: string }
 
 /** Everything the executor needs from the host — real `OrchestrationDb` + `OrcaRuntimeService`
  * methods in production, faked in `chairs-restore-execute.test.ts`. Kept narrow (method
@@ -76,8 +76,15 @@ export type ChairsRestoreVerificationRow = {
 
 export type ChairsRestoreResultRow =
   | ChairsRestoreVerificationRow
-  | { name: string; kind: 'refuse'; reason: string; holderPaneKey: string; ok: false }
-  | { name: string; kind: 'error'; reason: string; ok: false }
+  | {
+      name: string
+      kind: 'refuse'
+      reason: string
+      holderPaneKey: string
+      ok: false
+      detail?: string
+    }
+  | { name: string; kind: 'error'; reason: string; ok: false; detail?: string }
 
 export type ChairsRestoreExecutionSummary = {
   plan: ChairsRestorePlan
@@ -207,7 +214,13 @@ export async function executeChairsRestorePlan(
       effort: entry.effort
     })
     if (!outcome.ok) {
-      rows.push({ name: action.name, kind: 'error', reason: outcome.reason, ok: false })
+      rows.push({
+        name: action.name,
+        kind: 'error',
+        reason: outcome.reason,
+        ok: false,
+        ...(outcome.detail ? { detail: outcome.detail } : {})
+      })
       exitNonZero = true
       continue
     }

@@ -891,6 +891,40 @@ export class AgentHookServer {
     return false
   }
 
+  /** [S10-21f b2-10q R143] Read-only: every pane whose last-known hook report names `sessionId`
+   * as its provider session, under the SAME recency rule as `hasLiveReportOfSession` (this
+   * function's boolean collapse loses which pane the report came from — dead-holder-adoption
+   * needs the reporter's own pane/host to tell a same-box report from a genuinely remote one).
+   * `executionHostId` is built the same way as `buildStatusChangeNotification`'s provider-session
+   * rows (~:1135-1136). */
+  liveReportPanesForSession(
+    sessionId: string,
+    opts?: { excludePaneKey?: string }
+  ): { paneKey: string; executionHostId: string }[] {
+    const result: { paneKey: string; executionHostId: string }[] = []
+    for (const [paneKey, entry] of this.state.lastStatusByPaneKey.entries()) {
+      if (opts?.excludePaneKey !== undefined && paneKey === opts.excludePaneKey) {
+        continue
+      }
+      const enriched = entry as EnrichedAgentHookEventPayload
+      if (
+        (enriched.restoredUnconfirmed || enriched.retainedForLiveness) &&
+        enriched.receivedAt < Date.now() - AGENT_STATUS_STALE_AFTER_MS
+      ) {
+        continue
+      }
+      if (enriched.providerSession?.id === sessionId) {
+        result.push({
+          paneKey,
+          executionHostId: enriched.connectionId
+            ? toSshExecutionHostId(enriched.connectionId)
+            : LOCAL_EXECUTION_HOST_ID
+        })
+      }
+    }
+    return result
+  }
+
   getStatusSnapshotForPane(paneKey: string): AgentStatusIpcPayload[] {
     const entry = this.state.lastStatusByPaneKey.get(paneKey)
     return entry ? [toAgentStatusIpcPayload(entry as EnrichedAgentHookEventPayload)] : []

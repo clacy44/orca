@@ -83,6 +83,7 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
       launchGeneration: 'gen-1',
       notice: () => {},
       contestedLineage: () => {},
+      findConnectedPtyForPane: () => false,
       ...overrides
     }
   }
@@ -793,7 +794,11 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
       () => db,
       opts({ command: `claude --resume ${VICTIM_SESSION_ID}` }),
       CALLER,
-      ctx({ notice: (paneKey, verb, reasonCode) => notices.push({ paneKey, verb, reasonCode }) })
+      // [S10-21f b2-10q] The victim pane has a connected pty — LIVE reason code, per this test's own name.
+      ctx({
+        notice: (paneKey, verb, reasonCode) => notices.push({ paneKey, verb, reasonCode }),
+        findConnectedPtyForPane: (paneKey) => paneKey === 'tab1:leaf-victim'
+      })
     )
     // The spawn is NOT refused — base parity: the collision costs the launch its record, not the
     // launch itself.
@@ -822,6 +827,9 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
     expect(auditRow.outcome).toBe('admitted')
     expect(auditRow.reason_code).toBe('resume_target_owned_by_another_pane')
   })
+
+  // [MAX-LINES] Dead-holder sibling of the split above: agent-launch-admission-resume-target-
+  // owner-liveness.test.ts.
 
   it('S2 ADDENDUM: a host-resume admission whose command names a DIFFERENT session id is REFUSED (restore_selector_mismatch) — no row, no spawnable admission', async () => {
     const db = freshDb()

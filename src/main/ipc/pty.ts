@@ -946,7 +946,12 @@ export function launchAdmissionBundle(
             })
           }
         }
-      }
+      },
+      // [S10-21f b2-10q, R143's sibling reason-code split] Same typeof guard as `getDb` above.
+      findConnectedPtyForPane: (paneKey) =>
+        typeof runtime?.findConnectedPtyForPane === 'function'
+          ? runtime.findConnectedPtyForPane(paneKey) !== undefined
+          : false
     }
   }
 }

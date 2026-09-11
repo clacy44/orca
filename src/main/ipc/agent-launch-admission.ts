@@ -324,7 +324,18 @@ export async function admitAgentLaunch(
       // audit row plus the pane notice — it just lets the spawn proceed instead of failing it.
       // Scoping this to a genuinely LIVE holder is deferred to R84 (next train).
       if (!recorded.ok) {
-        return unrecorded('resume_target_owned_by_another_pane')
+        // [S10-21f b2-10q, R143's sibling reason-code split] Display-only split — no behaviour
+        // change (still `unrecorded`, spawn still proceeds either way): a connected pty on the
+        // current holder distinguishes "genuinely live" from "owned by a pane without a live
+        // pty" for the operator, rather than one reason code covering both.
+        const holderPaneKey = db.paneHoldingSession(ctx.hostId, x)
+        const holderHasLivePty =
+          holderPaneKey !== undefined && ctx.findConnectedPtyForPane(holderPaneKey)
+        return unrecorded(
+          holderHasLivePty
+            ? 'resume_target_owned_by_another_pane'
+            : 'resume_target_owned_by_pane_without_live_pty'
+        )
       }
       // [S10-21c B3b, D-R149 MEDIUM 1] The same contested-lineage signal SELF_RESUME(caller)
       // raises above (:326) — this arm writes to the pane too, and a registered chair's pane

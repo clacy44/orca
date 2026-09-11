@@ -51,6 +51,7 @@ describe('D-R163 H1/H2 LOW: checkHostResumeHolderUnmoved (the pane-lock re-check
       launchGeneration: 'gen-1',
       notice: () => {},
       contestedLineage: () => {},
+      findConnectedPtyForPane: () => false,
       ...overrides
     }
   }

@@ -12,6 +12,14 @@ import type { AgentAliveResult } from './orchestration/agent-process-identity'
 
 export const REBIND_SETTLE_MS = 10_000
 
+/** [R142] D3's settle predicate alone, for a caller that needs it even when
+ * `resolveIncumbentDeath` returns before D3 is consulted (e.g. an IDENTITY verdict). */
+export function d3SettledNotLive(d3: IncumbentEvidence['d3']): boolean {
+  return (
+    d3.firstObservedNotLiveAt !== null && d3.now - d3.firstObservedNotLiveAt >= REBIND_SETTLE_MS
+  )
+}
+
 export type IncumbentEvidence = {
   paneKey: string
   ptyId?: string
@@ -145,4 +153,41 @@ export class SettleObservations {
   forget(paneKey: string): void {
     this.firstNotLiveAtByPaneKey.delete(paneKey)
   }
+}
+
+/** [S10-21f b2b-10q M2] The SAME-generation settle proof, made honest on BOTH hosts: D3's
+ * `firstObservedNotLiveAt` (above) derives from `leaf.lastAgentStatusObservedLive`, which on a
+ * headless `serve` process is always false (no window ever publishes a leaf record there — the
+ * runtime's `leaves` map is written only by `syncWindowGraph`) — so the settle window it measured
+ * was really "time since first look", proving nothing about the holder's actual liveness. This
+ * sibling clock (reusing `SettleObservations`'s own Map, keyed by holder pane, NOT the D3
+ * instance above — a different signal needs a different clock) is driven instead by the
+ * AUTHORITATIVE D2 inventory-absence proof the sweep already takes: it clocks in the moment a
+ * NON-NULL round reads the holder's pty absent AND no connected pty exists on the holder pane,
+ * and clocks back out (clears) the moment either turns up present — behaving identically whether
+ * or not any window has ever synced a leaf for this pane. A null round leaves the clock
+ * untouched (never guessed either way): the caller passes `inventoryRoundNonNull` explicitly
+ * rather than this function inferring "no round" from the tri-state alone. */
+export function holderAbsenceSettledNotLive(
+  observations: SettleObservations,
+  paneKey: string,
+  inventoryRoundNonNull: boolean,
+  d2Inventory: 'present' | 'absent' | 'unknown',
+  holderHasConnectedPty: boolean,
+  now: number
+): boolean {
+  const absentNow = d2Inventory === 'absent' && !holderHasConnectedPty
+  if (inventoryRoundNonNull) {
+    if (absentNow) {
+      // `observe`'s own `liveNow` parameter: false clocks the settle window in (only if not
+      // already running), matching D3's own "first of two+ not-live readings" semantics exactly.
+      observations.observe(paneKey, false, now)
+    } else if (d2Inventory === 'present' || holderHasConnectedPty) {
+      observations.observe(paneKey, true, now)
+    }
+    // d2Inventory === 'unknown' with no connected pty: neither absence nor presence is proven —
+    // the clock is left exactly as it was, never guessed either way.
+  }
+  const firstAbsentAt = observations.firstNotLiveAt(paneKey)
+  return absentNow && firstAbsentAt !== null && now - firstAbsentAt >= REBIND_SETTLE_MS
 }

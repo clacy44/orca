@@ -5,13 +5,13 @@ import type { OrcaRuntimeService } from '../orca-runtime'
 import type { RuntimeEnsureAgentSessionResult } from '../../../shared/agent-session-host-authority'
 import type { AgentRow } from './types'
 import { decideEarlyRows } from './restore-sweep-decision'
-import { collectSweepEvidence } from './restore-sweep-evidence'
+import { resolveHolderIncumbentEvidence } from './chair-restore-holder-evidence'
 import { resolveHolderAdoption, type HolderAdoptionRefusalReason } from './dead-holder-adoption'
+import { liveReportStandsElsewhere } from './live-report-liveness'
 import { registerAgentForPane } from './register-agent-for-pane'
 import { isRestoreSweepLockHeld } from '../restore-sweep-lock'
 import { resolveResumeTranscript } from '../../startup/resolve-resume-transcript'
 import { preflightResumeTranscript } from '../../ipc/agent-launch-admission-support'
-import { resolveIncumbentDeath, type IncumbentVerdict } from '../incumbent-death'
 import { parsePaneKey } from '../../../shared/stable-pane-id'
 import { LaunchAdmissionRefusedError } from '../../ipc/agent-launch-admission-errors'
 import {
@@ -50,11 +50,11 @@ export type ChairRestoreResult =
       paneKey: string
       agentId: string
       holderPaneKey: string | null
-      adoptionSignal: 'IDENTITY' | 'D1' | 'GEN_ABSENCE' | null
+      adoptionSignal: 'IDENTITY' | 'D1' | 'GEN_ABSENCE' | 'SAME_GEN_PTY_ABSENCE' | null
     }
   | { ok: false; reason: 'restore_target_live_elsewhere'; holderPaneKey: string }
-  | { ok: false; reason: HolderAdoptionRefusalReason; holderPaneKey: string }
-  | { ok: false; reason: string }
+  | { ok: false; reason: HolderAdoptionRefusalReason; holderPaneKey: string; detail?: string }
+  | { ok: false; reason: string; holderPaneKey?: string }
 
 export async function requestChairRestore(
   deps: ChairRestoreDeps,
@@ -90,7 +90,7 @@ export async function requestChairRestore(
   }
 
   const holderPaneKey = db.paneHoldingSession(hostId, request.sessionId) ?? null
-  let adoptionSignal: 'IDENTITY' | 'D1' | 'GEN_ABSENCE' | null = null
+  let adoptionSignal: 'IDENTITY' | 'D1' | 'GEN_ABSENCE' | 'SAME_GEN_PTY_ABSENCE' | null = null
   // [S10-21d b3b, D-R163 H2] set in the holder branch, read after registration for the audit rows.
   let holderGenerationForAudit: string | null = null
   let holderRegisteredForAudit: AgentRow | undefined
@@ -107,42 +107,41 @@ export async function requestChairRestore(
     holderRegisteredForAudit = holderRegistered
     const early = decideEarlyRows(holderRegistered?.process_incarnation ?? null, inventory)
 
-    let incumbent: IncumbentVerdict
-    let d2Inventory: 'present' | 'absent' | 'unknown'
-    let inventoryRoundNonNull: boolean
-    let holderHasConnectedPty = deps.runtime.findConnectedPtyForPane(holderPaneKey) !== undefined
-    if (early.kind === 'skipped_daemon_survived') {
-      incumbent = { dead: false, reason: 'live' }
-      d2Inventory = 'present'
-      inventoryRoundNonNull = true
-    } else if (early.kind === 'layer3') {
-      // [JUDGMENT CALL, see RETURN] 'layer3' covers a null round AND an ambiguous-pty identity
-      // — collapsed to "insufficient evidence" either way: never wrongly grants, may over-refuse.
-      incumbent = { dead: false, reason: 'inventory_unknown' }
-      d2Inventory = 'unknown'
-      inventoryRoundNonNull = false
-    } else {
-      const evidenceBundle = await collectSweepEvidence(
-        deps.runtime,
-        holderPaneKey,
-        parsed.tabId,
-        parsed.leafId,
-        hostId,
-        inventory,
-        early.identity,
-        early.status
-      )
-      incumbent = resolveIncumbentDeath(evidenceBundle.incumbentEvidence)
-      d2Inventory = evidenceBundle.incumbentEvidence.d2.inventory
-      inventoryRoundNonNull = true
-      holderHasConnectedPty = holderHasConnectedPty || evidenceBundle.occupantLiveness === 'present'
-    }
+    // [S10-21f b2b-10q M2, MAX-LINES] incumbent/d2Inventory/inventoryRoundNonNull/
+    // holderHasConnectedPty/holderSettledNotLive assembly moved to
+    // chair-restore-holder-evidence.ts to keep this file's own effective-line ratchet.
+    const {
+      incumbent,
+      d2Inventory,
+      inventoryRoundNonNull,
+      holderHasConnectedPty,
+      holderSettledNotLive
+    } = await resolveHolderIncumbentEvidence(
+      deps.runtime,
+      early,
+      holderPaneKey,
+      parsed.tabId,
+      parsed.leafId,
+      hostId,
+      inventory
+    )
 
     if (!incumbent.dead && incumbent.reason === 'live') {
       return { ok: false, reason: 'restore_target_live_elsewhere', holderPaneKey }
     }
 
-    const holderExecutionHostId = holderLaunchRow?.execution_host_id ?? hostId
+    // [S10-21f b2b-10q M1] Split from the combined `?.` guard: a MISSING launch row (a data
+    // inconsistency — current_sessions named a pane with no backing row) and a row present but
+    // missing its execution_host_id are different failures with different refusal codes. The
+    // pure predicate's own conjunct C (dead-holder-adoption.ts) already defines
+    // holder_launch_row_missing for exactly the first case — this makes that code reachable from
+    // the caller again instead of collapsing both into holder_execution_host_missing.
+    // [R142] No silent `?? hostId` local guess — refuse when the launch row omits its host.
+    if (!holderLaunchRow) {
+      return { ok: false, reason: 'holder_launch_row_missing', holderPaneKey }
+    } else if (!holderLaunchRow.execution_host_id) {
+      return { ok: false, reason: 'holder_execution_host_missing', holderPaneKey }
+    }
     // [JUDGMENT CALL, see RETURN; S10-21d b3b, D-R163 LOW fix] Conjunct F: every live
     // registered row sharing the holder pane's suffix, if any, must name the SAME chair — a
     // different live name refuses, reclaiming this restore's own prior identity does not.
@@ -165,6 +164,21 @@ export async function requestChairRestore(
       request.sessionId
     )
 
+    // [S10-21f b2-10q R143] Exclude the holder's own stale rehydrated row (OD-21d-1), same as the
+    // prior boolean check. `null` (the pane-granular accessor unwired) collapses to `true` — the
+    // report is treated as standing, never guessed discounted — matching DEC-3's conservative
+    // default. Otherwise the SAME inventory round taken above (:104) decides, per reporter, via
+    // live-report-liveness.ts.
+    const liveReportPanes = deps.runtime.liveReportPanesForSession(request.sessionId, {
+      excludePaneKey: holderPaneKey
+    })
+    const liveHookReportOfSessionOnLivePaneElsewhere = liveReportStandsElsewhere(
+      liveReportPanes,
+      inventory,
+      hostId,
+      deps.runtime
+    )
+
     const decision = resolveHolderAdoption({
       holderPaneKey,
       // [JUDGMENT CALL, see RETURN; S10-21d b3b, D-R163 LOW fix: sentinel wording] The adopting
@@ -172,7 +186,7 @@ export async function requestChairRestore(
       // `<tabId>:<leafId>` (both UUIDs, colon-separated — db.ts's paneKeyMatchSuffix); this
       // literal has no colon, so it can never collide with one — conjunct A is vacuous here.
       adoptingPaneKey: '<pending-launcher-restore>',
-      holderExecutionHostId,
+      holderExecutionHostId: holderLaunchRow.execution_host_id,
       adoptingExecutionHostId,
       holderLaunchGeneration: holderLaunchRow?.launch_generation ?? null,
       currentLaunchGeneration,
@@ -180,19 +194,21 @@ export async function requestChairRestore(
       d2Inventory,
       inventoryRoundNonNull,
       holderHasConnectedPty,
-      // [S10-21d b3b, D-R163 M1 fix] Exclude the holder's own stale rehydrated row (OD-21d-1).
-      // [b3b M5] null (unwired) coerces to false here — conservative, matches DEC-3's own default.
-      liveHookReportOfSessionElsewhere:
-        deps.runtime.hasLiveHookReportOfSession(request.sessionId, {
-          excludePaneKey: holderPaneKey
-        }) ?? false,
+      holderSettledNotLive,
+      liveHookReportOfSessionOnLivePaneElsewhere,
+      liveReportReporterPaneKeys: liveReportPanes?.map((r) => r.paneKey),
       sweepLockHeld: isRestoreSweepLockHeld(),
       sweepRestoreMarkSetForHolder: db.getSweepRestoreMark(hostId, holderPaneKey),
       holderHasOtherLiveRegisteredRow,
       transcriptPreflightPassed: preflight.ok
     })
     if (!decision.adoptable) {
-      return { ok: false, reason: decision.reason, holderPaneKey }
+      return {
+        ok: false,
+        reason: decision.reason,
+        holderPaneKey,
+        ...(decision.detail ? { detail: decision.detail } : {})
+      }
     }
     // [S10-21d b3b, D-R163 H2 fix] Clamp per holder pane before minting (house rate limiter).
     const rate = db.checkAndBumpRate({
