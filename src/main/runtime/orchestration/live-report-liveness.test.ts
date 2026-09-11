@@ -1,6 +1,12 @@
 // S10-21f b2-10q R143: liveReportOnLivePaneElsewhere — pure, no DB/IO.
 import { describe, expect, it } from 'vitest'
-import { liveReportOnLivePaneElsewhere, type LiveReportPaneReporter } from './live-report-liveness'
+import { randomUUID } from 'node:crypto'
+import {
+  liveReportOnLivePaneElsewhere,
+  liveReportStandsElsewhere,
+  type LiveReportPaneReporter,
+  type LiveReportRuntimeDeps
+} from './live-report-liveness'
 import type { ControllerInventory } from './agent-process-identity'
 
 const LOCAL = 'local'
@@ -107,5 +113,65 @@ describe('S10-21f b2-10q R143: liveReportOnLivePaneElsewhere', () => {
         () => false
       )
     ).toBe(true)
+  })
+})
+
+// [S10-21f b2b-10q M3] Direct tests for the caller-facing wrapper — the fixtures above already
+// prove `liveReportOnLivePaneElsewhere`'s own boolean logic against its resolver callbacks;
+// these prove the wrapper's own two resolution steps (findConnectedPtyForPane, then
+// getPersistedPtyIdForLeaf) and its `reporters === null` fail-closed default.
+describe('S10-21f b2b-10q M3: liveReportStandsElsewhere', () => {
+  function deps(overrides: Partial<LiveReportRuntimeDeps> = {}): LiveReportRuntimeDeps {
+    return {
+      findConnectedPtyForPane: () => undefined,
+      getPersistedPtyIdForLeaf: () => undefined,
+      ...overrides
+    }
+  }
+
+  it('reporters === null (the pane-granular accessor unwired) -> stands (true)', () => {
+    expect(liveReportStandsElsewhere(null, inventoryWithLive(), 'local', deps())).toBe(true)
+  })
+
+  it('a connected pty present through the real resolver -> stands (true)', () => {
+    const reporters: LiveReportPaneReporter[] = [{ paneKey: 'tab:leaf', executionHostId: LOCAL }]
+    expect(
+      liveReportStandsElsewhere(
+        reporters,
+        inventoryWithLive('pty-connected'),
+        'local',
+        deps({ findConnectedPtyForPane: () => ({ ptyId: 'pty-connected' }) })
+      )
+    ).toBe(true)
+  })
+
+  it('no connected pty, but a persisted-only ptyId PRESENT in the round -> stands (true)', () => {
+    const paneKey = `tab1:${randomUUID()}`
+    const reporters: LiveReportPaneReporter[] = [{ paneKey, executionHostId: LOCAL }]
+    expect(
+      liveReportStandsElsewhere(
+        reporters,
+        inventoryWithLive('pty-persisted'),
+        'local',
+        deps({ getPersistedPtyIdForLeaf: () => 'pty-persisted' })
+      )
+    ).toBe(true)
+  })
+
+  // [D-R185 finding 2, NEXT-train tightening] Pinning the CURRENT behaviour, not endorsing it: a
+  // persisted-only ptyId absent from a non-null round discounts the report exactly like a
+  // connected one would — the reporter pane's OWN liveness (distinct from the ptyId's) is not
+  // re-checked here. Left as-is for this train; D-R185 finding 2 names it as the next tightening.
+  it('no connected pty, persisted-only ptyId ABSENT from a non-null round -> discounted (false)', () => {
+    const paneKey = `tab1:${randomUUID()}`
+    const reporters: LiveReportPaneReporter[] = [{ paneKey, executionHostId: LOCAL }]
+    expect(
+      liveReportStandsElsewhere(
+        reporters,
+        inventoryWithLive(),
+        'local',
+        deps({ getPersistedPtyIdForLeaf: () => 'pty-persisted' })
+      )
+    ).toBe(false)
   })
 })
