@@ -87,6 +87,15 @@ describe('D-R163 M3 negatives 3/4: HOST_RESUME null-predecessor success, and hos
     expect(currentSessionRows).toEqual([{ pane_key: 'tab1:leaf-a' }])
   })
 
+  // [S10-21d C3] This proves `admitAgentLaunch`'s OWN write is correct given a `ctx` that
+  // already carries `launchPreferences` — it injects `ctx.launchPreferences` directly (below),
+  // so it does NOT cover the seam upstream of admission: `chair-restore.ts`'s/the restart
+  // sweep's `ensureAgentSession` request -> `createTerminal`'s `opts.launchPreferences` ->
+  // `RuntimePtyController#spawn` -> `launchAdmissionBundle` -> this same `ctx.launchPreferences`
+  // (`resolveHostResumeRecordLaunch`, agent-launch-admission-host-resume.ts). That upstream
+  // wiring — the seam the Gate-3 defect actually lived in — is covered by
+  // `ensure-agent-session-host-resume-prefs-chained.test.ts` (src/main/runtime), which drives
+  // the real chain end to end instead of hand-building `ctx`.
   it('[S10-21d bD C2, D-R168 LOW-1] a host_restore admission naming a model and an effort writes pref_model/pref_effort with pref_source "launch" on the new launch row', async () => {
     const db = freshDb()
     const admission: LaunchAdmission = {
