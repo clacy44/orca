@@ -152,6 +152,10 @@ export function handleDaemonSurvivedSkip(
         )
       }
     }
+  } else if (res !== undefined && !res.ok) {
+    console.warn(
+      `[restore-sweep] survived pane attach skipped pane=${launchRow.pane_key} reason=handle_refresh_refused:${res.reason ?? 'unknown'}`
+    )
   }
   return { kind: 'skipped_daemon_survived' }
 }

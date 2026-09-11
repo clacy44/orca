@@ -172,4 +172,42 @@ describe('S10-21e b1-10p: daemon-survived arm attaches the survived pty', () => 
     expect(record?.lastOutputAt).not.toBeNull()
     expect(record?.tailBuffer.join('\n')).toContain('hello from survived daemon')
   })
+
+  // [S10-21e review C2] A refused handle refresh must not silently skip the attach step — the
+  // arm logs a distinct, loud skip line instead of attempting (or silently omitting) the attach.
+  it('logs a loud skip line, never attempts attachSurvivedPty, when the handle refresh is refused', async () => {
+    const paneKey = 'tab1:00000000-0000-4000-8000-00000000e004'
+    seedSurvivedPane(paneKey, 'agent-e4', 'sess-e4')
+    const attachSurvivedPty = vi.fn().mockResolvedValue(true)
+    vi.spyOn(orchestrationDb!, 'refreshAgentHandleAfterRespawn').mockReturnValue({
+      ok: false,
+      reason: 'row_quarantined'
+    })
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const outcome = await restoreOneRegisteredPane(
+        baseDeps(orchestrationDb!, { attachSurvivedPty }),
+        orchestrationDb!,
+        HOST_ID,
+        'agent-e4',
+        REAL_PROCESS_INCARNATION,
+        'wt-1',
+        orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!,
+        inventoryFor('term_fresh_e4')
+      )
+      expect(outcome.kind).toBe('skipped_daemon_survived')
+      expect(attachSurvivedPty).not.toHaveBeenCalled()
+      expect(
+        warnSpy.mock.calls.some(
+          (call) =>
+            typeof call[0] === 'string' &&
+            call[0].includes('[restore-sweep] survived pane attach skipped') &&
+            call[0].includes(`pane=${paneKey}`) &&
+            call[0].includes('reason=handle_refresh_refused:row_quarantined')
+        )
+      ).toBe(true)
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
 })
