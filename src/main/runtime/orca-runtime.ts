@@ -2073,6 +2073,10 @@ const SSH_PANE_RECOVERY_GRACE_MS = 30_000
 // its runtime record (which also invalidates the verdict) is late.
 const PROVEN_ABSENT_LEAF_PTY_TTL_MS = 15_000
 
+// Why 2000ms: same reasoning as LIVENESS_PROBE_TIMEOUT_MS (daemon-pty-adapter.ts:171-175) — the
+// sweep must never wait on the daemon (SWEEP_LOCK_BOUND_MS 30s disarms guards).
+const SURVIVED_PTY_ATTACH_BUDGET_MS = 2_000
+
 function isClientDisconnectedError(error: unknown): boolean {
   return error instanceof Error && error.message === 'client_disconnected'
 }
@@ -12628,7 +12632,19 @@ export class OrcaRuntimeService {
         this.subscriberDrivenProviderAttachesByPtyId.delete(ptyId)
       }
     })
-    return attempt
+    // Why a bound here too: the dedupe map keeps `attempt` alive for late completion (a slow
+    // daemon still gets credited once it answers), but the sweep itself must never wait past
+    // SURVIVED_PTY_ATTACH_BUDGET_MS for it — same reasoning as LIVENESS_PROBE_TIMEOUT_MS
+    // (daemon-pty-adapter.ts:171-175); the sweep must never wait on the daemon
+    // (SWEEP_LOCK_BOUND_MS 30s disarms guards).
+    const timeout = new Promise<boolean>((resolve) => {
+      const t = setTimeout(() => {
+        console.warn(`[runtime] survived pty attach unconfirmed within 2000ms pty=${ptyId}`)
+        resolve(false)
+      }, SURVIVED_PTY_ATTACH_BUDGET_MS)
+      t.unref?.()
+    })
+    return Promise.race([attempt, timeout])
   }
 
   private reconcileSubscriberDrivenProviderAttach(ptyId: string): void {

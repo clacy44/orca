@@ -33,7 +33,7 @@ import type { RestoreSweepDeps, RestoreOneOutcome } from './restore-sweep-types'
  * skips pact resume (there is nothing to resume against a refused refresh) while still falling
  * through to the delivery try. No half's failure is ever a failed skip — the skip itself already
  * committed. */
-export async function handleDaemonSurvivedSkip(
+export function handleDaemonSurvivedSkip(
   db: OrchestrationDb,
   deps: RestoreSweepDeps,
   hostId: string,
@@ -42,7 +42,7 @@ export async function handleDaemonSurvivedSkip(
   early: Extract<EarlyRowsDecision, { kind: 'skipped_daemon_survived' }>,
   processIncarnation: string | null,
   inventory: ControllerInventory | null
-): Promise<RestoreOneOutcome> {
+): RestoreOneOutcome {
   auditSweepSkip(db, hostId, launchRow.pane_key, agentId, early.reasonCode)
   let res: ReturnType<OrchestrationDb['refreshAgentHandleAfterRespawn']> | undefined
   try {
@@ -95,22 +95,6 @@ export async function handleDaemonSurvivedSkip(
     // daemon restarts accumulates N+1 launch rows, violating PRUNE_PER_PANE. Self-transacting,
     // never inside refreshAgentHandleAfterRespawn's own transaction (already closed above).
     db.pruneLaunchRowRetention(hostId, launchRow.pane_key)
-    // [S10-21e] Attach the survived daemon session's provider stream so output resumes flowing
-    // into the runtime's terminal record without depending on a GUI client's subscribe — never
-    // throws, never blocks the rest of the arm; a false result is a loud single warn line, not a
-    // failed skip (the handle refresh already committed).
-    const survivedPtyId = parseProcessIncarnation(processIncarnation)?.ptyId
-    if (survivedPtyId) {
-      const attachSurvivedPty = deps.attachSurvivedPty
-      const attached = attachSurvivedPty ? await attachSurvivedPty(survivedPtyId) : false
-      if (!attached) {
-        console.warn(
-          `[restore-sweep] survived pane attach failed pane=${launchRow.pane_key} pty=${survivedPtyId} reason=${
-            attachSurvivedPty ? 'attach_refused' : 'no_attach_dep'
-          }`
-        )
-      }
-    }
     try {
       // [S10-21c B3c, D-R151 LOW 1] Own try, placed AFTER the refresh try: a throw here must
       // never be labelled a refresh failure (the refresh already committed successfully) and
@@ -138,6 +122,36 @@ export async function handleDaemonSurvivedSkip(
       agentId,
       `delivery_notify_failed: ${err instanceof Error ? err.message : String(err)}`
     )
+  }
+  // [S10-21e review] Fire-and-forget, placed AFTER delivery so no code runs between the
+  // committed handle refresh and delivery: the attach never blocks or throws into this arm.
+  if (res !== undefined && res.ok) {
+    const survivedPtyId = parseProcessIncarnation(processIncarnation)?.ptyId
+    if (survivedPtyId) {
+      const attachSurvivedPty = deps.attachSurvivedPty
+      if (attachSurvivedPty) {
+        void attachSurvivedPty(survivedPtyId).then(
+          (attached) => {
+            if (!attached) {
+              console.warn(
+                `[restore-sweep] survived pane attach failed pane=${launchRow.pane_key} pty=${survivedPtyId} reason=attach_refused`
+              )
+            }
+          },
+          (err) => {
+            console.warn(
+              `[restore-sweep] survived pane attach failed pane=${launchRow.pane_key} pty=${survivedPtyId} reason=attach_threw:${
+                err instanceof Error ? err.message : String(err)
+              }`
+            )
+          }
+        )
+      } else {
+        console.warn(
+          `[restore-sweep] survived pane attach failed pane=${launchRow.pane_key} pty=${survivedPtyId} reason=no_attach_dep`
+        )
+      }
+    }
   }
   return { kind: 'skipped_daemon_survived' }
 }

@@ -493,3 +493,39 @@ describe('subscriber-driven daemon attach (never-activated tab)', () => {
     expect(read.tail.join('\n')).not.toContain('stale provider frame')
   })
 })
+
+describe('S10-21e review C1: ensureProviderAttachForSurvivedPty is bounded', () => {
+  it('resolves false within the budget when controller.attach never resolves, warns, and keeps the dedupe entry pending', async () => {
+    vi.useFakeTimers()
+    try {
+      const runtime = new OrcaRuntimeService()
+      const neverResolvingController = {
+        write: () => true,
+        kill: () => true,
+        attach: () => new Promise<boolean>(() => {})
+      }
+      runtime.setPtyController(neverResolvingController as never)
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+      const resultPromise = runtime.ensureProviderAttachForSurvivedPty(PTY_ID)
+      await vi.advanceTimersByTimeAsync(2_000)
+      const result = await resultPromise
+
+      expect(result).toBe(false)
+      expect(
+        warnSpy.mock.calls.some(
+          (call) =>
+            typeof call[0] === 'string' &&
+            call[0].includes('[runtime] survived pty attach unconfirmed within 2000ms') &&
+            call[0].includes(`pty=${PTY_ID}`)
+        )
+      ).toBe(true)
+      // The unraced attempt is still outstanding (the daemon never answered) — the dedupe
+      // map keeps it so a late completion can still be credited.
+      expect(internals(runtime).subscriberDrivenProviderAttachesByPtyId.has(PTY_ID)).toBe(true)
+      warnSpy.mockRestore()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})

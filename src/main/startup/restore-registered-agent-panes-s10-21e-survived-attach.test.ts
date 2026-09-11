@@ -101,16 +101,20 @@ describe('S10-21e b1-10p: daemon-survived arm attaches the survived pty', () => 
         inventoryFor('term_fresh_e2')
       )
       expect(outcome.kind).toBe('skipped_daemon_survived')
-      expect(
-        warnSpy.mock.calls.some(
-          (call) =>
-            typeof call[0] === 'string' &&
-            call[0].includes('[restore-sweep] survived pane attach failed') &&
-            call[0].includes(`pane=${paneKey}`) &&
-            call[0].includes(`pty=${REAL_PTY_ID}`) &&
-            call[0].includes('reason=')
-        )
-      ).toBe(true)
+      // [S10-21e review C1] The attach is fire-and-forget after this brief: the warn line lands
+      // on a later microtask, not before `restoreOneRegisteredPane` resolves.
+      await vi.waitFor(() => {
+        expect(
+          warnSpy.mock.calls.some(
+            (call) =>
+              typeof call[0] === 'string' &&
+              call[0].includes('[restore-sweep] survived pane attach failed') &&
+              call[0].includes(`pane=${paneKey}`) &&
+              call[0].includes(`pty=${REAL_PTY_ID}`) &&
+              call[0].includes('reason=')
+          )
+        ).toBe(true)
+      })
     } finally {
       warnSpy.mockRestore()
     }
@@ -135,9 +139,16 @@ describe('S10-21e b1-10p: daemon-survived arm attaches the survived pty', () => 
     }
     runtime.setPtyController(fakeController as never)
 
+    // [S10-21e review C1] The arm no longer awaits the attach — capture the promise the
+    // production fire-and-forget call kicks off so the test can await it before asserting on
+    // runtime state, rather than racing an unflushed microtask.
+    let attachPromise: Promise<boolean> | undefined
     const outcome = await restoreOneRegisteredPane(
       baseDeps(orchestrationDb!, {
-        attachSurvivedPty: (ptyId) => runtime.ensureProviderAttachForSurvivedPty(ptyId)
+        attachSurvivedPty: (ptyId) => {
+          attachPromise = runtime.ensureProviderAttachForSurvivedPty(ptyId)
+          return attachPromise
+        }
       }),
       orchestrationDb!,
       HOST_ID,
@@ -149,6 +160,7 @@ describe('S10-21e b1-10p: daemon-survived arm attaches the survived pty', () => 
     )
     expect(outcome.kind).toBe('skipped_daemon_survived')
     expect(attachCalls).toEqual([REAL_PTY_ID])
+    await attachPromise
 
     runtime.onPtyData(REAL_PTY_ID, 'hello from survived daemon\r\n', Date.now())
     const record = (
