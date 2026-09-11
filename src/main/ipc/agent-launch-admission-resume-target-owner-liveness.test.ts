@@ -96,4 +96,33 @@ describe('S10-21f b2-10q C2b: resume_target_owned_by_pane_without_live_pty', () 
     expect(auditRow.outcome).toBe('admitted')
     expect(auditRow.reason_code).toBe('resume_target_owned_by_pane_without_live_pty')
   })
+
+  it('S2 ADDENDUM: a host-resume admission whose command names a DIFFERENT session id is REFUSED (restore_selector_mismatch) — no row, no spawnable admission', async () => {
+    const db = freshDb()
+    const admission: LaunchAdmission = {
+      kind: 'host-resume',
+      sessionId: 'the-ticket-session',
+      predecessorPaneKey: 'tab1:leaf-old',
+      executionHostId: HOST_ID,
+      launchGeneration: 'gen-1'
+    }
+    await expect(
+      admitAgentLaunch(
+        () => db,
+        opts({ command: 'claude --resume a-completely-different-session' }),
+        admission,
+        ctx()
+      )
+    ).rejects.toMatchObject({
+      name: 'LaunchAdmissionRefusedError',
+      reasonCode: 'restore_selector_mismatch'
+    })
+    expect(db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')).toBeUndefined()
+    const auditRow = rawDb(db)
+      .prepare(`SELECT * FROM agent_audit ORDER BY seq DESC LIMIT 1`)
+      .get() as { verb: string; outcome: string; reason_code: string }
+    expect(auditRow.verb).toBe('launch_refused')
+    expect(auditRow.outcome).toBe('refused')
+    expect(auditRow.reason_code).toBe('restore_selector_mismatch')
+  })
 })

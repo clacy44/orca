@@ -831,35 +831,6 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
   // [MAX-LINES] Dead-holder sibling of the split above: agent-launch-admission-resume-target-
   // owner-liveness.test.ts.
 
-  it('S2 ADDENDUM: a host-resume admission whose command names a DIFFERENT session id is REFUSED (restore_selector_mismatch) — no row, no spawnable admission', async () => {
-    const db = freshDb()
-    const admission: LaunchAdmission = {
-      kind: 'host-resume',
-      sessionId: 'the-ticket-session',
-      predecessorPaneKey: 'tab1:leaf-old',
-      executionHostId: HOST_ID,
-      launchGeneration: 'gen-1'
-    }
-    await expect(
-      admitAgentLaunch(
-        () => db,
-        opts({ command: 'claude --resume a-completely-different-session' }),
-        admission,
-        ctx()
-      )
-    ).rejects.toMatchObject({
-      name: 'LaunchAdmissionRefusedError',
-      reasonCode: 'restore_selector_mismatch'
-    })
-    expect(db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')).toBeUndefined()
-    const auditRow = rawDb(db)
-      .prepare(`SELECT * FROM agent_audit ORDER BY seq DESC LIMIT 1`)
-      .get() as { verb: string; outcome: string; reason_code: string }
-    expect(auditRow.verb).toBe('launch_refused')
-    expect(auditRow.outcome).toBe('refused')
-    expect(auditRow.reason_code).toBe('restore_selector_mismatch')
-  })
-
   // The other half of the same fence, on the arm B3 itself opens: with the `owned` early return
   // deleted, a host-resume that reaches the SELECTOR-FREE arm would take HOST_MINTED and mint a
   // fresh id FOR A RESTORE — recording a brand-new empty conversation as the pane's newest and
