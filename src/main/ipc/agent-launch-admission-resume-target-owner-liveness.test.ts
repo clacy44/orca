@@ -96,33 +96,53 @@ describe('S10-21f b2-10q C2b: resume_target_owned_by_pane_without_live_pty', () 
     expect(auditRow.outcome).toBe('admitted')
     expect(auditRow.reason_code).toBe('resume_target_owned_by_pane_without_live_pty')
   })
-
-  it('S2 ADDENDUM: a host-resume admission whose command names a DIFFERENT session id is REFUSED (restore_selector_mismatch) — no row, no spawnable admission', async () => {
+  it("S10-21c B3c, D-R151 HIGH, chair ruling 21c-E2: a caller's `claude --resume X` naming ANOTHER pane's current session is UNRECORDED (resume_target_owned_by_another_pane) — loud audit + notice, no row, no supersede, the victim pane untouched, and the spawn PROCEEDS instead of throwing", async () => {
     const db = freshDb()
-    const admission: LaunchAdmission = {
-      kind: 'host-resume',
-      sessionId: 'the-ticket-session',
-      predecessorPaneKey: 'tab1:leaf-old',
+    db.recordLaunch({
+      hostId: HOST_ID,
+      paneKey: 'tab1:leaf-victim',
+      agentType: 'claude',
+      sessionId: VICTIM_SESSION_ID,
+      launchGeneration: 'gen-0',
       executionHostId: HOST_ID,
-      launchGeneration: 'gen-1'
-    }
-    await expect(
-      admitAgentLaunch(
-        () => db,
-        opts({ command: 'claude --resume a-completely-different-session' }),
-        admission,
-        ctx()
-      )
-    ).rejects.toMatchObject({
-      name: 'LaunchAdmissionRefusedError',
-      reasonCode: 'restore_selector_mismatch'
+      evidence: 'host_launch'
     })
+    const notices: { paneKey: string; verb: string; reasonCode: string }[] = []
+    const admitted = await admitAgentLaunch(
+      () => db,
+      opts({ command: `claude --resume ${VICTIM_SESSION_ID}` }),
+      CALLER,
+      // [S10-21f b2-10q] The victim pane has a connected pty — LIVE reason code, per this test's own name.
+      ctx({
+        notice: (paneKey, verb, reasonCode) => notices.push({ paneKey, verb, reasonCode }),
+        findConnectedPtyForPane: (paneKey) => paneKey === 'tab1:leaf-victim'
+      })
+    )
+    // The spawn is NOT refused — base parity: the collision costs the launch its record, not the
+    // launch itself.
+    expect(admitted.spawnOptions.command).toBe(`claude --resume ${VICTIM_SESSION_ID}`)
+    // Nothing recorded for the claimant pane.
     expect(db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')).toBeUndefined()
+    // The victim keeps both its launch row and its current_sessions row — the UNIQUE(host_id,
+    // session_id) fence adjudicated, and `supersedePaneKey` was never set from this call site.
+    expect(db.newestLaunchForPane(HOST_ID, 'tab1:leaf-victim')?.session_id).toBe(VICTIM_SESSION_ID)
+    const victimCurrent = rawDb(db)
+      .prepare('SELECT session_id FROM current_sessions WHERE host_id = ? AND pane_key = ?')
+      .get(HOST_ID, 'tab1:leaf-victim') as { session_id: string }
+    expect(victimCurrent.session_id).toBe(VICTIM_SESSION_ID)
+    // Still loud: launch_unrecorded audit row plus the pane notice — never a silent drop.
+    expect(notices).toEqual([
+      {
+        paneKey: 'tab1:leaf-a',
+        verb: 'launch_unrecorded',
+        reasonCode: 'resume_target_owned_by_another_pane'
+      }
+    ])
     const auditRow = rawDb(db)
       .prepare(`SELECT * FROM agent_audit ORDER BY seq DESC LIMIT 1`)
       .get() as { verb: string; outcome: string; reason_code: string }
-    expect(auditRow.verb).toBe('launch_refused')
-    expect(auditRow.outcome).toBe('refused')
-    expect(auditRow.reason_code).toBe('restore_selector_mismatch')
+    expect(auditRow.verb).toBe('launch_unrecorded')
+    expect(auditRow.outcome).toBe('admitted')
+    expect(auditRow.reason_code).toBe('resume_target_owned_by_another_pane')
   })
 })
