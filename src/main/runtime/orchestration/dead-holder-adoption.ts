@@ -132,7 +132,13 @@ export function resolveHolderAdoption(input: HolderAdoptionInput): HolderAdoptio
       return { adoptable: false, reason: 'current_generation' }
     }
     if (!input.holderSettledNotLive) {
-      return { adoptable: false, reason: 'same_generation_settling' }
+      // [M2 follow-up] Operator hint: the caller (chairs.ts) prints `detail` verbatim.
+      return {
+        adoptable: false,
+        reason: 'same_generation_settling',
+        detail:
+          'the holder pane read absent just now; run `orca chairs restore` again in ≥10 s to confirm'
+      }
     }
     signal = 'SAME_GEN_PTY_ABSENCE'
   } else {

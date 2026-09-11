@@ -27,6 +27,9 @@ vi.mock('electron', () => ({
 }))
 
 const HOST_ID = 'local'
+// [S10-21f b2b-10q M2 follow-up] Mirrors dead-holder-adoption.ts's own literal verbatim.
+const SETTLING_DETAIL =
+  'the holder pane read absent just now; run `orca chairs restore` again in ≥10 s to confirm'
 const HOLDER_GEN = 'gen-holder-prior'
 const SESSION_ID = 'sess-dead-holder'
 
@@ -727,7 +730,8 @@ describe('D-R163 M3 negatives 1/2/6: dead-holder adoption, wired end to end', ()
       expect(firstAttempt).toEqual({
         ok: false,
         reason: 'same_generation_settling',
-        holderPaneKey
+        holderPaneKey,
+        detail: SETTLING_DETAIL
       })
 
       // Advance past REBIND_SETTLE_MS (10s) -> now settled.
@@ -827,7 +831,12 @@ describe('D-R163 M3 negatives 1/2/6: dead-holder adoption, wired end to end', ()
         sessionId,
         displayName: 'chair-m2'
       })
-      expect(first).toEqual({ ok: false, reason: 'same_generation_settling', holderPaneKey })
+      expect(first).toEqual({
+        ok: false,
+        reason: 'same_generation_settling',
+        holderPaneKey,
+        detail: SETTLING_DETAIL
+      })
 
       // Before the settle window elapses, the holder pty reconnects -> presence CLEARS the
       // absence clock and refuses current_generation.
@@ -851,7 +860,8 @@ describe('D-R163 M3 negatives 1/2/6: dead-holder adoption, wired end to end', ()
       expect(thirdRestarted).toEqual({
         ok: false,
         reason: 'same_generation_settling',
-        holderPaneKey
+        holderPaneKey,
+        detail: SETTLING_DETAIL
       })
 
       // 11s after the restart -> settled again -> adopted.

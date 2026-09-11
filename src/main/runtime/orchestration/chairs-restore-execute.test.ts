@@ -100,6 +100,32 @@ describe('executeChairsRestorePlan', () => {
     expect(m.chairs[0].lastSessionId).toBeUndefined()
   })
 
+  // [S10-21f b2b-10q M2 follow-up] `same_generation_settling`'s operator-hint `detail`
+  // (dead-holder-adoption.ts -> chair-restore.ts's ChairRestoreResult) must survive the executor's
+  // narrowing into an `error` row, or the CLI (chairs.ts's formatRow) never sees it.
+  const SETTLING_DETAIL =
+    'the holder pane read absent just now; run `orca chairs restore` again in ≥10 s to confirm'
+  it('a `same_generation_settling` refusal carries its operator-hint detail through to the error row', async () => {
+    const { deps } = fakeDeps({
+      requestChairRestore: async () => ({
+        ok: false,
+        reason: 'same_generation_settling',
+        holderPaneKey: 'tab:x',
+        detail: SETTLING_DETAIL
+      })
+    })
+    const m = manifest([
+      { name: 'a', worktree: 'path:/repo/a', agent: 'claude', conversationId: 'sess-a' }
+    ])
+    const summary = await runChairsRestore(m, deps)
+    expect(summary.rows[0]).toMatchObject({
+      name: 'a',
+      kind: 'error',
+      reason: 'same_generation_settling',
+      detail: SETTLING_DETAIL
+    })
+  })
+
   it('a refuse action never calls requestChairRestore and marks the summary non-zero', async () => {
     const { deps, calls } = fakeDeps({
       getAgentByName: () => ({ pane_key: 'tab:a-own' }),

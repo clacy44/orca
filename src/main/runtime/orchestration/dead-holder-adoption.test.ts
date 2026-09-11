@@ -268,7 +268,13 @@ describe('S10-21d b3: resolveHolderAdoption', () => {
 
   it('R142: same generation, all death proof present but NOT settled -> refused same_generation_settling', () => {
     const result = resolveHolderAdoption(sameGenInput({ holderSettledNotLive: false }))
-    expect(result).toEqual({ adoptable: false, reason: 'same_generation_settling' })
+    // [M2 follow-up] `detail` added: the CLI operator hint to retry after the settle window.
+    expect(result).toEqual({
+      adoptable: false,
+      reason: 'same_generation_settling',
+      detail:
+        'the holder pane read absent just now; run `orca chairs restore` again in ≥10 s to confirm'
+    })
   })
 
   it('R142: a live hook report elsewhere still refuses a same-generation holder FIRST (conjunct D order unchanged)', () => {
