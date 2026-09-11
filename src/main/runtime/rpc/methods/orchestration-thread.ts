@@ -9,16 +9,21 @@ import type { MessageRow } from '../../orchestration/types'
 // annotate their OWN messages with the same honest delivery state `orchestration sent` reports,
 // so a stuck-behind-a-pane-gate message never reads identical to one nobody has pushed yet.
 // Never annotates other participants' messages — delivery state is sender-side information.
+// C5 (N4): match the caller in both forms (bare terminal handle and `agent:<id>`) — a
+// registered agent's own mail is stored under its durable agent:<id> form (every peer-relayed
+// row, and every plain send/reply once registered), so a bare-handle-only compare silently
+// dropped the annotation exactly the way degradeAddresses (:109) already fixed for the
+// non-participant path.
 function annotateSenderDeliveryHonesty(
   runtime: Parameters<RpcMethod['handler']>[1]['runtime'],
   messages: MessageRow[],
-  callerHandle: string | undefined
+  callerAddresses: readonly string[]
 ): unknown[] {
-  if (!callerHandle) {
+  if (callerAddresses.length === 0) {
     return messages
   }
   return messages.map((message) =>
-    message.from_handle === callerHandle
+    callerAddresses.includes(message.from_handle)
       ? { ...message, delivery: runtime.getMessageDeliverySnapshot(message).delivery }
       : message
   )
@@ -63,6 +68,14 @@ function resolveThreadReplay(
   const callerHandle = attested?.terminalHandle
   const callerAgentId = attested ? db.getAgentByPaneKey(hostId, attested.paneKey)?.id : undefined
   const participantKey = callerAgentId ?? callerHandle
+  // C5 (N4): both address forms the caller's own mail can be stored under — shared by the
+  // participant-path and degrade-path annotation calls below (was bare-handle-only, a mismatch
+  // with degradeAddresses' own F-1 fix just below).
+  const callerAddresses = callerHandle
+    ? callerAgentId
+      ? [callerHandle, `agent:${callerAgentId}`]
+      : [callerHandle]
+    : []
 
   const cursor = since !== undefined ? parseThreadSinceCursor(since) : undefined
   const thread = db.getThread(threadId)
@@ -88,7 +101,7 @@ function resolveThreadReplay(
       db.markThreadRead(threadId, participantKey, thread.last_message_sequence)
     }
     return {
-      messages: annotateSenderDeliveryHonesty(runtime, messages, callerHandle),
+      messages: annotateSenderDeliveryHonesty(runtime, messages, callerAddresses),
       count: messages.length,
       degraded: false,
       ...(omitted.purged > 0 || omitted.withheld > 0 ? { omitted } : {})
@@ -106,15 +119,14 @@ function resolveThreadReplay(
   // `agent:<id>`, never as the caller's bare terminal handle — matching on the handle alone
   // silently excluded every one of them from a degraded (non-participant) read even when the
   // caller genuinely was that agent. Match both forms when the caller resolves to one.
-  const degradeAddresses = callerAgentId ? [callerHandle, `agent:${callerAgentId}`] : [callerHandle]
-  const messages = db.getThreadMessagesFor(threadId, degradeAddresses, afterSequence)
+  const messages = db.getThreadMessagesFor(threadId, callerAddresses, afterSequence)
   const omitted = db.getThreadMessagesOmitted(
     threadId,
     afterSequence !== undefined ? { kind: 'sequence', value: afterSequence } : undefined,
-    degradeAddresses
+    callerAddresses
   )
   return {
-    messages: annotateSenderDeliveryHonesty(runtime, messages, callerHandle),
+    messages: annotateSenderDeliveryHonesty(runtime, messages, callerAddresses),
     count: messages.length,
     degraded: true,
     ...(omitted.purged > 0 || omitted.withheld > 0 ? { omitted } : {})
