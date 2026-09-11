@@ -1101,7 +1101,10 @@ function buildRestoreSweepDeps(runtimeService: OrcaRuntimeService): RestoreSweep
       runtimeService.recordRestoredPaneForDesktopMaterialization(surface),
     // S10-21b B15 (design §2.7): so the restore-driven pact resume relays through
     // emitFederatedPactSideEffect for a federated pact, same as every other producer.
-    federatedPactEmitRuntime: runtimeService
+    federatedPactEmitRuntime: runtimeService,
+    // [S10-21e] Daemon-survived arm's own provider attach — orca-runtime.ts's
+    // `ensureProviderAttachForSurvivedPty`.
+    attachSurvivedPty: (ptyId) => runtimeService.ensureProviderAttachForSurvivedPty(ptyId)
   }
 }
 

@@ -108,6 +108,13 @@ export type RestoreSweepDeps = {
    * runtime (the emit primitive already degrades to "no post-commit kick"). Optional so every
    * pre-existing `RestoreSweepDeps` fixture stays valid without a mechanical edit. */
   federatedPactEmitRuntime?: FederatedPactEmitRuntime | null
+  /** [S10-21e] Called by the daemon-survived arm (`restore-sweep-daemon-survived-delivery.ts`)
+   * to have main attach the survived daemon session's provider stream itself, so output starts
+   * flowing into the runtime's terminal record without depending on a GUI client's subscribe —
+   * `orca-runtime.ts#ensureProviderAttachForSurvivedPty`. Optional so every pre-existing
+   * `RestoreSweepDeps` fixture stays valid without a mechanical edit; absent is treated as a
+   * no-op that returns false (see the delivery file's own default). */
+  attachSurvivedPty?(ptyId: string): Promise<boolean>
 }
 
 export type RestoreSweepSummary = {

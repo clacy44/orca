@@ -12601,6 +12601,36 @@ export class OrcaRuntimeService {
     })
   }
 
+  /** [S10-21e] The daemon-survived restore-sweep arm's own attach entry point. Same attach
+   *  closure and the same `subscriberDrivenProviderAttachesByPtyId` dedupe as
+   *  `ensureSubscriberDrivenProviderAttach`, but deliberately skips
+   *  `isKnownUnattachedLocalDaemonPty` — the sweep arm already proved this ptyId names a
+   *  survived daemon session by identity (controller-inventory match, process alive, no spawn
+   *  this generation), a stronger fact than that gate's own heuristics. The attach closure
+   *  itself still refuses SSH ids, ownership conflicts, and non-daemon providers, and never
+   *  throws (catches to false). Returns the actual attach outcome so the caller can log a
+   *  reason on failure — never a fire-and-forget void like the subscriber path. */
+  async ensureProviderAttachForSurvivedPty(ptyId: string): Promise<boolean> {
+    const controller = this.ptyController
+    if (!controller?.attach) {
+      return false
+    }
+    const existing = this.subscriberDrivenProviderAttachesByPtyId.get(ptyId)
+    if (existing) {
+      return existing
+    }
+    const attach = controller.attach
+    // Async wrapper: a synchronous controller throw must not break the sweep.
+    const attempt = (async () => attach(ptyId))().catch(() => false)
+    this.subscriberDrivenProviderAttachesByPtyId.set(ptyId, attempt)
+    void attempt.then((attached) => {
+      if (!attached && this.subscriberDrivenProviderAttachesByPtyId.get(ptyId) === attempt) {
+        this.subscriberDrivenProviderAttachesByPtyId.delete(ptyId)
+      }
+    })
+    return attempt
+  }
+
   private reconcileSubscriberDrivenProviderAttach(ptyId: string): void {
     if (!this.hasRemoteTerminalViewSubscriber(ptyId)) {
       return

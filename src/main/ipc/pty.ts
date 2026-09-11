@@ -5792,16 +5792,25 @@ export function registerPtyHandlers(
     // lease machinery, and the in-process local provider streams without
     // attach. Attach-only and false-on-doubt: never creates or resizes.
     attach: async (ptyId) => {
-      if (ptyOwnership.get(ptyId) != null || parseAppSshPtyId(ptyId)) {
+      // [S10-21e] One warn line per false path, naming the condition — the boolean contract
+      // for existing callers is unchanged; this is observability only.
+      if (ptyOwnership.get(ptyId) != null) {
+        console.warn(`[pty] attach refused pty=${ptyId} reason=ownership`)
+        return false
+      }
+      if (parseAppSshPtyId(ptyId)) {
+        console.warn(`[pty] attach refused pty=${ptyId} reason=ssh`)
         return false
       }
       let provider: IPtyProvider
       try {
         provider = getProviderForPty(ptyId)
       } catch {
+        console.warn(`[pty] attach refused pty=${ptyId} reason=no-provider`)
         return false
       }
       if (provider !== localProvider || provider instanceof LocalPtyProvider) {
+        console.warn(`[pty] attach refused pty=${ptyId} reason=wrong-provider`)
         return false
       }
       try {
@@ -5815,7 +5824,10 @@ export function registerPtyHandlers(
           )
         }
         return true
-      } catch {
+      } catch (err) {
+        console.warn(
+          `[pty] attach refused pty=${ptyId} reason=attach-threw error=${err instanceof Error ? err.message : String(err)}`
+        )
         return false
       }
     },
