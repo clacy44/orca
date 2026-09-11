@@ -36006,7 +36006,10 @@ export class OrcaRuntimeService {
       this.recordWithheldDelivery(mailboxHandle, 'blocked_modal')
       return
     }
-    this.withheldDeliveryAttemptsByHandle.delete(mailboxHandle)
+    // N4: no unconditional delete here — a failed forced attempt (attemptForcedBusyDelivery's
+    // deliveredWhileBusy path, ptyController.write returning false) must not lose the
+    // starvation anchor before the write is even known to have happened. deliverPendingMessages
+    // already deletes this same entry itself, but only once `wrote` is confirmed true.
     this.deliverPendingMessages(target, { mailboxHandle, ...options })
   }
 

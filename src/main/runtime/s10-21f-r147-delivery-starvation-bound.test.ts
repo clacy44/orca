@@ -513,4 +513,39 @@ describe('S10-21f b4, R147: delivery-starvation bound', () => {
       vi.useRealTimers()
     }
   })
+
+  it('8. N4: a failed forced-busy write keeps the starvation anchor instead of deleting it early', async () => {
+    vi.useFakeTimers()
+    try {
+      const runtime = makeRuntimeWithFreshClaudeHookStatus()
+      // The forced write itself fails (e.g. the pty backend rejected it) — distinct from every
+      // other test in this file, which mocks write to always succeed.
+      const write = vi.fn((_ptyId: string, _data: string) => false)
+      runtime.setPtyController(makeController(write) as never)
+      runtime.syncWindowGraph(HEADLESS_RUNTIME_WINDOW_ID, { tabs: [], leaves: [] })
+
+      const ptyId = 'pty-r147-failedwrite-1'
+      const { handle } = registerHeadlessPty(runtime, ptyId)
+      vi.spyOn(internals(runtime), 'isPtyRunningAgent').mockResolvedValue(true)
+      const stub = makeOrchestrationDbStub(() => handle)
+      runtime.setOrchestrationDb(stub.db as never)
+
+      driveWorkingTitle(runtime, ptyId)
+      stub.insert('failed-write status')
+      runtime.deliverPendingMessagesForHandle(handle)
+      expect(internals(runtime).withheldDeliveryAttemptsByHandle.get(handle)?.count).toBe(1)
+
+      // Cross the bound: forced delivery fires, attempts the write, and the write fails.
+      await vi.advanceTimersByTimeAsync(DELIVERY_STARVATION_BOUND_MS + 60_000)
+
+      expect(write).toHaveBeenCalled()
+      // RED today: attemptMidTurnClaudeDelivery deleted the anchor BEFORE calling
+      // deliverPendingMessages, so a failed write (wrote === false, which itself never deletes)
+      // still left the record gone — the starved state was lost even though nothing was
+      // actually delivered.
+      expect(internals(runtime).withheldDeliveryAttemptsByHandle.has(handle)).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })
