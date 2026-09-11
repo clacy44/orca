@@ -125,13 +125,65 @@ describe('orchestration.send: bare display-name resolution (Ruling 32 Addendum 1
   })
 
   it('T-A1: a bare display name that resolves locally binds pane key + thread; check as that agent returns it', async () => {
-    const { callerHandle, alphaPaneKey, alphaAgentId } = await setup()
+    const { callerHandle, callerPaneKey, alphaPaneKey, alphaAgentId } = await setup()
 
-    const sent = (await call('orchestration.send', {
-      from: callerHandle,
-      to: 'alpha',
-      subject: 'hello alpha'
-    })) as { message: { id: string }; threadId?: string; threadCreated?: boolean }
+    // C4 (D-R177 F5) fixture correction: the recipient now resolves to an agent: before the
+    // send lands, so the sender must be an attested, registered caller too — this fixture never
+    // asserted on sender identity, only on the RECIPIENT's binding, so register/attest the
+    // caller rather than weaken anything under test.
+    const callerEvidence = {
+      terminalHandle: callerHandle,
+      paneKey: callerPaneKey,
+      launchToken: 'token-caller'
+    }
+    vi.spyOn(runtime, 'verifyOrchestrationCompatibilityCaller').mockImplementation((evidence) => {
+      if (
+        evidence?.terminalHandle === callerEvidence.terminalHandle &&
+        evidence.paneKey === callerEvidence.paneKey &&
+        evidence.launchToken
+      ) {
+        return {
+          hostScope: { kind: 'local', hostId: 'local' },
+          paneKey: callerPaneKey,
+          terminalHandle: callerHandle,
+          processIncarnation: 'proc-1',
+          launchTokenHash: 'hash'
+        }
+      }
+      return null
+    })
+    const callerAgent = db.upsertAgentByPaneSuffix({
+      displayName: 'caller-agent',
+      role: null,
+      hostId: 'local',
+      paneKey: callerPaneKey,
+      terminalHandle: callerHandle,
+      processIncarnation: null,
+      worktreeId: null,
+      worktreePath: null,
+      branch: null,
+      title: null,
+      agentLabel: null,
+      originHandle: callerHandle,
+      originHostId: 'local'
+    })
+    if (callerAgent.outcome === 'name_taken') {
+      throw new Error('fixture setup failed: name_taken')
+    }
+    const attestedCtx: RpcContext = {
+      runtime,
+      orchestrationCompatibilityEvidence: callerEvidence
+    } as RpcContext
+
+    const m = method('orchestration.send')
+    const sent = (await m.handler(
+      m.params!.parse({
+        from: callerHandle,
+        to: 'alpha',
+        subject: 'hello alpha'
+      }),
+      attestedCtx
+    )) as { message: { id: string }; threadId?: string; threadCreated?: boolean }
 
     const stored = db.getMessageById(sent.message.id)
     expect(stored?.to_handle).toBe(`agent:${alphaAgentId}`)

@@ -776,7 +776,10 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           )
         }
       }
-      const from = params.from ?? 'unknown'
+      // C4: reassigned below, once, when the recipient resolves to an agent: — bound to the
+      // attested caller's own terminal handle instead of the unauthenticated params.from/pane
+      // fallback computed here.
+      let from = params.from ?? 'unknown'
       const attestedCaller =
         orchestrationCompatibilityCallerAuthority?.terminalHandle === from
           ? orchestrationCompatibilityCallerAuthority
@@ -791,7 +794,8 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
       // behavior (`getTerminalPaneKey(from)`, same as before); a caller that proved attestation
       // for a DIFFERENT handle than it's claiming as `from` gets that disagreeing claim ignored
       // instead — ends up with no resolved pane, same as an unregistered sender.
-      const senderPaneKey = attestedCaller
+      // C4: reassigned alongside `from` below for an agent: recipient.
+      let senderPaneKey = attestedCaller
         ? attestedCaller.paneKey
         : orchestrationCompatibilityCallerAuthority
           ? undefined
@@ -1067,6 +1071,75 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
             agentRecipient = requireAddressableAgentRecipient(db, named.id)
             to = `agent:${named.id}`
           }
+        }
+        // C4 (F5, D-R177): the recipient is now known to be an agent (explicit `agent:<id>` or
+        // a bare name that just resolved above) — fail closed on the SENDER's authorship the
+        // same way reply's identity branch does (C2/C3 above). Unlike reply, `from` stays the
+        // caller's TERMINAL handle (never rewritten to `agent:` — :567/:580/:1214 key
+        // dispatch/run resolution on the terminal-handle shape), so this only overrides `from`/
+        // `senderPaneKey` for the write below, never resolveMessageRun's earlier routing.
+        if (agentRecipient) {
+          const sendPreAttested = runtime.verifyOrchestrationCompatibilityCaller(
+            orchestrationCompatibilityEvidence,
+            { currentRuntimeLaunchSufficient: true }
+          )
+          let caller: ReturnType<typeof resolveCallerAgent>
+          try {
+            caller = resolveCallerAgent(db, runtime, orchestrationCompatibilityEvidence)
+          } catch (err) {
+            if (err instanceof OrchestrationError) {
+              db.writeAgentAudit({
+                agentId: null,
+                actorPaneKey:
+                  err.code === 'no_registered_identity' ? (sendPreAttested?.paneKey ?? null) : null,
+                actorHostId: senderHostId,
+                verb: 'send',
+                outcome: err.code,
+                reasonCode: null
+              })
+            }
+            throw err
+          }
+          // Mirrors C2's derived-caller check for reply, applied to send's sender side.
+          const callerRow = db.getAgentById(caller.id)
+          if (callerRow?.derived === 1) {
+            db.writeAgentAudit({
+              agentId: caller.id,
+              actorPaneKey: caller.pane_key,
+              actorHostId: caller.host_id,
+              verb: 'send',
+              outcome: 'derived_agent_unaddressable',
+              reasonCode: null
+            })
+            throw new OrchestrationError(
+              'derived_agent_unaddressable',
+              `Agent ${callerRow.display_name} is not registered — agent:${caller.id} has no reader.`,
+              {
+                nextSteps: [
+                  'orca agents register --name <slug> --role "<your role>" (run on this pane to make it addressable)'
+                ]
+              }
+            )
+          }
+          // A caller-claimed --from that disagrees with the attested identity is a forgery
+          // attempt, not a hint to fall back on — refused rather than silently overridden.
+          if (params.from !== undefined && params.from !== caller.terminal_handle) {
+            db.writeAgentAudit({
+              agentId: caller.id,
+              actorPaneKey: caller.pane_key,
+              actorHostId: caller.host_id,
+              verb: 'send',
+              outcome: 'forbidden',
+              reasonCode: null
+            })
+            throw new OrchestrationError(
+              'forbidden',
+              `Claimed sender "${params.from}" does not match your attested identity "${caller.terminal_handle}".`,
+              { effectsApplied: false }
+            )
+          }
+          from = caller.terminal_handle ?? from
+          senderPaneKey = caller.pane_key
         }
         // Point-to-point — existing single-recipient behavior
         revalidateLegacyCoordinator?.()

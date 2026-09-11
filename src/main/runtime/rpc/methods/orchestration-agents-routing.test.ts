@@ -19,6 +19,11 @@ import { toPublicAgentView } from './agent-directory-rpc-view'
 const PANE_A = 'tabA:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const PANE_B = 'tabB:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 const EVIDENCE_B = { terminalHandle: 'term_b', paneKey: PANE_B, launchToken: 'token-b' }
+// C4 (D-R177 F5) fixture correction: orchestration.send now fails closed when its recipient
+// resolves to an agent: — a caller-claimed `from` must match its OWN attestation. These fixtures
+// send `from: 'term_a'` as a bystander sender for routing mechanics unrelated to authorship; they
+// now attest as term_a via `callFrom` rather than the shared term_b-attested `ctx`.
+const EVIDENCE_A = { terminalHandle: 'term_a', paneKey: PANE_A, launchToken: 'token-a' }
 
 function makeAuthority(
   paneKey: string,
@@ -54,6 +59,22 @@ describe('agent: routing + durability', () => {
     return m.handler(parsed, ctx)
   }
 
+  // C4 fixture correction: attests as EVIDENCE_A (term_a) instead of the shared ctx's term_b —
+  // for a `from: 'term_a'` send whose recipient resolves to an agent:, only this caller can now
+  // author it.
+  async function callFrom(
+    name: string,
+    params: Record<string, unknown>,
+    evidence: typeof EVIDENCE_A
+  ) {
+    const m = method(name)
+    const parsed = m.params ? m.params.parse(params) : undefined
+    return m.handler(parsed, {
+      runtime,
+      orchestrationCompatibilityEvidence: evidence
+    } as RpcContext)
+  }
+
   function setup(): void {
     db = new OrchestrationDb(':memory:')
     runtime = new OrcaRuntimeService()
@@ -75,6 +96,15 @@ describe('agent: routing + durability', () => {
         evidence.launchToken
       ) {
         return makeAuthority(PANE_B, 'term_b')
+      }
+      // C4 fixture correction: term_a is a registered, attestable bystander sender in these
+      // fixtures (see EVIDENCE_A above) — never the recipient under test.
+      if (
+        evidence?.terminalHandle === EVIDENCE_A.terminalHandle &&
+        evidence.paneKey === EVIDENCE_A.paneKey &&
+        evidence.launchToken
+      ) {
+        return makeAuthority(PANE_A, 'term_a')
       }
       return null
     })
@@ -99,6 +129,27 @@ describe('agent: routing + durability', () => {
       throw new Error('fixture setup failed')
     }
     agentBId = created.agent.id
+
+    // C4 fixture correction: term_a now needs a registered agent row of its own — resolveCallerAgent
+    // (orchestration.send's new sender-identity gate) requires one for any attested `from: 'term_a'`.
+    const createdA = db.upsertAgentByPaneSuffix({
+      displayName: 'peer-a',
+      role: 'peer agent',
+      hostId: 'local',
+      paneKey: PANE_A,
+      terminalHandle: 'term_a',
+      processIncarnation: 'proc-1',
+      worktreeId: null,
+      worktreePath: null,
+      branch: null,
+      title: null,
+      agentLabel: null,
+      originHandle: 'term_a',
+      originHostId: 'local'
+    })
+    if (createdA.outcome === 'name_taken') {
+      throw new Error('fixture setup failed')
+    }
   }
 
   afterEach(() => {
@@ -107,11 +158,15 @@ describe('agent: routing + durability', () => {
 
   it('T1: send to agent:<id> with no bound Run lands on PEER_RUN_ID; check returns it, no throw', async () => {
     setup()
-    await call('orchestration.send', {
-      from: 'term_a',
-      to: `agent:${agentBId}`,
-      subject: 'lock-step: schema freeze'
-    })
+    await callFrom(
+      'orchestration.send',
+      {
+        from: 'term_a',
+        to: `agent:${agentBId}`,
+        subject: 'lock-step: schema freeze'
+      },
+      EVIDENCE_A
+    )
     const stored = db.getMessageById(db.getUnreadMessages(`agent:${agentBId}`)[0]?.id ?? '')
     expect(stored?.run_id).toBe(PEER_RUN_ID)
 
@@ -130,11 +185,15 @@ describe('agent: routing + durability', () => {
 
   it('D1/D2: an unacked delivery replays identically; --ack clears it', async () => {
     setup()
-    await call('orchestration.send', {
-      from: 'term_a',
-      to: `agent:${agentBId}`,
-      subject: 'first'
-    })
+    await callFrom(
+      'orchestration.send',
+      {
+        from: 'term_a',
+        to: `agent:${agentBId}`,
+        subject: 'first'
+      },
+      EVIDENCE_A
+    )
     const first = (await call('orchestration.check', { terminal: 'term_b' })) as {
       deliveryId: string
       messages: unknown[]
@@ -159,11 +218,15 @@ describe('agent: routing + durability', () => {
 
   it('D4: messages.delivered_at stays NULL through any number of check calls', async () => {
     setup()
-    await call('orchestration.send', {
-      from: 'term_a',
-      to: `agent:${agentBId}`,
-      subject: 'still undelivered'
-    })
+    await callFrom(
+      'orchestration.send',
+      {
+        from: 'term_a',
+        to: `agent:${agentBId}`,
+        subject: 'still undelivered'
+      },
+      EVIDENCE_A
+    )
     await call('orchestration.check', { terminal: 'term_b' })
     await call('orchestration.check', { terminal: 'term_b' })
     const rows = db.getUndeliveredUnreadMessages(`agent:${agentBId}`)
@@ -179,11 +242,15 @@ describe('agent: routing + durability', () => {
       subject: 'legacy mail',
       runId: ORCHESTRATION_LEGACY_RUN_ID
     })
-    await call('orchestration.send', {
-      from: 'term_a',
-      to: `agent:${agentBId}`,
-      subject: 'current mail'
-    })
+    await callFrom(
+      'orchestration.send',
+      {
+        from: 'term_a',
+        to: `agent:${agentBId}`,
+        subject: 'current mail'
+      },
+      EVIDENCE_A
+    )
     const checked = (await call('orchestration.check', { terminal: 'term_b' })) as {
       legacyPending: number
       messages: { subject: string }[]
@@ -209,11 +276,15 @@ describe('agent: routing + durability', () => {
 
   it('D6: --peek mints no delivery', async () => {
     setup()
-    await call('orchestration.send', {
-      from: 'term_a',
-      to: `agent:${agentBId}`,
-      subject: 'peek me'
-    })
+    await callFrom(
+      'orchestration.send',
+      {
+        from: 'term_a',
+        to: `agent:${agentBId}`,
+        subject: 'peek me'
+      },
+      EVIDENCE_A
+    )
     const peeked = (await call('orchestration.check', {
       terminal: 'term_b',
       peek: true
@@ -238,11 +309,15 @@ describe('agent: routing + durability', () => {
   // victim's mail exposed.
   it("MUTATION PROOF: an unattested caller naming the victim's --terminal never gets the agent: mailbox", async () => {
     setup()
-    await call('orchestration.send', {
-      from: 'term_a',
-      to: `agent:${agentBId}`,
-      subject: 'private to b'
-    })
+    await callFrom(
+      'orchestration.send',
+      {
+        from: 'term_a',
+        to: `agent:${agentBId}`,
+        subject: 'private to b'
+      },
+      EVIDENCE_A
+    )
     const unattested = { runtime } as RpcContext // no orchestrationCompatibilityEvidence at all
     const m = method('orchestration.check')
     const parsed = m.params ? m.params.parse({ terminal: 'term_b' }) : undefined
@@ -265,11 +340,15 @@ describe('agent: routing + durability', () => {
   // trusted a client-claimed pane key.
   it('MUTATION PROOF: a caller-supplied terminalPaneKey naming the victim never grants the agent: mailbox', async () => {
     setup()
-    await call('orchestration.send', {
-      from: 'term_a',
-      to: `agent:${agentBId}`,
-      subject: 'private to b'
-    })
+    await callFrom(
+      'orchestration.send',
+      {
+        from: 'term_a',
+        to: `agent:${agentBId}`,
+        subject: 'private to b'
+      },
+      EVIDENCE_A
+    )
     const attackerCtx = { runtime } as RpcContext // no evidence — only the param claims identity
     const m = method('orchestration.check')
     const parsed = m.params
@@ -402,11 +481,15 @@ describe('agent: routing + durability', () => {
 
     // Negative control: the registered agent's address still routes and is readable via the
     // attested check.
-    await call('orchestration.send', {
-      from: 'term_a',
-      to: `agent:${agentBId}`,
-      subject: 'registered still works'
-    })
+    await callFrom(
+      'orchestration.send',
+      {
+        from: 'term_a',
+        to: `agent:${agentBId}`,
+        subject: 'registered still works'
+      },
+      EVIDENCE_A
+    )
     const checked = (await call('orchestration.check', { terminal: 'term_b' })) as {
       agentId: string
       messages: { subject: string }[]
@@ -584,11 +667,15 @@ describe('agent: routing + durability', () => {
     it('T1b: agent-addressed mail on a run-bound pane is read through the agent: branch, not silently dropped', async () => {
       setup()
       db.createRun({ objective: 'x', coordinatorHandle: 'term_b', coordinatorPaneKey: PANE_B })
-      await call('orchestration.send', {
-        from: 'term_a',
-        to: `agent:${agentBId}`,
-        subject: 'directory mail to the chair'
-      })
+      await callFrom(
+        'orchestration.send',
+        {
+          from: 'term_a',
+          to: `agent:${agentBId}`,
+          subject: 'directory mail to the chair'
+        },
+        EVIDENCE_A
+      )
 
       const checked = (await call('orchestration.check', { terminal: 'term_b' })) as {
         mailbox?: string
@@ -607,11 +694,15 @@ describe('agent: routing + durability', () => {
         coordinatorHandle: 'term_b',
         coordinatorPaneKey: PANE_B
       })
-      await call('orchestration.send', {
-        from: 'term_a',
-        to: `agent:${agentBId}`,
-        subject: 'directory mail to the chair'
-      })
+      await callFrom(
+        'orchestration.send',
+        {
+          from: 'term_a',
+          to: `agent:${agentBId}`,
+          subject: 'directory mail to the chair'
+        },
+        EVIDENCE_A
+      )
 
       const checked = (await call('orchestration.check', {
         terminal: 'term_b',
@@ -630,11 +721,15 @@ describe('agent: routing + durability', () => {
         coordinatorHandle: 'term_b',
         coordinatorPaneKey: PANE_B
       })
-      await call('orchestration.send', {
-        from: 'term_a',
-        to: `agent:${agentBId}`,
-        subject: 'ordinary status mail'
-      })
+      await callFrom(
+        'orchestration.send',
+        {
+          from: 'term_a',
+          to: `agent:${agentBId}`,
+          subject: 'ordinary status mail'
+        },
+        EVIDENCE_A
+      )
 
       const checked = (await call('orchestration.check', {
         terminal: 'term_b',
@@ -653,11 +748,15 @@ describe('agent: routing + durability', () => {
         coordinatorHandle: 'term_b',
         coordinatorPaneKey: PANE_B
       })
-      await call('orchestration.send', {
-        from: 'term_a',
-        to: `agent:${agentBId}`,
-        subject: 'directory mail to the chair'
-      })
+      await callFrom(
+        'orchestration.send',
+        {
+          from: 'term_a',
+          to: `agent:${agentBId}`,
+          subject: 'directory mail to the chair'
+        },
+        EVIDENCE_A
+      )
 
       const first = (await call('orchestration.check', { terminal: 'term_b' })) as {
         mailbox?: string
@@ -686,11 +785,15 @@ describe('agent: routing + durability', () => {
     it('check --all on a run-bound pane with unread agent mail returns the agent mailbox rows', async () => {
       setup()
       db.createRun({ objective: 'x', coordinatorHandle: 'term_b', coordinatorPaneKey: PANE_B })
-      await call('orchestration.send', {
-        from: 'term_a',
-        to: `agent:${agentBId}`,
-        subject: 'directory mail to the chair'
-      })
+      await callFrom(
+        'orchestration.send',
+        {
+          from: 'term_a',
+          to: `agent:${agentBId}`,
+          subject: 'directory mail to the chair'
+        },
+        EVIDENCE_A
+      )
 
       const checked = (await call('orchestration.check', {
         terminal: 'term_b',
@@ -715,11 +818,15 @@ describe('agent: routing + durability', () => {
         to: `run:${run.id}`,
         subject: 'run history mail'
       })
-      await call('orchestration.send', {
-        from: 'term_a',
-        to: `agent:${agentBId}`,
-        subject: 'directory mail to the chair'
-      })
+      await callFrom(
+        'orchestration.send',
+        {
+          from: 'term_a',
+          to: `agent:${agentBId}`,
+          subject: 'directory mail to the chair'
+        },
+        EVIDENCE_A
+      )
 
       const checked = (await call('orchestration.check', {
         terminal: 'term_b',

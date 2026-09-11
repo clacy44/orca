@@ -112,7 +112,10 @@ describe('orchestration.messages.purge / orchestration.agents.review', () => {
         body: 'the secret plan',
         senderPaneKey: PANE_A
       },
-      ctx()
+      // C4 (D-R177 F5) fixture correction: the recipient resolves to an agent: — the send now
+      // requires the sender's own attestation, not just senderPaneKey; term_a is already
+      // registered as `agentA` above, so attest as evidenceA (unrelated to what T6 tests).
+      ctx(evidenceA)
     )) as { message: { id: string } }
 
     // Freeze a mailbox delivery batch that includes the not-yet-purged message.
