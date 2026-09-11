@@ -16,6 +16,7 @@ export type HolderAdoptionRefusalReason =
   | 'same_pane'
   | 'cross_execution_host'
   | 'current_generation'
+  | 'same_generation_settling'
   | 'holder_launch_row_missing'
   | 'death_signal_insufficient'
   | 'live_report_elsewhere'
@@ -42,6 +43,12 @@ export type HolderAdoptionInput = {
   d2Inventory: 'present' | 'absent' | 'unknown'
   inventoryRoundNonNull: boolean
   holderHasConnectedPty: boolean
+  /** [R142] True once the holder's D3 settle window has elapsed (now - firstObservedNotLiveAt >=
+   * REBIND_SETTLE_MS) — read from the evidence directly, since `resolveIncumbentDeath` returns
+   * IDENTITY before D3 is even consulted. Required (in addition to the IDENTITY+D2 proof below)
+   * before a SAME-generation holder is ever adoptable — D3 alone never sufficed, and here it
+   * gates a stricter case than GEN_ABSENCE's, never a looser one. */
+  holderSettledNotLive: boolean
   /** True iff the hook server's live provider-session set names session X on ANY pane whose
    * report is not itself resolved as a dead pane's stale report (live-report-liveness.ts). [R143]
    * unknown (the caller could not resolve the hook server's check, or a reporter's own inventory
@@ -62,7 +69,7 @@ export type HolderAdoptionInput = {
 }
 
 export type HolderAdoptionResult =
-  | { adoptable: true; signal: 'IDENTITY' | 'D1' | 'GEN_ABSENCE' }
+  | { adoptable: true; signal: 'IDENTITY' | 'D1' | 'GEN_ABSENCE' | 'SAME_GEN_PTY_ABSENCE' }
   | { adoptable: false; reason: HolderAdoptionRefusalReason; detail?: string }
 
 /** DEC-3's conjuncts A-G, pure. Never called when no holder exists (the caller's own
@@ -79,13 +86,12 @@ export function resolveHolderAdoption(input: HolderAdoptionInput): HolderAdoptio
   ) {
     return { adoptable: false, reason: 'cross_execution_host' }
   }
-  // (C) holder's newest launch row is from a PRIOR launch_generation.
+  // (C) holder's newest launch row is from a PRIOR launch_generation, OR [R142] the SAME
+  // generation under a stricter proof below — never guessed from a missing row either way.
   if (input.holderLaunchGeneration === null) {
     return { adoptable: false, reason: 'holder_launch_row_missing' }
   }
-  if (input.holderLaunchGeneration === input.currentLaunchGeneration) {
-    return { adoptable: false, reason: 'current_generation' }
-  }
+  const sameGeneration = input.holderLaunchGeneration === input.currentLaunchGeneration
   // (D) resolveIncumbentDeath = dead with signal IDENTITY or D1, or GEN_ABSENCE (D2 absence over
   // a non-null round AND no connected pty) — D3 never suffices. [S10-21d b3b, D-R163 M2 fix] The
   // live-report conjunct gates ALL three signals, not only GEN_ABSENCE: a second live process
@@ -105,21 +111,41 @@ export function resolveHolderAdoption(input: HolderAdoptionInput): HolderAdoptio
         : {})
     }
   }
-  let signal: 'IDENTITY' | 'D1' | 'GEN_ABSENCE' | null = null
-  if (
-    input.incumbent.dead &&
-    (input.incumbent.signal === 'IDENTITY' || input.incumbent.signal === 'D1')
-  ) {
-    signal = input.incumbent.signal
-  } else if (
-    input.inventoryRoundNonNull &&
-    input.d2Inventory === 'absent' &&
-    !input.holderHasConnectedPty
-  ) {
-    signal = 'GEN_ABSENCE'
-  }
-  if (signal === null) {
-    return { adoptable: false, reason: 'death_signal_insufficient' }
+  let signal: 'IDENTITY' | 'D1' | 'GEN_ABSENCE' | 'SAME_GEN_PTY_ABSENCE' | null = null
+  if (sameGeneration) {
+    // [R142] The launcher itself minted this generation, so an ordinary death signal (even
+    // IDENTITY alone) is not trusted here — require identity-death AND independently the SAME
+    // D2/pty-absence proof GEN_ABSENCE uses AND the D3 settle window, or refuse loudly rather
+    // than adopt a pane out from under a still-settling same-generation agent.
+    const identityDeadWithPtyAbsence =
+      input.incumbent.dead &&
+      input.incumbent.signal === 'IDENTITY' &&
+      input.inventoryRoundNonNull &&
+      input.d2Inventory === 'absent' &&
+      !input.holderHasConnectedPty
+    if (!identityDeadWithPtyAbsence) {
+      return { adoptable: false, reason: 'current_generation' }
+    }
+    if (!input.holderSettledNotLive) {
+      return { adoptable: false, reason: 'same_generation_settling' }
+    }
+    signal = 'SAME_GEN_PTY_ABSENCE'
+  } else {
+    if (
+      input.incumbent.dead &&
+      (input.incumbent.signal === 'IDENTITY' || input.incumbent.signal === 'D1')
+    ) {
+      signal = input.incumbent.signal
+    } else if (
+      input.inventoryRoundNonNull &&
+      input.d2Inventory === 'absent' &&
+      !input.holderHasConnectedPty
+    ) {
+      signal = 'GEN_ABSENCE'
+    }
+    if (signal === null) {
+      return { adoptable: false, reason: 'death_signal_insufficient' }
+    }
   }
   // (E) no restore sweep in flight.
   if (input.sweepLockHeld || input.sweepRestoreMarkSetForHolder) {

@@ -12,6 +12,14 @@ import type { AgentAliveResult } from './orchestration/agent-process-identity'
 
 export const REBIND_SETTLE_MS = 10_000
 
+/** [R142] D3's settle predicate alone, for a caller that needs it even when
+ * `resolveIncumbentDeath` returns before D3 is consulted (e.g. an IDENTITY verdict). */
+export function d3SettledNotLive(d3: IncumbentEvidence['d3']): boolean {
+  return (
+    d3.firstObservedNotLiveAt !== null && d3.now - d3.firstObservedNotLiveAt >= REBIND_SETTLE_MS
+  )
+}
+
 export type IncumbentEvidence = {
   paneKey: string
   ptyId?: string

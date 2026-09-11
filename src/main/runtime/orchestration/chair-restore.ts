@@ -12,7 +12,7 @@ import { registerAgentForPane } from './register-agent-for-pane'
 import { isRestoreSweepLockHeld } from '../restore-sweep-lock'
 import { resolveResumeTranscript } from '../../startup/resolve-resume-transcript'
 import { preflightResumeTranscript } from '../../ipc/agent-launch-admission-support'
-import { resolveIncumbentDeath, type IncumbentVerdict } from '../incumbent-death'
+import { resolveIncumbentDeath, d3SettledNotLive, type IncumbentVerdict } from '../incumbent-death'
 import { parsePaneKey } from '../../../shared/stable-pane-id'
 import { LaunchAdmissionRefusedError } from '../../ipc/agent-launch-admission-errors'
 import {
@@ -51,11 +51,11 @@ export type ChairRestoreResult =
       paneKey: string
       agentId: string
       holderPaneKey: string | null
-      adoptionSignal: 'IDENTITY' | 'D1' | 'GEN_ABSENCE' | null
+      adoptionSignal: 'IDENTITY' | 'D1' | 'GEN_ABSENCE' | 'SAME_GEN_PTY_ABSENCE' | null
     }
   | { ok: false; reason: 'restore_target_live_elsewhere'; holderPaneKey: string }
   | { ok: false; reason: HolderAdoptionRefusalReason; holderPaneKey: string; detail?: string }
-  | { ok: false; reason: string }
+  | { ok: false; reason: string; holderPaneKey?: string }
 
 export async function requestChairRestore(
   deps: ChairRestoreDeps,
@@ -91,7 +91,7 @@ export async function requestChairRestore(
   }
 
   const holderPaneKey = db.paneHoldingSession(hostId, request.sessionId) ?? null
-  let adoptionSignal: 'IDENTITY' | 'D1' | 'GEN_ABSENCE' | null = null
+  let adoptionSignal: 'IDENTITY' | 'D1' | 'GEN_ABSENCE' | 'SAME_GEN_PTY_ABSENCE' | null = null
   // [S10-21d b3b, D-R163 H2] set in the holder branch, read after registration for the audit rows.
   let holderGenerationForAudit: string | null = null
   let holderRegisteredForAudit: AgentRow | undefined
@@ -112,6 +112,8 @@ export async function requestChairRestore(
     let d2Inventory: 'present' | 'absent' | 'unknown'
     let inventoryRoundNonNull: boolean
     let holderHasConnectedPty = deps.runtime.findConnectedPtyForPane(holderPaneKey) !== undefined
+    // [R142] Fails closed: no D3 evidence bundle on the early-return branches -> not settled.
+    let holderSettledNotLive = false
     if (early.kind === 'skipped_daemon_survived') {
       incumbent = { dead: false, reason: 'live' }
       d2Inventory = 'present'
@@ -137,13 +139,17 @@ export async function requestChairRestore(
       d2Inventory = evidenceBundle.incumbentEvidence.d2.inventory
       inventoryRoundNonNull = true
       holderHasConnectedPty = holderHasConnectedPty || evidenceBundle.occupantLiveness === 'present'
+      holderSettledNotLive = d3SettledNotLive(evidenceBundle.incumbentEvidence.d3)
     }
 
     if (!incumbent.dead && incumbent.reason === 'live') {
       return { ok: false, reason: 'restore_target_live_elsewhere', holderPaneKey }
     }
 
-    const holderExecutionHostId = holderLaunchRow?.execution_host_id ?? hostId
+    // [R142] No silent `?? hostId` local guess — refuse when the launch row omits its host.
+    if (!holderLaunchRow?.execution_host_id) {
+      return { ok: false, reason: 'holder_execution_host_missing', holderPaneKey }
+    }
     // [JUDGMENT CALL, see RETURN; S10-21d b3b, D-R163 LOW fix] Conjunct F: every live
     // registered row sharing the holder pane's suffix, if any, must name the SAME chair — a
     // different live name refuses, reclaiming this restore's own prior identity does not.
@@ -188,7 +194,7 @@ export async function requestChairRestore(
       // `<tabId>:<leafId>` (both UUIDs, colon-separated — db.ts's paneKeyMatchSuffix); this
       // literal has no colon, so it can never collide with one — conjunct A is vacuous here.
       adoptingPaneKey: '<pending-launcher-restore>',
-      holderExecutionHostId,
+      holderExecutionHostId: holderLaunchRow.execution_host_id,
       adoptingExecutionHostId,
       holderLaunchGeneration: holderLaunchRow?.launch_generation ?? null,
       currentLaunchGeneration,
@@ -196,6 +202,7 @@ export async function requestChairRestore(
       d2Inventory,
       inventoryRoundNonNull,
       holderHasConnectedPty,
+      holderSettledNotLive,
       liveHookReportOfSessionOnLivePaneElsewhere,
       liveReportReporterPaneKeys: liveReportPanes?.map((r) => r.paneKey),
       sweepLockHeld: isRestoreSweepLockHeld(),

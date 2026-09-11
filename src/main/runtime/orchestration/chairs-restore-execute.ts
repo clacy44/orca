@@ -22,7 +22,7 @@ export type RequestChairRestoreOutcome =
       paneKey: string
       agentId: string
       holderPaneKey: string | null
-      adoptionSignal: 'IDENTITY' | 'D1' | 'GEN_ABSENCE' | null
+      adoptionSignal: 'IDENTITY' | 'D1' | 'GEN_ABSENCE' | 'SAME_GEN_PTY_ABSENCE' | null
     }
   | { ok: false; reason: string; holderPaneKey?: string }
 

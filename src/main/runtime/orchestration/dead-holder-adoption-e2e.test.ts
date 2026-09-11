@@ -644,4 +644,104 @@ describe('D-R163 M3 negatives 1/2/6: dead-holder adoption, wired end to end', ()
     expect(adoptedAudit?.reason_code).toBeDefined()
     expect(adoptedAudit!.reason_code.length).toBeLessThanOrEqual(200)
   })
+
+  // [S10-21f b2-10q R142] Same-generation dead holder: chained through the real predicate ->
+  // admission -> db write, proving the settle-window gate specifically (the pure-function tests
+  // in dead-holder-adoption.test.ts already prove the boolean logic; this proves D3's real clock
+  // wiring via evidenceBundle.incumbentEvidence.d3).
+  it('R142: a same-generation IDENTITY-dead holder refuses until settled, then adopts SAME_GEN_PTY_ABSENCE', async () => {
+    db = new OrchestrationDb(':memory:')
+    const runtime = makeRuntime()
+    runtime.setOrchestrationDb(db)
+    stubLaunchScope(runtime)
+    installRecordingPtyController(runtime, db)
+
+    tempHome = await mkdtemp(join(tmpdir(), 'orca-dead-holder-e2e-r142-'))
+    process.env.HOME = tempHome
+    const projectDir = join(tempHome, '.claude', 'projects', 'proj')
+    await mkdir(projectDir, { recursive: true })
+    const sessionId = 'sess-r142'
+    await writeFile(
+      join(projectDir, `${sessionId}.jsonl`),
+      `${JSON.stringify({ type: 'user', message: { role: 'user', content: 'hi' } })}\n`
+    )
+
+    const sameGen = runtime.getLaunchGenerationId()
+    const holderPaneKey = `tab-old:${randomUUID()}`
+    const holderPtyId = `pty-${randomUUID()}`
+    const holderIncarnationId = randomUUID()
+    const created = db.upsertAgentByPaneSuffix({
+      displayName: 'chair-r142',
+      role: null,
+      hostId: HOST_ID,
+      paneKey: holderPaneKey,
+      terminalHandle: null,
+      processIncarnation: `${holderPtyId}:${holderIncarnationId}`,
+      worktreeId: null,
+      worktreePath: null,
+      branch: null,
+      title: null,
+      agentLabel: null,
+      originHandle: null,
+      originHostId: HOST_ID
+    })
+    if (created.outcome === 'name_taken') {
+      throw new Error('fixture setup failed')
+    }
+    const launched = db.recordLaunch({
+      hostId: HOST_ID,
+      paneKey: holderPaneKey,
+      agentType: 'claude',
+      sessionId,
+      launchGeneration: sameGen,
+      executionHostId: HOST_ID,
+      evidence: 'host_launch'
+    })
+    if (!launched.ok) {
+      throw new Error('fixture launch row failed')
+    }
+
+    // Identity present but ABSENT from this (non-null) round -> IDENTITY dead, same as negative 1.
+    const deadInventory: ControllerInventory = {
+      allLivePtyIds: new Set(),
+      terminalIdentityByPtyId: new Map()
+    }
+    vi.spyOn(runtime, 'takeControllerInventoryForSweep').mockResolvedValue(deadInventory)
+
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(1_700_000_000_000)
+
+      // First call: D3's settle clock has just started (firstObservedNotLiveAt == now) -> refused.
+      const firstAttempt = await runtime.requestChairRestore({
+        worktreeSelector: 'id:wt-1',
+        sessionId,
+        displayName: 'chair-r142'
+      })
+      expect(firstAttempt).toEqual({
+        ok: false,
+        reason: 'same_generation_settling',
+        holderPaneKey
+      })
+
+      // Advance past REBIND_SETTLE_MS (10s) -> now settled.
+      vi.setSystemTime(1_700_000_000_000 + 11_000)
+
+      const result = await runtime.requestChairRestore({
+        worktreeSelector: 'id:wt-1',
+        sessionId,
+        displayName: 'chair-r142'
+      })
+
+      expect(result.ok).toBe(true)
+      if (!result.ok) {
+        throw new Error('unreachable')
+      }
+      expect(result.holderPaneKey).toBe(holderPaneKey)
+      expect(result.adoptionSignal).toBe('SAME_GEN_PTY_ABSENCE')
+      expect(db.newestLaunchForPane(HOST_ID, result.paneKey)?.evidence).toBe('host_restore')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })
