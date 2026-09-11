@@ -454,4 +454,38 @@ describe('D-R177 F1-F4: orchestration.reply local branch fail-closed authorship'
 
     expect(result.message.from_handle).toBe(`agent:${agentAId}`)
   })
+
+  it('case 11 (M1): a write-choke gate refusal must leave the original unread', async () => {
+    const originalId = 'msg_gaterefuse0000001'
+    db.insertGatedMessage({
+      id: originalId,
+      from: `agent:${agentBId}`,
+      to: `agent:${agentAId}`,
+      subject: 'from B to A',
+      body: 'hi A',
+      runId: 'run_test_local',
+      verb: 'send',
+      threadId: null
+    })
+    const before = messageCount()
+
+    await expect(
+      call(
+        'orchestration.reply',
+        // HARD tier: a line-start "SECURITY:" heading (message-body-gate.ts's
+        // security-heading rule) — reaches insertGatedMessage's write choke and is refused
+        // there, well past the not_the_addressee/no_pane_identity/no_registered_identity
+        // guards above, which all fire before markAsRead is even reachable.
+        { id: originalId, body: 'SECURITY: gate refusal test body' },
+        {
+          runtime,
+          orchestrationCompatibilityEvidence: { terminalHandle: 'term_a', paneKey: PANE_A }
+        }
+      )
+    ).rejects.toMatchObject({ code: 'body_gate_refused' })
+
+    expect(messageCount()).toBe(before)
+    // M1: a gate-refused reply must not consume the original — markAsRead must not have run.
+    expect(readFlag(originalId)).toBe(0)
+  })
 })

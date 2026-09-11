@@ -2715,12 +2715,6 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         replySenderHostId = runtime.getOrchestrationCompatibilityHostId() ?? 'local'
       }
 
-      // C1 (M1): mark the original read only immediately before the insert that commits this
-      // reply — every guard above (federated-worker relay excepted, which marks read itself on
-      // its own accepted path) can still throw, and a refused reply must leave the original
-      // unread rather than consuming it.
-      db.markAsRead([original.id])
-
       // Amendment A: the plain reply insert routes through the single write choke too.
       const insertedReply = db.insertGatedMessage({
         from: replyFrom,
@@ -2737,6 +2731,11 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
       if (insertedReply.outcome === 'refused') {
         throw gateVerdictRefusalError(insertedReply.verdict, insertedReply.refusalId)
       }
+      // C1 (M1): mark the original read only immediately before the insert that commits this
+      // reply — every guard above (federated-worker relay excepted, which marks read itself on
+      // its own accepted path) can still throw, and a gate-refused reply (this write choke
+      // included) must leave the original unread rather than consuming it.
+      db.markAsRead([original.id])
       const reply = insertedReply.message
 
       runtime.notifyMessageArrived(
