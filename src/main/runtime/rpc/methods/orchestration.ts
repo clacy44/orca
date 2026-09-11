@@ -2517,20 +2517,74 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
       if (original.from_handle.startsWith('agent:')) {
         requireAddressableAgentRecipient(db, original.from_handle.slice('agent:'.length))
       }
-      const replyFrom = params.from ?? original.to_handle
-      const replyAttestedCaller =
-        orchestrationCompatibilityCallerAuthority?.terminalHandle === replyFrom
-          ? orchestrationCompatibilityCallerAuthority
-          : undefined
-      // Adversarial review major #4 fix — same shape as send's senderPaneKey above: an
-      // attestation that disagrees with the claimed replyFrom must never fall back to trusting
-      // replyFrom's own pane (that resolves and stamps a real, impersonated sender_agent_id).
-      const replySenderPaneKey = replyAttestedCaller
-        ? replyAttestedCaller.paneKey
-        : orchestrationCompatibilityCallerAuthority
-          ? undefined
-          : (runtime.getTerminalPaneKey(replyFrom) ?? undefined)
-      const replySenderHostId = runtime.getOrchestrationCompatibilityHostId() ?? 'local'
+      // D-R177 F1-F4: a plain local reply to an `agent:`-addressed thread (either side) must
+      // bind authorship to the ATTESTED caller, never to params.from/original.to_handle — those
+      // are caller-supplied or forged-from data (Amendment B's own comment above, applied to the
+      // sender side this time). Run/Dispatch/term_-addressed mail is untouched: it falls to the
+      // else branch below exactly as before.
+      let replyFrom: string
+      let replySenderPaneKey: string | undefined
+      let replySenderHostId: string
+      if (original.to_handle.startsWith('agent:') || original.from_handle.startsWith('agent:')) {
+        const replyHostId = runtime.getOrchestrationCompatibilityHostId() ?? 'local'
+        let caller: ReturnType<typeof resolveCallerAgent>
+        try {
+          caller = resolveCallerAgent(db, runtime, orchestrationCompatibilityEvidence)
+        } catch (err) {
+          if (err instanceof OrchestrationError) {
+            db.writeAgentAudit({
+              agentId: null,
+              actorPaneKey: null,
+              actorHostId: replyHostId,
+              verb: 'reply',
+              outcome: err.code,
+              reasonCode: null
+            })
+          }
+          throw err
+        }
+        replyFrom = `agent:${caller.id}`
+        // F2: a reply to your OWN latest message on the thread is not a reply — refuse it
+        // rather than silently letting the thread's roles swap.
+        if (original.from_handle === replyFrom) {
+          db.writeAgentAudit({
+            agentId: caller.id,
+            actorPaneKey: caller.pane_key,
+            actorHostId: caller.host_id,
+            verb: 'reply',
+            outcome: 'not_the_addressee',
+            reasonCode: null
+          })
+          throw new OrchestrationError(
+            'not_the_addressee',
+            `You authored the latest message on this thread (${params.id}); reply to a specific message with a different addressee, or send directly.`,
+            {
+              nextSteps: [
+                'you authored the latest message on this thread — reply to a specific message with orca agents reply --id <msg>, or send directly'
+              ]
+            }
+          )
+        }
+        // F1/F3: bind to the attested caller's own pane — no unauthenticated
+        // runtime.getTerminalPaneKey(replyFrom) fallback on this branch.
+        replySenderPaneKey = caller.pane_key
+        replySenderHostId = caller.host_id
+      } else {
+        replyFrom = params.from ?? original.to_handle
+        const replyAttestedCaller =
+          orchestrationCompatibilityCallerAuthority?.terminalHandle === replyFrom
+            ? orchestrationCompatibilityCallerAuthority
+            : undefined
+        // Adversarial review major #4 fix — same shape as send's senderPaneKey above: an
+        // attestation that disagrees with the claimed replyFrom must never fall back to trusting
+        // replyFrom's own pane (that resolves and stamps a real, impersonated sender_agent_id).
+        replySenderPaneKey = replyAttestedCaller
+          ? replyAttestedCaller.paneKey
+          : orchestrationCompatibilityCallerAuthority
+            ? undefined
+            : (runtime.getTerminalPaneKey(replyFrom) ?? undefined)
+        replySenderHostId = runtime.getOrchestrationCompatibilityHostId() ?? 'local'
+      }
 
       // Amendment A: the plain reply insert routes through the single write choke too.
       const insertedReply = db.insertGatedMessage({
