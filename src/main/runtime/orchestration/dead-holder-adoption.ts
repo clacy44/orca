@@ -42,8 +42,11 @@ export type HolderAdoptionInput = {
   d2Inventory: 'present' | 'absent' | 'unknown'
   inventoryRoundNonNull: boolean
   holderHasConnectedPty: boolean
-  /** True iff the hook server's live provider-session set names session X on ANY pane. */
-  liveHookReportOfSessionElsewhere: boolean
+  /** True iff the hook server's live provider-session set names session X on ANY pane whose
+   * report is not itself resolved as a dead pane's stale report (live-report-liveness.ts). [R143]
+   * unknown (the caller could not resolve the hook server's check, or a reporter's own inventory
+   * round) collapses to true — the caller's own default, never guessed here. */
+  liveHookReportOfSessionOnLivePaneElsewhere: boolean
   sweepLockHeld: boolean
   sweepRestoreMarkSetForHolder: boolean
   /** True iff the holder pane resolves a LIVE registered agents row other than the one being
@@ -52,11 +55,15 @@ export type HolderAdoptionInput = {
   holderHasOtherLiveRegisteredRow: boolean
   /** S4's own resume-transcript preflight, already resolved by the caller (async IO). */
   transcriptPreflightPassed: boolean
+  /** [R143] Display-only: the reporter pane(s) behind `liveHookReportOfSessionOnLivePaneElsewhere`
+   * (already collapsed to a boolean by live-report-liveness.ts) — never consulted for
+   * adoptability, only to populate the refusal's `detail`. */
+  liveReportReporterPaneKeys?: readonly string[]
 }
 
 export type HolderAdoptionResult =
   | { adoptable: true; signal: 'IDENTITY' | 'D1' | 'GEN_ABSENCE' }
-  | { adoptable: false; reason: HolderAdoptionRefusalReason }
+  | { adoptable: false; reason: HolderAdoptionRefusalReason; detail?: string }
 
 /** DEC-3's conjuncts A-G, pure. Never called when no holder exists (the caller's own
  * null-predecessor path skips this predicate entirely — DEC-2). */
@@ -84,12 +91,19 @@ export function resolveHolderAdoption(input: HolderAdoptionInput): HolderAdoptio
   // live-report conjunct gates ALL three signals, not only GEN_ABSENCE: a second live process
   // reporting X elsewhere contests IDENTITY/D1 exactly as it contests GEN_ABSENCE (DEC-1's
   // contested-state case) — checked FIRST so neither branch below needs its own copy.
-  if (input.liveHookReportOfSessionElsewhere) {
+  if (input.liveHookReportOfSessionOnLivePaneElsewhere) {
     // [D-R170 M7] Distinct from the ordinary no-death-signal refusal below (:103) — this one
     // fires because another pane's hook report contests the session, which needs a different
     // operator response (investigate that pane / wait out its recency window), not "the D2/pty
-    // evidence didn't add up". The CLI prints this reason verbatim.
-    return { adoptable: false, reason: 'live_report_elsewhere' }
+    // evidence didn't add up". The CLI prints this reason verbatim. [R143] `detail` names the
+    // reporter pane(s) so the operator does not have to re-derive them from the hook state.
+    return {
+      adoptable: false,
+      reason: 'live_report_elsewhere',
+      ...(input.liveReportReporterPaneKeys && input.liveReportReporterPaneKeys.length > 0
+        ? { detail: `reporter_panes=${input.liveReportReporterPaneKeys.join(',')}` }
+        : {})
+    }
   }
   let signal: 'IDENTITY' | 'D1' | 'GEN_ABSENCE' | null = null
   if (

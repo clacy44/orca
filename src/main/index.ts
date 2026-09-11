@@ -2860,6 +2860,11 @@ void app.whenReady().then(async () => {
   runtimeService.setHasLiveHookReportOfSessionCheck((sessionId, opts) =>
     agentHookServer.hasLiveReportOfSession(sessionId, opts)
   )
+  // [S10-21f b2-10q R143] Same wiring, pane-granular — dead-holder-adoption's
+  // live-report-liveness module needs the reporter pane, not a collapsed boolean.
+  runtimeService.setLiveReportPanesForSessionCheck((sessionId, opts) =>
+    agentHookServer.liveReportPanesForSession(sessionId, opts)
+  )
   // Why here and not beside the other rate-limit resolvers: the pane→lane join needs the runtime,
   // which is constructed after them. A post arriving before this lands falls back to the
   // config-dir map, which is the pre-S9b behaviour (S9 §2k).

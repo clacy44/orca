@@ -88,7 +88,7 @@ function installRecordingPtyController(runtime: OrcaRuntimeService, db: Orchestr
 }
 
 function makeRuntime(): OrcaRuntimeService {
-  return new OrcaRuntimeService({
+  const runtime = new OrcaRuntimeService({
     getSettings: () => ({
       disabledTuiAgents: [],
       agentCmdOverrides: {},
@@ -99,6 +99,12 @@ function makeRuntime(): OrcaRuntimeService {
     getAllWorktreeMeta: () => ({}),
     getRepos: () => []
   } as never)
+  // [S10-21f b2-10q R143] The pane-granular accessor now fails CLOSED (unwired -> the caller
+  // treats the report as standing) — this fixture's own hook server is never wired at all, so it
+  // must say so explicitly: no reporter panes anywhere, matching the old unwired-collapses-to-
+  // false default these fixtures relied on for every non-R143 scenario in this file.
+  runtime.setLiveReportPanesForSessionCheck(() => [])
+  return runtime
 }
 
 describe('D-R163 M3 negatives 1/2/6: dead-holder adoption, wired end to end', () => {

@@ -15,6 +15,8 @@ import { _resetRestoreSweepLockForTest } from '../restore-sweep-lock'
 import { runChairsRestore, type ChairsRestoreExecutorDeps } from './chairs-restore-execute'
 import { resolveResumeTranscript } from '../../startup/resolve-resume-transcript'
 import type { ChairsManifest } from './chairs-manifest'
+import type { ControllerInventory } from './agent-process-identity'
+import { parsePaneKey } from '../../../shared/stable-pane-id'
 
 vi.mock('electron', () => ({
   BrowserWindow: { fromId: vi.fn(() => null) },
@@ -195,5 +197,143 @@ describe('S10-21d b4 e2e: two-chair manifest through requestChairRestore, then a
       expect(row.ok).toBe(true)
     }
     expect(db.listAgents({ hostId }).agents.length).toBe(agentsBefore)
+  })
+
+  // [S10-21f b2-10q R143] A dead holder normally adopts; a live hook report of the same session
+  // elsewhere used to refuse it unconditionally (`live_report_elsewhere`) even when that
+  // reporter's own pty has since died. This proves the discount end to end: requestChairRestore
+  // -> resolveHolderAdoption -> the real host_restore admission arm -> the db write.
+  it('[R143] a dead holder is adoptable despite a stale report elsewhere once that reporter pane resolves an absent pty', async () => {
+    db = new OrchestrationDb(':memory:')
+    tempHome = await mkdtemp(join(tmpdir(), 'orca-chairs-e2e-r143-'))
+    process.env.HOME = tempHome
+    const projectDir = join(tempHome, '.claude', 'projects', 'proj')
+    await mkdir(projectDir, { recursive: true })
+    const sessionId = 'sess-r143'
+    await writeFile(
+      join(projectDir, `${sessionId}.jsonl`),
+      `${JSON.stringify({ type: 'user', message: { role: 'user', content: 'hi' } })}\n`
+    )
+
+    const runtime = new OrcaRuntimeService({
+      getSettings: () => ({
+        disabledTuiAgents: [],
+        agentCmdOverrides: {},
+        agentDefaultArgs: {},
+        agentDefaultEnv: {}
+      }),
+      getWorkspaceSession: () => ({ tabsByWorktree: {} }),
+      getAllWorktreeMeta: () => ({}),
+      getRepos: () => []
+    } as never)
+    runtime.setOrchestrationDb(db)
+    stubLaunchScope(runtime)
+    runtime.setPtyController({
+      spawn: async (opts) => {
+        const id = randomUUID()
+        const admission = (opts as { launchAdmission?: { kind: string } }).launchAdmission
+        if (admission && admission.kind === 'host-resume') {
+          const hostResume = admission as unknown as {
+            sessionId: string
+            predecessorPaneKey: string | null
+            executionHostId: string
+            launchGeneration: string
+            evidence?: 'sweep_record' | 'host_restore'
+          }
+          const { tabId, leafId } = opts as { tabId: string; leafId: string }
+          db.recordLaunch({
+            hostId: runtime.getOrchestrationCompatibilityHostId(),
+            paneKey: `${tabId}:${leafId}`,
+            agentType: 'claude',
+            sessionId: hostResume.sessionId,
+            launchGeneration: hostResume.launchGeneration,
+            executionHostId: hostResume.executionHostId,
+            evidence: hostResume.evidence ?? 'sweep_record',
+            ...(hostResume.predecessorPaneKey
+              ? { supersedePaneKey: hostResume.predecessorPaneKey }
+              : {})
+          })
+        }
+        return { id, isReattach: false }
+      },
+      write: () => true,
+      kill: () => true,
+      getForegroundProcess: async () => null
+    })
+
+    const hostId = runtime.getOrchestrationCompatibilityHostId()
+    const holderPaneKey = `tab-old:${randomUUID()}`
+    const holderPtyId = `pty-${randomUUID()}`
+    const holderIncarnationId = randomUUID()
+    const created = db.upsertAgentByPaneSuffix({
+      displayName: 'chair-r143',
+      role: null,
+      hostId,
+      paneKey: holderPaneKey,
+      terminalHandle: null,
+      processIncarnation: `${holderPtyId}:${holderIncarnationId}`,
+      worktreeId: null,
+      worktreePath: null,
+      branch: null,
+      title: null,
+      agentLabel: null,
+      originHandle: null,
+      originHostId: hostId
+    })
+    if (created.outcome === 'name_taken') {
+      throw new Error('fixture setup failed')
+    }
+    const launched = db.recordLaunch({
+      hostId,
+      paneKey: holderPaneKey,
+      agentType: 'claude',
+      sessionId,
+      launchGeneration: 'gen-r143-prior',
+      executionHostId: hostId,
+      evidence: 'host_launch'
+    })
+    if (!launched.ok) {
+      throw new Error('fixture launch row failed')
+    }
+
+    // The reporter pane: NOT the holder, reports the session as live, but its own pty is
+    // ABSENT from the round and not connected now — the exact fixture R143 exists for.
+    const reporterPaneKey = `tab-reporter:${randomUUID()}`
+    const reporterPtyId = `pty-reporter-${randomUUID()}`
+    const reporterParsed = parsePaneKey(reporterPaneKey)
+    if (!reporterParsed) {
+      throw new Error('fixture reporter pane key unparsable')
+    }
+    runtime.setLiveReportPanesForSessionCheck((sid, opts) => {
+      if (sid !== sessionId || opts?.excludePaneKey === reporterPaneKey) {
+        return []
+      }
+      return [{ paneKey: reporterPaneKey, executionHostId: hostId }]
+    })
+    // No connected pty anywhere (holder or reporter) — matches the dead-holder fixture shape.
+    vi.spyOn(runtime, 'findConnectedPtyForPane').mockReturnValue(undefined)
+    vi.spyOn(runtime, 'getPersistedPtyIdForLeaf').mockImplementation((tabId, leafId) =>
+      tabId === reporterParsed.tabId && leafId === reporterParsed.leafId ? reporterPtyId : undefined
+    )
+    // Neither the holder's nor the reporter's pty is listed live.
+    const deadInventory: ControllerInventory = {
+      allLivePtyIds: new Set(),
+      terminalIdentityByPtyId: new Map()
+    }
+    vi.spyOn(runtime, 'takeControllerInventoryForSweep').mockResolvedValue(deadInventory)
+
+    const result = await runtime.requestChairRestore({
+      worktreeSelector: 'id:wt-1',
+      sessionId,
+      displayName: 'chair-r143'
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) {
+      throw new Error('unreachable')
+    }
+    expect(result.holderPaneKey).toBe(holderPaneKey)
+    expect(result.adoptionSignal).toBe('IDENTITY')
+    expect(db.newestLaunchForPane(hostId, result.paneKey)?.evidence).toBe('host_restore')
   })
 })

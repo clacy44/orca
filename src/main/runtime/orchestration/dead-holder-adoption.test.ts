@@ -17,7 +17,7 @@ function baseInput(overrides: Partial<HolderAdoptionInput> = {}): HolderAdoption
     d2Inventory: 'absent',
     inventoryRoundNonNull: true,
     holderHasConnectedPty: false,
-    liveHookReportOfSessionElsewhere: false,
+    liveHookReportOfSessionOnLivePaneElsewhere: false,
     sweepLockHeld: false,
     sweepRestoreMarkSetForHolder: false,
     holderHasOtherLiveRegisteredRow: false,
@@ -106,7 +106,7 @@ describe('S10-21d b3: resolveHolderAdoption', () => {
     const result = resolveHolderAdoption(
       baseInput({
         incumbent: { dead: true, signal: 'IDENTITY', evidence: {} as never },
-        liveHookReportOfSessionElsewhere: true
+        liveHookReportOfSessionOnLivePaneElsewhere: true
       })
     )
     expect(result).toEqual({ adoptable: false, reason: 'live_report_elsewhere' })
@@ -116,7 +116,7 @@ describe('S10-21d b3: resolveHolderAdoption', () => {
     const result = resolveHolderAdoption(
       baseInput({
         incumbent: { dead: true, signal: 'D1', evidence: {} as never },
-        liveHookReportOfSessionElsewhere: true
+        liveHookReportOfSessionOnLivePaneElsewhere: true
       })
     )
     expect(result).toEqual({ adoptable: false, reason: 'live_report_elsewhere' })
@@ -126,7 +126,7 @@ describe('S10-21d b3: resolveHolderAdoption', () => {
     const result = resolveHolderAdoption(
       baseInput({
         incumbent: { dead: false, reason: 'inventory_unknown' },
-        liveHookReportOfSessionElsewhere: true
+        liveHookReportOfSessionOnLivePaneElsewhere: true
       })
     )
     expect(result).toEqual({ adoptable: false, reason: 'live_report_elsewhere' })
@@ -181,5 +181,40 @@ describe('S10-21d b3: resolveHolderAdoption', () => {
   it('(G) transcript preflight failed -> refused transcript_preflight_failed', () => {
     const result = resolveHolderAdoption(baseInput({ transcriptPreflightPassed: false }))
     expect(result).toEqual({ adoptable: false, reason: 'transcript_preflight_failed' })
+  })
+
+  // [S10-21f b2-10q R143] `liveHookReportOfSessionOnLivePaneElsewhere` is the caller's own
+  // already-discounted boolean (live-report-liveness.ts decides the discount; this predicate only
+  // reads the result), so these prove the RENAMED field still gates identically to the old one,
+  // plus the new `detail`/`liveReportReporterPaneKeys` wiring.
+  it('R143: liveHookReportOfSessionOnLivePaneElsewhere false (the caller already discounted a dead reporter) -> adoptable', () => {
+    const result = resolveHolderAdoption(
+      baseInput({
+        liveHookReportOfSessionOnLivePaneElsewhere: false,
+        liveReportReporterPaneKeys: ['tab-dead-reporter:leaf']
+      })
+    )
+    expect(result).toEqual({ adoptable: true, signal: 'IDENTITY' })
+  })
+
+  it('R143: refusal detail names the reporter pane(s) when supplied', () => {
+    const result = resolveHolderAdoption(
+      baseInput({
+        liveHookReportOfSessionOnLivePaneElsewhere: true,
+        liveReportReporterPaneKeys: ['tab-live-reporter:leaf']
+      })
+    )
+    expect(result).toEqual({
+      adoptable: false,
+      reason: 'live_report_elsewhere',
+      detail: 'reporter_panes=tab-live-reporter:leaf'
+    })
+  })
+
+  it('R143: refusal has no detail when no reporter pane keys are supplied', () => {
+    const result = resolveHolderAdoption(
+      baseInput({ liveHookReportOfSessionOnLivePaneElsewhere: true })
+    )
+    expect(result).toEqual({ adoptable: false, reason: 'live_report_elsewhere' })
   })
 })

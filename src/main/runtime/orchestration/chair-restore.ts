@@ -7,6 +7,7 @@ import type { AgentRow } from './types'
 import { decideEarlyRows } from './restore-sweep-decision'
 import { collectSweepEvidence } from './restore-sweep-evidence'
 import { resolveHolderAdoption, type HolderAdoptionRefusalReason } from './dead-holder-adoption'
+import { liveReportStandsElsewhere } from './live-report-liveness'
 import { registerAgentForPane } from './register-agent-for-pane'
 import { isRestoreSweepLockHeld } from '../restore-sweep-lock'
 import { resolveResumeTranscript } from '../../startup/resolve-resume-transcript'
@@ -53,7 +54,7 @@ export type ChairRestoreResult =
       adoptionSignal: 'IDENTITY' | 'D1' | 'GEN_ABSENCE' | null
     }
   | { ok: false; reason: 'restore_target_live_elsewhere'; holderPaneKey: string }
-  | { ok: false; reason: HolderAdoptionRefusalReason; holderPaneKey: string }
+  | { ok: false; reason: HolderAdoptionRefusalReason; holderPaneKey: string; detail?: string }
   | { ok: false; reason: string }
 
 export async function requestChairRestore(
@@ -165,6 +166,21 @@ export async function requestChairRestore(
       request.sessionId
     )
 
+    // [S10-21f b2-10q R143] Exclude the holder's own stale rehydrated row (OD-21d-1), same as the
+    // prior boolean check. `null` (the pane-granular accessor unwired) collapses to `true` — the
+    // report is treated as standing, never guessed discounted — matching DEC-3's conservative
+    // default. Otherwise the SAME inventory round taken above (:104) decides, per reporter, via
+    // live-report-liveness.ts.
+    const liveReportPanes = deps.runtime.liveReportPanesForSession(request.sessionId, {
+      excludePaneKey: holderPaneKey
+    })
+    const liveHookReportOfSessionOnLivePaneElsewhere = liveReportStandsElsewhere(
+      liveReportPanes,
+      inventory,
+      hostId,
+      deps.runtime
+    )
+
     const decision = resolveHolderAdoption({
       holderPaneKey,
       // [JUDGMENT CALL, see RETURN; S10-21d b3b, D-R163 LOW fix: sentinel wording] The adopting
@@ -180,19 +196,20 @@ export async function requestChairRestore(
       d2Inventory,
       inventoryRoundNonNull,
       holderHasConnectedPty,
-      // [S10-21d b3b, D-R163 M1 fix] Exclude the holder's own stale rehydrated row (OD-21d-1).
-      // [b3b M5] null (unwired) coerces to false here — conservative, matches DEC-3's own default.
-      liveHookReportOfSessionElsewhere:
-        deps.runtime.hasLiveHookReportOfSession(request.sessionId, {
-          excludePaneKey: holderPaneKey
-        }) ?? false,
+      liveHookReportOfSessionOnLivePaneElsewhere,
+      liveReportReporterPaneKeys: liveReportPanes?.map((r) => r.paneKey),
       sweepLockHeld: isRestoreSweepLockHeld(),
       sweepRestoreMarkSetForHolder: db.getSweepRestoreMark(hostId, holderPaneKey),
       holderHasOtherLiveRegisteredRow,
       transcriptPreflightPassed: preflight.ok
     })
     if (!decision.adoptable) {
-      return { ok: false, reason: decision.reason, holderPaneKey }
+      return {
+        ok: false,
+        reason: decision.reason,
+        holderPaneKey,
+        ...(decision.detail ? { detail: decision.detail } : {})
+      }
     }
     // [S10-21d b3b, D-R163 H2 fix] Clamp per holder pane before minting (house rate limiter).
     const rate = db.checkAndBumpRate({

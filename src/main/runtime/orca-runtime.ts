@@ -1547,6 +1547,12 @@ type RuntimePtyWorktreeRecord = {
 
 type LiveReportOpts = { excludePaneKey?: string } // [S10-21d b3, DEC-3 D]
 type LiveReportCheckFn = (sessionId: string, opts?: LiveReportOpts) => boolean
+// [S10-21f b2-10q R143] Mirrors LiveReportCheckFn's pair, returning the reporter panes rather
+// than a collapsed boolean.
+type LiveReportPanesCheckFn = (
+  sessionId: string,
+  opts?: LiveReportOpts
+) => { paneKey: string; executionHostId: string }[]
 type ChairRestoreRequest = Parameters<typeof requestChairRestoreImpl>[1] // [b3b M4]
 type ChairRestoreResult = ReturnType<typeof requestChairRestoreImpl>
 
@@ -3267,6 +3273,7 @@ export class OrcaRuntimeService {
   // minted and redeemed entirely in-process (INV-P-021).
   private readonly restoreTickets = new RestoreTicketRegistry()
   private liveReportCheck: LiveReportCheckFn | null = null // [S10-21d b3, DEC-3 D]
+  private liveReportPanesCheck: LiveReportPanesCheckFn | null = null // [S10-21f b2-10q R143]
   // S10-16 C1 review F3: the device registry's R1.4 legacy-sweep audit rows have no sink until the
   // orchestration DB attaches (device-registry-load.ts runs before it exists) — RuntimeRpcServer
   // registers its DeviceRegistry here once pairing init succeeds, and this flushes it exactly once
@@ -14188,6 +14195,15 @@ export class OrcaRuntimeService {
   } // [S10-21d b3 DEC-3 D]
   hasLiveHookReportOfSession(sessionId: string, opts?: LiveReportOpts): boolean | null {
     return this.liveReportCheck ? this.liveReportCheck(sessionId, opts) : null // [b3b M1/M5]
+  }
+  setLiveReportPanesForSessionCheck(check: LiveReportPanesCheckFn): void {
+    this.liveReportPanesCheck = check
+  } // [S10-21f b2-10q R143]
+  liveReportPanesForSession(
+    sessionId: string,
+    opts?: LiveReportOpts
+  ): { paneKey: string; executionHostId: string }[] | null {
+    return this.liveReportPanesCheck ? this.liveReportPanesCheck(sessionId, opts) : null
   }
   requestChairRestore(request: ChairRestoreRequest): ChairRestoreResult {
     return requestChairRestoreImpl({ runtime: this }, request)
