@@ -1811,6 +1811,28 @@ describe('DaemonPtyAdapter (IPtyProvider)', () => {
       adapter2.dispose()
     })
 
+    // [S10-21e review C4] Mirrors doSpawn's :816 bookkeeping (`this.activeSessionIds.add`) for a
+    // successful attach — markSessionDirty and the final checkpoint both key off membership alone.
+    it('joins activeSessionIds on a successful attach, so markSessionDirty no longer early-returns', async () => {
+      const { id } = await adapter.spawn({ cols: 80, rows: 24 })
+
+      const adapter2 = new DaemonPtyAdapter({ socketPath, tokenPath })
+      const internals = adapter2 as unknown as {
+        activeSessionIds: Set<string>
+        dirtySessionVersions: Map<string, number>
+        markSessionDirty: (sessionId: string) => void
+      }
+      expect(internals.activeSessionIds.has(id)).toBe(false)
+
+      await adapter2.attach(id)
+
+      expect(internals.activeSessionIds.has(id)).toBe(true)
+      internals.markSessionDirty(id)
+      expect(internals.dirtySessionVersions.has(id)).toBe(true)
+
+      adapter2.dispose()
+    })
+
     it('preserves the live session dimensions instead of forcing 80×24', async () => {
       const { id } = await adapter.spawn({ cols: 137, rows: 41 })
 

@@ -1024,6 +1024,10 @@ export class DaemonPtyAdapter implements IPtyProvider {
       })
       throw new SessionNotFoundError(id)
     }
+    // [S10-21e review C4] Mirrors doSpawn's :816 bookkeeping — markSessionDirty, the final
+    // checkpoint, and the onDisconnected re-arm all key off `activeSessionIds` membership alone,
+    // so a successful attach (isNew:false) must join it the same way a spawn does.
+    this.activeSessionIds.add(id)
     this.clearSessionAwaitingDaemonRecovery(id)
     const providerSequence = providerSequenceFromCreateOrAttach(result)
     return providerSequence ? { providerSequence } : undefined
