@@ -17,7 +17,7 @@ type RuntimeInternals = {
     worktreeId: string | undefined,
     target: unknown
   ) => void
-  deliverPendingMessages: (target: unknown, options?: { mailboxHandle?: string }) => void
+  deliverPendingMessagesForHandle: (handle: string) => void
   getAgentDirectoryLivenessSignals: (paneKey: string) => {
     terminalHandle: string | null
     lastAgentStatus: unknown
@@ -82,7 +82,7 @@ describe('notifyOrphanedIdentityForPane (Ruling 33(a) C2/F-19)', () => {
       priority: 'normal'
     })
     const deliver = vi
-      .spyOn(internals(runtime), 'deliverPendingMessages')
+      .spyOn(internals(runtime), 'deliverPendingMessagesForHandle')
       .mockImplementation(() => {})
 
     internals(runtime).notifyOrphanedIdentityForPane('tabP:leaf-new', 'term_p', WORKTREE_ID, {
