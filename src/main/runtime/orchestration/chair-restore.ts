@@ -91,6 +91,11 @@ export async function requestChairRestore(
 
   const holderPaneKey = db.paneHoldingSession(hostId, request.sessionId) ?? null
   let adoptionSignal: 'IDENTITY' | 'D1' | 'GEN_ABSENCE' | 'SAME_GEN_PTY_ABSENCE' | null = null
+  // [F1] The holder's own launch row `seq` as judged here at mint time — carried into the
+  // ticket so the admission-side re-check (checkHostResumeHolderUnmoved) can tell this exact row
+  // apart from a newer one a relaunch inserted between mint and admit. null on the unheld path
+  // (no holder row exists to pin).
+  let holderLaunchSeqForTicket: number | null = null
   // [S10-21d b3b, D-R163 H2] set in the holder branch, read after registration for the audit rows.
   let holderGenerationForAudit: string | null = null
   let holderRegisteredForAudit: AgentRow | undefined
@@ -142,6 +147,8 @@ export async function requestChairRestore(
     } else if (!holderLaunchRow.execution_host_id) {
       return { ok: false, reason: 'holder_execution_host_missing', holderPaneKey }
     }
+    // [F1] holderLaunchRow is confirmed non-null by the two guards immediately above.
+    holderLaunchSeqForTicket = holderLaunchRow.seq
     // [JUDGMENT CALL, see RETURN; S10-21d b3b, D-R163 LOW fix] Conjunct F: every live
     // registered row sharing the holder pane's suffix, if any, must name the SAME chair — a
     // different live name refuses, reclaiming this restore's own prior identity does not.
@@ -240,7 +247,16 @@ export async function requestChairRestore(
     sessionId: request.sessionId,
     // [S10-21d b3b, D-R163 H3 fix] resolved worktree host, never the compat constant.
     executionHostId: adoptingExecutionHostId,
-    launchGeneration: currentLaunchGeneration
+    launchGeneration: currentLaunchGeneration,
+    // [R142b] Carries the DEC-3 signal that justified this adoption into the ticket, so the
+    // admission-side pane-lock re-check can single out SAME_GEN_PTY_ABSENCE for its own live
+    // re-verification. `adoptionSignal` is null on the unheld path (no holder), which the
+    // payload's optional field represents by omission.
+    ...(adoptionSignal ? { adoptionSignal } : {}),
+    // [F1] Pins the holder's launch row as judged here, so checkHostResumeHolderUnmoved can
+    // refuse a relaunch that inserted a newer row under the same generation between mint and
+    // admit. null on the unheld path, which the payload's optional field represents by omission.
+    ...(holderLaunchSeqForTicket !== null ? { launchSeq: holderLaunchSeqForTicket } : {})
   })
 
   // [G1-10o B6/C38 fix, extended per D-R170 M11/M12/M13] The supersede DELETE inside

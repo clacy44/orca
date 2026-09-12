@@ -35,6 +35,15 @@ export type RestoreTicketPayload = {
   readonly executionHostId: string
   readonly launchGeneration: string
   readonly launchSeq?: number
+  /** [R142b] The dead-holder-adoption signal (dead-holder-adoption.ts's own
+   * `HolderAdoptionResult`) that justified minting this ticket, when the ticket names a
+   * predecessor pane — carried so the admission-side re-check (checkHostResumeHolderUnmoved,
+   * agent-launch-admission-host-resume.ts) can tell a SAME_GEN_PTY_ABSENCE adoption (which needs
+   * a live re-verification before a current-generation holder is superseded) from every other
+   * admission that reaches a current-generation holder unexpectedly (which still refuses
+   * outright). In-process only (INV-P-021) — this field is never wire-shaped, exactly like the
+   * rest of this payload. */
+  readonly adoptionSignal?: 'IDENTITY' | 'D1' | 'GEN_ABSENCE' | 'SAME_GEN_PTY_ABSENCE'
 }
 
 export type RestoreTicketMintArgs = RestoreTicketPayload

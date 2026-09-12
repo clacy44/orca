@@ -217,4 +217,204 @@ describe('D-R163 H1/H2 LOW: checkHostResumeHolderUnmoved (the pane-lock re-check
     expect(auditRow.verb).toBe('launch_refused')
     expect(auditRow.reason_code).toBe('foreign_session_id')
   })
+
+  // [R142b] A ticket minted for a SAME-generation dead-holder adoption (dead-holder-adoption.ts's
+  // own `SAME_GEN_PTY_ABSENCE` signal) re-verifies live, inside this lock, before trusting the
+  // proof taken before it — the two are separated by createTerminal's whole async spawn path.
+  describe('R142b: SAME_GEN_PTY_ABSENCE current-generation holder re-verifies live before adopting', () => {
+    it('current-generation holder + adoptionSignal SAME_GEN_PTY_ABSENCE + no connected pty -> proceeds (RED at base: restore_holder_current_generation)', async () => {
+      const db = freshDb()
+      db.recordLaunch({
+        hostId: HOST_ID,
+        paneKey: 'tab1:leaf-old',
+        agentType: 'claude',
+        sessionId: 'predecessor-sess',
+        launchGeneration: 'gen-1',
+        executionHostId: HOST_ID,
+        evidence: 'host_launch'
+      })
+      const admission: LaunchAdmission = {
+        kind: 'host-resume',
+        sessionId: 'predecessor-sess',
+        predecessorPaneKey: 'tab1:leaf-old',
+        executionHostId: HOST_ID,
+        launchGeneration: 'gen-1',
+        evidence: 'host_restore',
+        adoptionSignal: 'SAME_GEN_PTY_ABSENCE'
+      }
+      const admitted = await admitAgentLaunch(
+        () => db,
+        opts({ command: 'claude --resume predecessor-sess' }),
+        admission,
+        ctx({ findConnectedPtyForPane: () => false })
+      )
+      expect(admitted.spawnOptions.command).toBe('claude --resume predecessor-sess')
+      const row = db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')
+      expect(row?.session_id).toBe('predecessor-sess')
+      expect(row?.evidence).toBe('host_restore')
+    })
+
+    it('current-generation holder + adoptionSignal SAME_GEN_PTY_ABSENCE + a connected pty -> restore_holder_same_generation_live', async () => {
+      const db = freshDb()
+      db.recordLaunch({
+        hostId: HOST_ID,
+        paneKey: 'tab1:leaf-old',
+        agentType: 'claude',
+        sessionId: 'predecessor-sess',
+        launchGeneration: 'gen-1',
+        executionHostId: HOST_ID,
+        evidence: 'host_launch'
+      })
+      const admission: LaunchAdmission = {
+        kind: 'host-resume',
+        sessionId: 'predecessor-sess',
+        predecessorPaneKey: 'tab1:leaf-old',
+        executionHostId: HOST_ID,
+        launchGeneration: 'gen-1',
+        evidence: 'host_restore',
+        adoptionSignal: 'SAME_GEN_PTY_ABSENCE'
+      }
+      await expect(
+        admitAgentLaunch(
+          () => db,
+          opts({ command: 'claude --resume predecessor-sess' }),
+          admission,
+          ctx({ findConnectedPtyForPane: (paneKey) => paneKey === 'tab1:leaf-old' })
+        )
+      ).rejects.toThrow(LaunchAdmissionRefusedError)
+      expect(db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')).toBeUndefined()
+      const auditRow = rawDb(db)
+        .prepare(`SELECT * FROM agent_audit ORDER BY seq DESC LIMIT 1`)
+        .get() as { verb: string; reason_code: string }
+      expect(auditRow.verb).toBe('launch_refused')
+      expect(auditRow.reason_code).toBe('restore_holder_same_generation_live')
+    })
+
+    it('current-generation holder WITHOUT the signal still refuses restore_holder_current_generation (pin — unchanged behaviour)', async () => {
+      const db = freshDb()
+      db.recordLaunch({
+        hostId: HOST_ID,
+        paneKey: 'tab1:leaf-old',
+        agentType: 'claude',
+        sessionId: 'predecessor-sess',
+        launchGeneration: 'gen-1',
+        executionHostId: HOST_ID,
+        evidence: 'host_launch'
+      })
+      const admission: LaunchAdmission = {
+        kind: 'host-resume',
+        sessionId: 'predecessor-sess',
+        predecessorPaneKey: 'tab1:leaf-old',
+        executionHostId: HOST_ID,
+        launchGeneration: 'gen-1',
+        evidence: 'host_restore'
+      }
+      await expect(
+        admitAgentLaunch(
+          () => db,
+          opts({ command: 'claude --resume predecessor-sess' }),
+          admission,
+          ctx({ findConnectedPtyForPane: () => false })
+        )
+      ).rejects.toThrow(LaunchAdmissionRefusedError)
+      const auditRow = rawDb(db)
+        .prepare(`SELECT * FROM agent_audit ORDER BY seq DESC LIMIT 1`)
+        .get() as { verb: string; reason_code: string }
+      expect(auditRow.verb).toBe('launch_refused')
+      expect(auditRow.reason_code).toBe('restore_holder_current_generation')
+    })
+  })
+
+  // [F1] The holder's launch row `seq` at mint time (RestoreTicketPayload.launchSeq, threaded
+  // onto LaunchAdmission) must still be the pane's newest row at admit time — a relaunch under
+  // the SAME generation between mint and admit inserts a NEWER row the generation compare alone
+  // cannot see.
+  describe('F1: SAME_GEN_PTY_ABSENCE re-check also pins the holder launch row seq', () => {
+    it('a fresh newer holder row inserted between mint and admit refuses restore_holder_relaunched, even with no connected pty', async () => {
+      const db = freshDb()
+      const mintedRow = db.recordLaunch({
+        hostId: HOST_ID,
+        paneKey: 'tab1:leaf-old',
+        agentType: 'claude',
+        sessionId: 'predecessor-sess',
+        launchGeneration: 'gen-1',
+        executionHostId: HOST_ID,
+        evidence: 'host_launch'
+      })
+      if (!mintedRow.ok) {
+        throw new Error('setup: expected recordLaunch to succeed')
+      }
+      // Simulates the holder relaunching (a fresh row, SAME generation) after the ticket named
+      // `launchSeq: mintedRow.row.seq` but before this admission takes its pane lock.
+      db.recordLaunch({
+        hostId: HOST_ID,
+        paneKey: 'tab1:leaf-old',
+        agentType: 'claude',
+        sessionId: 'predecessor-sess',
+        launchGeneration: 'gen-1',
+        executionHostId: HOST_ID,
+        evidence: 'host_launch'
+      })
+      const admission: LaunchAdmission = {
+        kind: 'host-resume',
+        sessionId: 'predecessor-sess',
+        predecessorPaneKey: 'tab1:leaf-old',
+        executionHostId: HOST_ID,
+        launchGeneration: 'gen-1',
+        evidence: 'host_restore',
+        adoptionSignal: 'SAME_GEN_PTY_ABSENCE',
+        launchSeq: mintedRow.row.seq
+      }
+      await expect(
+        admitAgentLaunch(
+          () => db,
+          opts({ command: 'claude --resume predecessor-sess' }),
+          admission,
+          ctx({ findConnectedPtyForPane: () => false })
+        )
+      ).rejects.toThrow(LaunchAdmissionRefusedError)
+      expect(db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')).toBeUndefined()
+      const auditRow = rawDb(db)
+        .prepare(`SELECT * FROM agent_audit ORDER BY seq DESC LIMIT 1`)
+        .get() as { verb: string; reason_code: string }
+      expect(auditRow.verb).toBe('launch_refused')
+      expect(auditRow.reason_code).toBe('restore_holder_relaunched')
+    })
+
+    it('launchSeq matching the holder pane`s current newest row still proceeds when no connected pty (pin)', async () => {
+      const db = freshDb()
+      const mintedRow = db.recordLaunch({
+        hostId: HOST_ID,
+        paneKey: 'tab1:leaf-old',
+        agentType: 'claude',
+        sessionId: 'predecessor-sess',
+        launchGeneration: 'gen-1',
+        executionHostId: HOST_ID,
+        evidence: 'host_launch'
+      })
+      if (!mintedRow.ok) {
+        throw new Error('setup: expected recordLaunch to succeed')
+      }
+      const admission: LaunchAdmission = {
+        kind: 'host-resume',
+        sessionId: 'predecessor-sess',
+        predecessorPaneKey: 'tab1:leaf-old',
+        executionHostId: HOST_ID,
+        launchGeneration: 'gen-1',
+        evidence: 'host_restore',
+        adoptionSignal: 'SAME_GEN_PTY_ABSENCE',
+        launchSeq: mintedRow.row.seq
+      }
+      const admitted = await admitAgentLaunch(
+        () => db,
+        opts({ command: 'claude --resume predecessor-sess' }),
+        admission,
+        ctx({ findConnectedPtyForPane: () => false })
+      )
+      expect(admitted.spawnOptions.command).toBe('claude --resume predecessor-sess')
+      const row = db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')
+      expect(row?.session_id).toBe('predecessor-sess')
+      expect(row?.evidence).toBe('host_restore')
+    })
+  })
 })

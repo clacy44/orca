@@ -28929,6 +28929,11 @@ export class OrcaRuntimeService {
                 ...(hostRestorePayload.launchSeq !== undefined
                   ? { launchSeq: hostRestorePayload.launchSeq }
                   : {}),
+                // [R142b] Carries the redeemed ticket's own adoption signal through unchanged —
+                // checkHostResumeHolderUnmoved's re-check reads it.
+                ...(hostRestorePayload.adoptionSignal
+                  ? { adoptionSignal: hostRestorePayload.adoptionSignal }
+                  : {}),
                 sequencedAgentLine: sequencedStartupCommand ?? opts.sequencedAgentLine
               }
             : {
