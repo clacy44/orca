@@ -10705,15 +10705,6 @@ export class OrcaRuntimeService {
   // mint a different handle for an already-adopted ptyId, it returns the handleByPtyId entry
   // unchanged; the gap this closes is that no `handles` record exists yet for
   // resolveLiveLeafForHandle/waitForLeafPtyId to find.
-  // Two call sites only, both deliberate: record-first via registerPreAllocatedHandleForPty
-  // (handle exists, pty recorded after — this fn closes the gap immediately), and adopt-first
-  // via refreshPtyWorktreeRecordsWithControllerInventory (controller inventory adopts a
-  // survived session, then recordPtyWorktree writes it — this fn closes the gap there too).
-  // recordPtyWorktree's own NEW-record branch must NOT call this: an ordinary spawn
-  // (registerPty path — chair restore, createTerminal, desktop spawn) has no real leaf yet and
-  // must have NO `this.handles` record until one binds or a controller inventory adopts it —
-  // a `pty:` record makes getTerminalHandleForPaneKey resolve, which lets a queued host notice
-  // (writeHostNoticeToPane) type into a pane whose agent is not at a prompt yet.
   private ensureLeaflessHandleRecord(ptyId: string): void {
     const handle = this.handleByPtyId.get(ptyId)
     if (!handle) {
@@ -33216,6 +33207,7 @@ export class OrcaRuntimeService {
         this.setPtyManagementTitleFromObservedTitle(pty, state.title, titleObservedAt ?? 0)
       }
       this.ptysById.set(ptyId, pty)
+      this.ensureLeaflessHandleRecord(ptyId)
       if (wslDistro) {
         this.wslDistroByPtyId.set(ptyId, wslDistro)
       } else if (connectionId !== null) {
@@ -33506,7 +33498,6 @@ export class OrcaRuntimeService {
             ? { tabId: persistedSurface.tabId, paneKey: persistedSurface.paneKey }
             : {})
         })
-        this.ensureLeaflessHandleRecord(session.id)
         if (restoresExactSurface && controllerIdentity) {
           this.rememberRestoredOrchestrationAuthority(
             pty,
@@ -38083,11 +38074,7 @@ export class OrcaRuntimeService {
           // attemptMidTurnClaudeDelivery's options below) tells the re-entrant
           // deliverPendingMessages call that the foreground scan already ran, so it does not loop
           // back into this branch.
-          // [D-R194] Parity with the three sibling mid-turn routing sites (:36149, :36244,
-          // :37750, :37980), every one of which requires observedLive: a pane never observed
-          // live this generation has no tail to probe and no idle edge behind it, so mid-turn
-          // injection here would be the startup race in a shorter costume.
-          if (!authorizedIdle && current.lastAgentStatusObservedLive) {
+          if (!authorizedIdle) {
             const pty = this.ptysById.get(guardedPtyId)
             if (pty && this.isClaudeCodePane(pty)) {
               this.attemptMidTurnClaudeDelivery(current.target, pty, mailboxHandle, {
