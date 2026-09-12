@@ -762,6 +762,11 @@ describe('D-R163 M3 negatives 1/2/6: dead-holder adoption, wired end to end', ()
       expect(result.holderPaneKey).toBe(holderPaneKey)
       expect(result.adoptionSignal).toBe('SAME_GEN_PTY_ABSENCE')
       expect(db.newestLaunchForPane(HOST_ID, result.paneKey)?.evidence).toBe('host_restore')
+      // [D-R192 C3] No sweep-restore mark on this holder -> the audit row records it as such.
+      const r142AdoptedAudit = rawDb()
+        .prepare(`SELECT * FROM agent_audit WHERE verb = 'session_adopted' AND actor_pane_key = ?`)
+        .get(result.paneKey) as { reason_code: string } | undefined
+      expect(r142AdoptedAudit?.reason_code).toContain('holder_sweep_mark=false')
     } finally {
       vi.useRealTimers()
     }
@@ -808,6 +813,14 @@ describe('D-R163 M3 negatives 1/2/6: dead-holder adoption, wired end to end', ()
         expect(db.newestLaunchForPane(HOST_ID, result.paneKey)?.evidence).toBe('host_restore')
         // Left in place — it is renderer double-resume state, not an adoption gate.
         expect(db.getSweepRestoreMark(HOST_ID, holderPaneKey)).toBe(true)
+        // [D-R192 C3] The mark is preserved as forensic evidence on the audit row even though
+        // it no longer refuses adoption.
+        const r170AdoptedAudit = rawDb()
+          .prepare(
+            `SELECT * FROM agent_audit WHERE verb = 'session_adopted' AND actor_pane_key = ?`
+          )
+          .get(result.paneKey) as { reason_code: string } | undefined
+        expect(r170AdoptedAudit?.reason_code).toContain('holder_sweep_mark=true')
       }
     })
   })

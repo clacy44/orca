@@ -99,6 +99,9 @@ export async function requestChairRestore(
   // [S10-21d b3b, D-R163 H2] set in the holder branch, read after registration for the audit rows.
   let holderGenerationForAudit: string | null = null
   let holderRegisteredForAudit: AgentRow | undefined
+  // [D-R192 C3] Forensic-only: the durable sweep-restore mark no longer refuses adoption
+  // (040898d50a), but whether the holder carried one is preserved on the audit row.
+  let holderSweepMarkForAudit: boolean | null = null
 
   if (holderPaneKey !== null) {
     const holderLaunchRow = db.newestLaunchForPane(hostId, holderPaneKey)
@@ -185,6 +188,13 @@ export async function requestChairRestore(
       hostId,
       deps.runtime
     )
+
+    // [D-R192 C3] Read-only forensic capture: `getSweepRestoreMark` still exists (db.ts:5389)
+    // but must NOT be threaded into `resolveHolderAdoption`'s input — that type no longer has
+    // the field, and the refusal it used to drive must not come back. Recorded on the audit
+    // row only, via `holderSweepMarkForAudit` below.
+    const holderSweepMark = db.getSweepRestoreMark(hostId, holderPaneKey)
+    holderSweepMarkForAudit = holderSweepMark
 
     const decision = resolveHolderAdoption({
       holderPaneKey,
@@ -298,7 +308,8 @@ export async function requestChairRestore(
     // message to stay short forever.
     const reasonCode = (
       `signal=${adoptionSignal} holder=${holderPaneKey} ` +
-      `holder_generation=${holderGenerationForAudit} session=${request.sessionId} exit=${exit}`
+      `holder_generation=${holderGenerationForAudit} holder_sweep_mark=${holderSweepMarkForAudit ?? false} ` +
+      `session=${request.sessionId} exit=${exit}`
     ).slice(0, 200)
     db.writeAgentAudit({
       agentId,
