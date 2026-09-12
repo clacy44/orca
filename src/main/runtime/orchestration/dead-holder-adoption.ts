@@ -2,7 +2,7 @@
 // DEC-3): the launcher-issued restore's dead-holder-adoption predicate. Pure — no IO, no DB, no
 // timers; the caller (requestChairRestore) gathers every input via the existing accessors
 // (collectIncumbentEvidence/resolveIncumbentDeath, findConnectedPtyForPane, newestLaunchForPane,
-// isRestoreSweepLockHeld + getSweepRestoreMark, the hook server's live provider-session set,
+// isRestoreSweepLockHeld, the hook server's live provider-session set,
 // S4's preflightResumeTranscript) and re-reads them inside the pane lock before calling this.
 //
 // Conjuncts A-G exactly, checked in order — the first false conjunct is the refusal. GEN_ABSENCE
@@ -58,7 +58,6 @@ export type HolderAdoptionInput = {
    * round) collapses to true — the caller's own default, never guessed here. */
   liveHookReportOfSessionOnLivePaneElsewhere: boolean
   sweepLockHeld: boolean
-  sweepRestoreMarkSetForHolder: boolean
   /** True iff the holder pane resolves a LIVE registered agents row other than the one being
    * rebound to the adopting pane (conjunct F) — never true for the row this restore is itself
    * moving. */
@@ -158,8 +157,12 @@ export function resolveHolderAdoption(input: HolderAdoptionInput): HolderAdoptio
       return { adoptable: false, reason: 'death_signal_insufficient' }
     }
   }
-  // (E) no restore sweep in flight.
-  if (input.sweepLockHeld || input.sweepRestoreMarkSetForHolder) {
+  // (E) no restore sweep in flight. [D-R190] The in-memory lock is the ONLY in-flight proof: the
+  // sweep body never runs unlocked (restore-registered-agent-panes.ts:417-427; index.ts:3530-3537)
+  // and writes its durable mark INSIDE the lock (:264-266), so the mark added nothing here while a
+  // sweep runs and, never being cleared anywhere, refused every holder a past sweep restored in
+  // place — permanently. The mark keeps its real job: the renderer's wake path (ipc/sweep-restore-mark.ts).
+  if (input.sweepLockHeld) {
     return { adoptable: false, reason: 'sweep_in_flight' }
   }
   // (F) the holder pane's registered agents row, if any, is the row being rebound — any OTHER
