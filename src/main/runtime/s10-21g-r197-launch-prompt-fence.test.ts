@@ -17,12 +17,18 @@ import { OrcaRuntimeService } from './orca-runtime'
 import { OrchestrationDb } from './orchestration/db'
 import { HEADLESS_RUNTIME_WINDOW_ID } from '../../shared/runtime-types'
 import { AGENT_PROMPT_SUBMIT_DELAY_MS } from '../../shared/agent-prompt-injection'
+import { FLOATING_TERMINAL_WORKTREE_ID } from '../../shared/constants'
 
 const WORKTREE_ID = 'repo-launch-fence::/tmp/probe-worktree'
 const TAB_ID = 'tab-launch-fence-1'
 const LEAF_ID = '44444444-4444-4444-8444-444444444444'
 const PANE_KEY = `${TAB_ID}:${LEAF_ID}`
 const PTY_ID = 'pty-launch-fence-1'
+// [B2a/b] the floating-terminal sentinel resolves a workspace scope with no store/repo lookup
+// (resolveTerminalWorkspaceLaunchTarget), so the real createTerminal path runs with none of the
+// fixture ceremony a repo-backed selector needs — same idiom as
+// orca-runtime-headless-hydration-repo-gate.test.ts.
+const REAL_PATH_SELECTOR = `id:${FLOATING_TERMINAL_WORKTREE_ID}`
 
 type RuntimeInternals = {
   registerPty: (
@@ -32,8 +38,13 @@ type RuntimeInternals = {
     binding?: { tabId: string; leafId: string }
   ) => void
   handleByPtyId: Map<string, string>
-  ptysById: Map<string, { launchAgent?: string; launchPromptFenceSince?: number | null }>
+  ptysById: Map<
+    string,
+    { worktreeId?: string; launchAgent?: string; launchPromptFenceSince?: number | null }
+  >
   withheldDeliveryAttemptsByHandle: Map<string, { reason: string }>
+  pendingMobileTerminalCreatesByKey: Map<string, { startupCommand?: string }>
+  deliverPendingStartupCommandToBareRendererPty: (worktreeId: string, tabId: string) => void
 }
 
 function internals(runtime: OrcaRuntimeService): RuntimeInternals {
@@ -69,6 +80,25 @@ function setUp(write: ReturnType<typeof vi.fn>): {
   const runtime = new OrcaRuntimeService()
   runtime.setPtyController(makeController(write) as never)
   runtime.syncWindowGraph(HEADLESS_RUNTIME_WINDOW_ID, { tabs: [], leaves: [] })
+  const db = new OrchestrationDb(':memory:')
+  runtime.setOrchestrationDb(db)
+  return { runtime, db }
+}
+
+// [B2a/b] Drives the real `createTerminal` background-spawn path (the arm sites at
+// orca-runtime.ts:~29200/29221) instead of hand-stamping `launchPromptFenceSince` on the pty
+// record — the fake controller's `spawn` returns `spawnPtyId` so the resulting pty record is
+// reachable by the same PTY_ID the rest of the suite already keys off.
+function setUpForRealPath(
+  write: ReturnType<typeof vi.fn>,
+  spawnPtyId: string
+): { runtime: OrcaRuntimeService; db: OrchestrationDb } {
+  const runtime = new OrcaRuntimeService()
+  runtime.setPtyController(
+    makeController(write, { spawn: vi.fn(async () => ({ id: spawnPtyId })) }) as never
+  )
+  runtime.attachWindow(1)
+  runtime.syncWindowGraph(1, { tabs: [], leaves: [] })
   const db = new OrchestrationDb(':memory:')
   runtime.setOrchestrationDb(db)
   return { runtime, db }
@@ -173,20 +203,33 @@ describe('R197: launch-prompt fence — no host bytes into a pane until Claude i
     )
   })
 
-  it('Case C: regression guard — with no fence armed, delivery at the first idle title is unchanged', () => {
+  // [B2 (b) NO-COMMAND] Replaces the old Case C (which hand-stamped `pty.launchAgent = 'claude'`
+  // with no fence armed) with the same regression guard driven through the REAL createTerminal
+  // path: an agent-tab create with no launch command must leave the fence unarmed and preserve
+  // today's first-idle-title delivery — the C4a/29200 arm site's own `launchOpts.command` guard.
+  it("Case C (B2b): NO-COMMAND — createTerminal with no launch command leaves the fence unarmed; today's first-idle-title delivery is unchanged", async () => {
     vi.useFakeTimers()
     const write = vi.fn(() => true)
-    const setup = setUp(write)
+    const setup = setUpForRealPath(write, PTY_ID)
     db = setup.db
     const { runtime } = setup
 
-    internals(runtime).registerPty(PTY_ID, WORKTREE_ID, null, { tabId: TAB_ID, leafId: LEAF_ID })
+    await runtime.createTerminal(REAL_PATH_SELECTOR, {
+      restoreProvenance: { kind: 'none' },
+      credentialLane: { kind: 'shared' },
+      launchAgent: 'claude' as never,
+      // No `command` — the C4a/29200 arm site requires both `launchAgent === 'claude'` AND a
+      // truthy `command`; this proves the guard, not a hand-set fixture.
+      tabId: TAB_ID,
+      leafId: LEAF_ID
+    })
+
     const pty = internals(runtime).ptysById.get(PTY_ID)
     if (!pty) {
       throw new Error('fixture setup failed: no pty record for ptyId')
     }
-    pty.launchAgent = 'claude'
-    // No fence armed — pins that today's un-launched-command behavior is untouched.
+    expect(pty.launchAgent).toBe('claude')
+    expect(pty.launchPromptFenceSince ?? null).toBeNull()
 
     runtime.writeHostNoticeToPane(PANE_KEY, 'Session adopted from tabH:leaf-old (D1).', {
       rateKey: 'session_adopted'
@@ -206,5 +249,82 @@ describe('R197: launch-prompt fence — no host bytes into a pane until Claude i
     expect(pointerCalls(write, PTY_ID)).toHaveLength(1)
     vi.advanceTimersByTime(AGENT_PROMPT_SUBMIT_DELAY_MS)
     expect(enterCalls(write, PTY_ID)).toHaveLength(1)
+  })
+
+  // [B2 (a) ARM-THROUGH-THE-REAL-PATH, LR-042] Drives the production createTerminal path with a
+  // launch command all the way to the E2/N2 stamp sites (~orca-runtime.ts:29200/29221) — no
+  // manual `launchPromptFenceSince` assignment anywhere in this test.
+  it('Case D (B2a): ARM-THROUGH-THE-REAL-PATH — createTerminal with a launch command arms the fence at the real stamp site', async () => {
+    vi.useFakeTimers()
+    const write = vi.fn(() => true)
+    const setup = setUpForRealPath(write, PTY_ID)
+    db = setup.db
+    const { runtime } = setup
+
+    await runtime.createTerminal(REAL_PATH_SELECTOR, {
+      restoreProvenance: { kind: 'none' },
+      credentialLane: { kind: 'shared' },
+      launchAgent: 'claude' as never,
+      command: 'claude',
+      tabId: TAB_ID,
+      leafId: LEAF_ID
+    })
+
+    const pty = internals(runtime).ptysById.get(PTY_ID)
+    if (!pty) {
+      throw new Error('fixture setup failed: no pty record for ptyId')
+    }
+    // Armed by the real stamp site — not by a manual assignment (LR-042 red-proof covers this).
+    expect(pty.launchPromptFenceSince).not.toBeNull()
+
+    // zsh preexec TAB title: the shell retitles itself to the command about to run — still fenced.
+    runtime.onPtyData(PTY_ID, '\x1b]0;claude\x07', 100)
+    runtime.writeHostNoticeToPane(
+      PANE_KEY,
+      'Session adopted from tabH:leaf-old (SAME_GEN_PTY_ABSENCE).',
+      { rateKey: 'session_adopted' }
+    )
+    expect(pointerCalls(write, PTY_ID)).toHaveLength(0)
+
+    // Why a title in between: retry is driven off a status TRANSITION (idle->!idle->idle), not
+    // merely off the fence clearing — a bare shell prompt breaks the idle streak the same way
+    // Case A's intermediate titles do.
+    runtime.onPtyData(PTY_ID, '\x1b]0;~\x07', 101)
+
+    // Claude's OWN idle title clears the fence and releases the queued pointer exactly once.
+    runtime.onPtyData(PTY_ID, '\x1b]0;✳ vps-services\x07', 103)
+    expect(pointerCalls(write, PTY_ID)).toHaveLength(1)
+    vi.advanceTimersByTime(AGENT_PROMPT_SUBMIT_DELAY_MS)
+    expect(enterCalls(write, PTY_ID)).toHaveLength(1)
+  })
+
+  // [B2 (c) N2] The renderer pty:spawn path arms via deliverPendingStartupCommandToBareRendererPty
+  // — the site that actually writes the startup command into the pty (orca-runtime.ts:~30396),
+  // since registerPty's own stamp site (~11069) carries no typed command on this path.
+  it('Case E (B2c/N2): the renderer pty:spawn path with a startup command → armed at the write site', () => {
+    vi.useFakeTimers()
+    const write = vi.fn((_ptyId: string, _data: string) => true)
+    const setup = setUp(write)
+    db = setup.db
+    const { runtime } = setup
+
+    internals(runtime).registerPty(PTY_ID, WORKTREE_ID, null, { tabId: TAB_ID, leafId: LEAF_ID })
+    const pty = internals(runtime).ptysById.get(PTY_ID)
+    if (!pty) {
+      throw new Error('fixture setup failed: no pty record for ptyId')
+    }
+    // registerPty's own stamp (~11069) is what would set this on a real renderer spawn carrying
+    // an agentLaunchAuthority; simulated directly here since this test targets the delivery site.
+    pty.launchAgent = 'claude'
+
+    internals(runtime).pendingMobileTerminalCreatesByKey.set(`${WORKTREE_ID}::${TAB_ID}`, {
+      startupCommand: 'claude --resume abc'
+    })
+    internals(runtime).deliverPendingStartupCommandToBareRendererPty(WORKTREE_ID, TAB_ID)
+
+    expect(
+      write.mock.calls.some((call) => call[0] === PTY_ID && call[1] === 'claude --resume abc')
+    ).toBe(true)
+    expect(pty.launchPromptFenceSince).not.toBeNull()
   })
 })

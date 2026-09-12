@@ -30393,6 +30393,12 @@ export class OrcaRuntimeService {
       // Why: Enter rides its own write so a long command cannot swallow it.
       this.ptyController.write(pty.ptyId, '\r')
       this.noteTerminalSpawnCommand(pty.ptyId, command)
+      // [R197 N2] This is the renderer pty:spawn path's own command delivery (registerPty
+      // ~:11069 stamps launchAgent but carries no typed command) — arm here, where the command
+      // is actually written into the pty.
+      if (pty.launchAgent === 'claude') {
+        pty.launchPromptFenceSince = Date.now()
+      }
     }
   }
 

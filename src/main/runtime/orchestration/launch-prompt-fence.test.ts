@@ -31,6 +31,11 @@ describe('R197 Case D: launch-prompt fence predicates', () => {
     expect(isLaunchedClaudePromptTitle('claude')).toBe(false)
   })
 
+  it('a bare spinner glyph is not identity — any TUI animates it (agent-title-status.ts:228-237)', () => {
+    expect(isLaunchedClaudePromptTitle('⠶⠷')).toBe(false)
+    expect(isLaunchedClaudePromptTitle('◑')).toBe(false)
+  })
+
   it('Claude-authored evidence clears the fence', () => {
     expect(isLaunchedClaudePromptTitle('✳ anything')).toBe(true)
     expect(isLaunchedClaudePromptTitle('✳')).toBe(true)
