@@ -35918,7 +35918,9 @@ export class OrcaRuntimeService {
   private sendHostNoticeToTarget(
     paneKey: string,
     handle: string,
-    target: PendingMessageDeliveryTarget,
+    // [D-R194] Retained for call-site shape only: delivery is now decided by the handle's own
+    // live-pane ladder (deliverPendingMessagesForHandle), never by this pre-resolved target.
+    _target: PendingMessageDeliveryTarget,
     body: string,
     rate: { rateKey: string; windowMs: number },
     subject: string
@@ -35943,10 +35945,19 @@ export class OrcaRuntimeService {
       body,
       type: 'status'
     })
-    // Why re-invoke rather than notifyMessageArrived: the row didn't exist when this edge's own
-    // deliverPendingMessages(leaf/target) ran above — this delivers it through the same shipped
-    // banner formatter/modal gate/sanitiser/dedupe, never a second delivery mechanism.
-    this.deliverPendingMessages(target)
+    // [D-R194] Why the GATED entry and not deliverPendingMessages(target): the low-level
+    // deliverPendingMessages carries no idle/observed-live gate of its own — every such gate
+    // lives in its callers — so a host notice written at pane startup was typed into a Claude
+    // pane whose agent had not reached its prompt yet, and the armed Enter
+    // (AGENT_PROMPT_SUBMIT_DELAY_MS later) answered the folder-trust dialog that rendered in
+    // between, exiting the pane. attemptMidTurnClaudeDelivery's modal probe cannot cover this:
+    // at t=0 the tail has no dialog text to match, so it is a content race, not a state gate.
+    // deliverPendingMessagesForHandle applies the same idle + observedLive ladder every other
+    // wake uses; an unobserved pane lands in `awaiting_idle_edge` and the pane's own first
+    // observed idle edge (applyTrackedPtyTitle -> deliverPendingMessagesForPty) delivers it,
+    // exactly as notifyRebindDelivery already documents. Same shipped banner formatter, modal
+    // gate, sanitiser and dedupe — still never a second delivery mechanism.
+    this.deliverPendingMessagesForHandle(handle)
   }
 
   // [S10-21a C3-v2d, D-R104 F-3] Generic pane notice from a bare paneKey — for admitAgentLaunch's
@@ -38072,7 +38083,11 @@ export class OrcaRuntimeService {
           // attemptMidTurnClaudeDelivery's options below) tells the re-entrant
           // deliverPendingMessages call that the foreground scan already ran, so it does not loop
           // back into this branch.
-          if (!authorizedIdle) {
+          // [D-R194] Parity with the three sibling mid-turn routing sites (:36149, :36244,
+          // :37750, :37980), every one of which requires observedLive: a pane never observed
+          // live this generation has no tail to probe and no idle edge behind it, so mid-turn
+          // injection here would be the startup race in a shorter costume.
+          if (!authorizedIdle && current.lastAgentStatusObservedLive) {
             const pty = this.ptysById.get(guardedPtyId)
             if (pty && this.isClaudeCodePane(pty)) {
               this.attemptMidTurnClaudeDelivery(current.target, pty, mailboxHandle, {
