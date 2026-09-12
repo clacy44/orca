@@ -20,7 +20,6 @@ function baseInput(overrides: Partial<HolderAdoptionInput> = {}): HolderAdoption
     holderSettledNotLive: true,
     liveHookReportOfSessionOnLivePaneElsewhere: false,
     sweepLockHeld: false,
-    sweepRestoreMarkSetForHolder: false,
     holderHasOtherLiveRegisteredRow: false,
     transcriptPreflightPassed: true,
     ...overrides
@@ -173,10 +172,10 @@ describe('S10-21d b3: resolveHolderAdoption', () => {
     expect(result).toEqual({ adoptable: false, reason: 'sweep_in_flight' })
   })
 
-  it('(E) sweep restore mark set for the holder -> refused sweep_in_flight', () => {
-    const result = resolveHolderAdoption(baseInput({ sweepRestoreMarkSetForHolder: true }))
-    expect(result).toEqual({ adoptable: false, reason: 'sweep_in_flight' })
-  })
+  // [D-R190] The durable-mark negative is deleted here (now untypeable — the field is gone from
+  // HolderAdoptionInput) and replaced by the e2e coverage proving a mark-only holder DOES adopt:
+  // dead-holder-adoption-e2e.test.ts, 'D-R190: a durable sweep-restore mark on the holder does
+  // not refuse (E) once settled'.
 
   it('(F) holder has another live registered row -> refused other_live_registered_row', () => {
     const result = resolveHolderAdoption(baseInput({ holderHasOtherLiveRegisteredRow: true }))

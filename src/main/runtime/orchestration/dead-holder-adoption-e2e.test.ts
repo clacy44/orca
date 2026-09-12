@@ -14,10 +14,15 @@ import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { OrchestrationDb } from './db'
 import { OrcaRuntimeService } from '../orca-runtime'
-import { _resetRestoreSweepLockForTest } from '../restore-sweep-lock'
+import {
+  _resetRestoreSweepLockForTest,
+  acquireRestoreSweepLock,
+  releaseRestoreSweepLock
+} from '../restore-sweep-lock'
 import type { ControllerInventory } from './agent-process-identity'
 import { checkHostResumeHolderUnmoved } from '../../ipc/agent-launch-admission-host-resume'
 import { LaunchAdmissionRefusedError } from '../../ipc/agent-launch-admission-errors'
+import { runSameGenHolderE2ECase } from './dead-holder-adoption-r170-fixture'
 
 vi.mock('electron', () => ({
   BrowserWindow: { fromId: vi.fn(() => null) },
@@ -760,6 +765,86 @@ describe('D-R163 M3 negatives 1/2/6: dead-holder adoption, wired end to end', ()
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  // [D-R190 Q4] A durable sweep-restore mark on the holder (the state a Layer-1 sweep restore
+  // leaves — the sweep restored this pane IN PLACE, so it never moved off it) must NOT refuse
+  // (E) once the mark is the only signal: the in-memory lock is the sole in-flight proof. Cloned
+  // from R142 above with exactly one addition (the mark) — same settle-then-adopt shape, plus the
+  // mark asserted still present afterward (the renderer's wake-path contract is unchanged).
+  it('D-R190: a durable sweep-restore mark on the holder does not refuse (E) once settled', async () => {
+    db = new OrchestrationDb(':memory:')
+    const runtime = makeRuntime()
+    runtime.setOrchestrationDb(db)
+    stubLaunchScope(runtime)
+    installRecordingPtyController(runtime, db)
+    const sessionId = 'sess-r170'
+    const displayName = 'chair-r170'
+
+    tempHome = await runSameGenHolderE2ECase({
+      db,
+      runtime,
+      hostId: HOST_ID,
+      settlingDetail: SETTLING_DETAIL,
+      tmpPrefix: 'orca-dead-holder-e2e-r170-',
+      sessionId,
+      displayName,
+      // [D-R190] the state a Layer-1 sweep restore leaves on the pane it restored in place.
+      beforeSettle: (holderPaneKey) => db.setSweepRestoreMark(HOST_ID, holderPaneKey),
+      afterSettled: async (holderPaneKey) => {
+        // At base (before the D-R190 fix) this settled call refuses `sweep_in_flight` because
+        // the durable mark alone trips old (E).
+        const result = await runtime.requestChairRestore({
+          worktreeSelector: 'id:wt-1',
+          sessionId,
+          displayName
+        })
+        expect(result.ok).toBe(true)
+        if (!result.ok) {
+          throw new Error('unreachable')
+        }
+        expect(result.holderPaneKey).toBe(holderPaneKey)
+        expect(result.adoptionSignal).toBe('SAME_GEN_PTY_ABSENCE')
+        expect(db.newestLaunchForPane(HOST_ID, result.paneKey)?.evidence).toBe('host_restore')
+        // Left in place — it is renderer double-resume state, not an adoption gate.
+        expect(db.getSweepRestoreMark(HOST_ID, holderPaneKey)).toBe(true)
+      }
+    })
+  })
+
+  // [D-R190 Q4] The removal above must not take the in-flight fence with it: the in-memory sweep
+  // lock, held across the settled second attempt, still refuses `sweep_in_flight` on its own.
+  it('D-R190: the in-memory sweep lock alone still refuses (E) while held', async () => {
+    db = new OrchestrationDb(':memory:')
+    const runtime = makeRuntime()
+    runtime.setOrchestrationDb(db)
+    stubLaunchScope(runtime)
+    installRecordingPtyController(runtime, db)
+    const sessionId = 'sess-r170-lock'
+    const displayName = 'chair-r170-lock'
+
+    tempHome = await runSameGenHolderE2ECase({
+      db,
+      runtime,
+      hostId: HOST_ID,
+      settlingDetail: SETTLING_DETAIL,
+      tmpPrefix: 'orca-dead-holder-e2e-r170-lock-',
+      sessionId,
+      displayName,
+      afterSettled: async (holderPaneKey) => {
+        acquireRestoreSweepLock()
+        try {
+          const result = await runtime.requestChairRestore({
+            worktreeSelector: 'id:wt-1',
+            sessionId,
+            displayName
+          })
+          expect(result).toEqual({ ok: false, reason: 'sweep_in_flight', holderPaneKey })
+        } finally {
+          releaseRestoreSweepLock()
+        }
+      }
+    })
   })
 
   // [S10-21f b2b-10q M2] A round that reads the holder pty back PRESENT mid-settle must CLEAR the

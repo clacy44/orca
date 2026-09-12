@@ -205,7 +205,6 @@ export async function requestChairRestore(
       liveHookReportOfSessionOnLivePaneElsewhere,
       liveReportReporterPaneKeys: liveReportPanes?.map((r) => r.paneKey),
       sweepLockHeld: isRestoreSweepLockHeld(),
-      sweepRestoreMarkSetForHolder: db.getSweepRestoreMark(hostId, holderPaneKey),
       holderHasOtherLiveRegisteredRow,
       transcriptPreflightPassed: preflight.ok
     })
