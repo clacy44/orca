@@ -14,7 +14,7 @@
 // identity ABSENT from the one daemon-inventory round (per errata 5(af)/Ruling 34 Addenda 27-30:
 // the boot-time sweep is the production restore path — pty.ts's daemon-respawn refresh gate
 // never fires), `runRestoreSweep` deciding Layer 1 or 2 and calling `notifyRebindDelivery` on its
-// own (restore-registered-agent-panes.ts:252), and the pane's own first-observed-idle edge
+// own (restore-registered-agent-panes.ts:252), and the launched agent's own first idle edge
 // (Ruling 32 Addendum 11 F2's `deliverPendingMessagesForLeaf` -> `resolveAgentMailboxForPaneKey`)
 // delivering the mail that was withheld because the pane had not been observed live yet — all
 // without a single `register` call, per the design's own closing assertion in §6.1 T11.
@@ -114,9 +114,12 @@ function enterCalls(write: ReturnType<typeof vi.fn>, ptyId: string): unknown[][]
   return write.mock.calls.filter(([calledPtyId, data]) => calledPtyId === ptyId && data === '\r')
 }
 
+// SCENARIO_CORRECTION (R197): the relaunched agent is Claude; the launch-prompt fence admits
+// only the launched agent's own idle title, so the fixture emits Claude's titles (spinner glyph,
+// then CLAUDE_IDLE), not Codex's. Every assertion below is unchanged.
 function driveIdleTitle(runtime: OrcaRuntimeService, ptyId: string): void {
-  runtime.onPtyData(ptyId, '\x1b]0;Codex working\x07', 100)
-  runtime.onPtyData(ptyId, '\x1b]0;Codex done\x07', 101)
+  runtime.onPtyData(ptyId, '\x1b]0;⠋ chair-t11\x07', 100)
+  runtime.onPtyData(ptyId, '\x1b]0;✳ chair-t11\x07', 101)
 }
 
 describe('S10-21a C12, T11 end to end: registered pane + unread mail -> boot-time sweep -> delivery, no register', () => {
@@ -274,7 +277,7 @@ describe('S10-21a C12, T11 end to end: registered pane + unread mail -> boot-tim
       // generation yet, so delivery is withheld (T16's `awaiting_idle_edge`), not yet written.
       expect(write).not.toHaveBeenCalled()
 
-      // The pane's first observed idle edge (Ruling 32 Addendum 11 F2): resolves the pane's
+      // The launched agent's own first idle edge (Ruling 32 Addendum 11 F2): resolves the pane's
       // agent:<id> mailbox and delivers the withheld record -- no register call anywhere in this
       // test, matching the brief's "agents show reports the same id with no register".
       driveIdleTitle(runtime, spawnedPtyId)
