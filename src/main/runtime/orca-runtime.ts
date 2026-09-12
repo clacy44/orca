@@ -10688,8 +10688,28 @@ export class OrcaRuntimeService {
 
   registerPreAllocatedHandleForPty(ptyId: string, handle: string): void {
     this.handleByPtyId.set(ptyId, handle)
-    for (const leaf of this.getLeavesForPty(ptyId)) {
+    const leaves = this.getLeavesForPty(ptyId)
+    for (const leaf of leaves) {
       this.adoptPreAllocatedHandle(leaf)
+    }
+    // Why: on `orca serve` the leaf graph is empty (no renderer), so the loop above is a
+    // no-op — a survived pty's handle would otherwise sit only in handleByPtyId until a
+    // session listing lazily mints a DIFFERENT handle via issuePtyHandle. Mirror issuePtyHandle's
+    // own record shape directly so resolveLiveLeafForHandle/waitForLeafPtyId can find it now.
+    if (leaves.length === 0) {
+      const pty = this.ptysById.get(ptyId)
+      if (pty && !this.handles.has(handle)) {
+        this.handles.set(handle, {
+          handle,
+          runtimeId: this.runtimeId,
+          rendererGraphEpoch: this.rendererGraphEpoch,
+          worktreeId: pty.worktreeId,
+          tabId: `pty:${ptyId}`,
+          leafId: `pty:${ptyId}`,
+          ptyId,
+          ptyGeneration: 0
+        })
+      }
     }
   }
 
@@ -12689,6 +12709,10 @@ export class OrcaRuntimeService {
       return existing
     }
     const attach = controller.attach
+    // Why: mirrors ~11180/~13280 — a live chunk can land mid-attach, before the daemon
+    // confirms; without this the one-byte headless fragment wins the first snapshot race
+    // (serializeTerminalBufferFromAvailableState prefers headless when this set is empty).
+    this.providerSnapshotPreferredPtys.add(ptyId)
     // Async wrapper: a synchronous controller throw must not break the sweep.
     const attempt = (async () => attach(ptyId))().catch(() => false)
     this.subscriberDrivenProviderAttachesByPtyId.set(ptyId, attempt)
@@ -12702,12 +12726,20 @@ export class OrcaRuntimeService {
     // SURVIVED_PTY_ATTACH_BUDGET_MS for it — same reasoning as LIVENESS_PROBE_TIMEOUT_MS
     // (daemon-pty-adapter.ts:171-175); the sweep must never wait on the daemon
     // (SWEEP_LOCK_BOUND_MS 30s disarms guards).
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined
     const timeout = new Promise<boolean>((resolve) => {
-      const t = setTimeout(() => {
+      timeoutHandle = setTimeout(() => {
         console.warn(`[runtime] survived pty attach unconfirmed within 2000ms pty=${ptyId}`)
         resolve(false)
       }, SURVIVED_PTY_ATTACH_BUDGET_MS)
-      t.unref?.()
+      timeoutHandle.unref?.()
+    })
+    // Why: today this warn fires after EVERY survived attach, even a fast one — the budget
+    // timer must stop once `attempt` itself wins the race.
+    void attempt.finally(() => {
+      if (timeoutHandle !== undefined) {
+        clearTimeout(timeoutHandle)
+      }
     })
     return Promise.race([attempt, timeout])
   }
