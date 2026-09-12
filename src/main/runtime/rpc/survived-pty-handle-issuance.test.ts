@@ -18,6 +18,7 @@ import { OrcaRuntimeService } from '../orca-runtime'
 import { RpcDispatcher } from './dispatcher'
 import type { RpcRequest } from './core'
 import { TERMINAL_METHODS } from './methods/terminal'
+import type { PtyProcessInfo } from '../../providers/pty-process-info'
 import {
   TerminalStreamOpcode,
   decodeTerminalStreamFrame,
@@ -43,6 +44,7 @@ type RuntimeInternals = {
     incarnationId?: string,
     options?: { exactRestoredSurface?: boolean }
   ) => void
+  handleByPtyId: Map<string, string>
 }
 
 function internals(runtime: OrcaRuntimeService): RuntimeInternals {
@@ -221,4 +223,68 @@ describe('R162 daemon-survived pty subscribe (headless, no leaves)', () => {
     expect(snapshotText).toContain('provider frozen screen')
     expect(snapshotText).not.toBe('x')
   }, 15_000)
+})
+
+describe('R3 placement: adopt-first (production) ordering creates the leafless handle record', () => {
+  it('creates the handle record when adoptControllerTerminalHandle runs BEFORE recordPtyWorktree, with no second handle minted', () => {
+    const runtime = new OrcaRuntimeService()
+    const rt = internals(runtime)
+
+    // Production ordering: the controller-inventory sweep adopts the survived handle first —
+    // at this point there is no ptysById record yet.
+    rt.adoptControllerTerminalHandle(PTY_ID, TERMINAL_HANDLE, INCARNATION_ID, {
+      exactRestoredSurface: true
+    })
+    expect(runtime.resolveLiveLeafForHandle(TERMINAL_HANDLE)).toBeNull()
+
+    // Then the pty gets recorded, as recordPtyWorktree's NEW-record branch does on this path.
+    rt.recordPtyWorktree(PTY_ID, WORKTREE_ID, {
+      connected: true,
+      incarnationId: INCARNATION_ID
+    })
+
+    expect(runtime.resolveLiveLeafForHandle(TERMINAL_HANDLE)).toEqual({ ptyId: PTY_ID })
+    expect(rt.handleByPtyId.get(PTY_ID)).toBe(TERMINAL_HANDLE)
+  })
+
+  it('a single takeControllerInventoryForSweep pass creates the handle record for a survived session (adopt-first, real inventory sync)', async () => {
+    const runtime = new OrcaRuntimeService()
+    const rt = internals(runtime)
+    const session: PtyProcessInfo = {
+      id: PTY_ID,
+      cwd: '/tmp/wt',
+      title: 'survived',
+      incarnationId: INCARNATION_ID as unknown as PtyProcessInfo['incarnationId'],
+      terminalHandle: TERMINAL_HANDLE
+    }
+    const controller: ControllerStub & { listProcesses: () => Promise<PtyProcessInfo[]> } = {
+      write: () => true,
+      kill: () => true,
+      attach: async () => true,
+      serializeProviderBuffer: async () => null,
+      listProcesses: async () => [session]
+    }
+    runtime.setPtyController(controller as never)
+
+    const inventory = await runtime.takeControllerInventoryForSweep()
+
+    expect(inventory).not.toBeNull()
+    expect(runtime.resolveLiveLeafForHandle(TERMINAL_HANDLE)).toEqual({ ptyId: PTY_ID })
+    expect(rt.handleByPtyId.get(PTY_ID)).toBe(TERMINAL_HANDLE)
+  })
+
+  it('the existing record-first ordering (recordPtyWorktree then adopt) still creates the handle record', () => {
+    const runtime = new OrcaRuntimeService()
+    const rt = internals(runtime)
+
+    rt.recordPtyWorktree(PTY_ID, WORKTREE_ID, {
+      connected: true,
+      incarnationId: INCARNATION_ID
+    })
+    rt.adoptControllerTerminalHandle(PTY_ID, TERMINAL_HANDLE, INCARNATION_ID, {
+      exactRestoredSurface: true
+    })
+
+    expect(runtime.resolveLiveLeafForHandle(TERMINAL_HANDLE)).toEqual({ ptyId: PTY_ID })
+  })
 })

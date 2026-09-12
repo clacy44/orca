@@ -10692,25 +10692,44 @@ export class OrcaRuntimeService {
     for (const leaf of leaves) {
       this.adoptPreAllocatedHandle(leaf)
     }
-    // Why: on `orca serve` the leaf graph is empty (no renderer), so the loop above is a
-    // no-op — a survived pty's handle would otherwise sit only in handleByPtyId until a
-    // session listing lazily mints a DIFFERENT handle via issuePtyHandle. Mirror issuePtyHandle's
-    // own record shape directly so resolveLiveLeafForHandle/waitForLeafPtyId can find it now.
     if (leaves.length === 0) {
-      const pty = this.ptysById.get(ptyId)
-      if (pty && !this.handles.has(handle)) {
-        this.handles.set(handle, {
-          handle,
-          runtimeId: this.runtimeId,
-          rendererGraphEpoch: this.rendererGraphEpoch,
-          worktreeId: pty.worktreeId,
-          tabId: `pty:${ptyId}`,
-          leafId: `pty:${ptyId}`,
-          ptyId,
-          ptyGeneration: 0
-        })
-      }
+      this.ensureLeaflessHandleRecord(ptyId)
     }
+  }
+
+  // Why: a survived pty's handle record must be created whichever side arrives second —
+  // controller-inventory adoption arrives before the pty is ever recorded on the production
+  // (adopt-first) `orca serve` restart path, while spawn/relay paths record the pty before any
+  // handle exists. Without this, the handle would sit only in handleByPtyId until a session
+  // listing lazily mints a DIFFERENT handle via issuePtyHandle — note issuePtyHandle does not
+  // mint a different handle for an already-adopted ptyId, it returns the handleByPtyId entry
+  // unchanged; the gap this closes is that no `handles` record exists yet for
+  // resolveLiveLeafForHandle/waitForLeafPtyId to find.
+  private ensureLeaflessHandleRecord(ptyId: string): void {
+    const handle = this.handleByPtyId.get(ptyId)
+    if (!handle) {
+      return
+    }
+    if (this.getLeavesForPty(ptyId).length !== 0) {
+      return
+    }
+    const pty = this.ptysById.get(ptyId)
+    if (!pty) {
+      return
+    }
+    if (this.handles.has(handle)) {
+      return
+    }
+    this.handles.set(handle, {
+      handle,
+      runtimeId: this.runtimeId,
+      rendererGraphEpoch: this.rendererGraphEpoch,
+      worktreeId: pty.worktreeId,
+      tabId: `pty:${ptyId}`,
+      leafId: `pty:${ptyId}`,
+      ptyId,
+      ptyGeneration: 0
+    })
   }
 
   private adoptControllerTerminalHandle(
@@ -33183,6 +33202,7 @@ export class OrcaRuntimeService {
         this.setPtyManagementTitleFromObservedTitle(pty, state.title, titleObservedAt ?? 0)
       }
       this.ptysById.set(ptyId, pty)
+      this.ensureLeaflessHandleRecord(ptyId)
       if (wslDistro) {
         this.wslDistroByPtyId.set(ptyId, wslDistro)
       } else if (connectionId !== null) {
