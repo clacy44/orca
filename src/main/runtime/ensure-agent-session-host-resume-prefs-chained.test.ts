@@ -240,6 +240,10 @@ import { _resetHiddenRendererPtyDeliveryGateForTest } from '../ipc/pty-hidden-de
 import { _resetWslCachesForTests } from '../wsl'
 import { __resetShellStartupEnvCache } from '../pty/shell-startup-env'
 import { OrcaRuntimeService } from './orca-runtime'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir, homedir } from 'node:os'
+import { _resetRestoreSweepLockForTest } from './restore-sweep-lock'
+import type { ControllerInventory } from './orchestration/agent-process-identity'
 
 const HOST_ID = 'local'
 
@@ -483,7 +487,14 @@ describe('S10-21d C2: ensureAgentSession(host-restore, launchPreferences) writes
         agentCmdOverrides: {},
         agentDefaultArgs: {},
         agentDefaultEnv: {}
-      })
+      }),
+      // [R142b] `registerAgentForPane` (requestChairRestore's own registration step) walks
+      // `listTerminals` -> `getResolvedWorktreeMap` -> `computeResolvedWorktrees`, which needs
+      // these two store methods present even for a run with no real worktrees — harmless no-ops
+      // for the file's original (non-chair-restore) test, which never reaches this path.
+      getWorkspaceSession: () => ({ tabsByWorktree: {} }),
+      getAllWorktreeMeta: () => ({}),
+      getRepos: () => []
     } as never)
     runtime.setOrchestrationDb(db!)
     stubLaunchScope(runtime)
@@ -544,5 +555,174 @@ describe('S10-21d C2: ensureAgentSession(host-restore, launchPreferences) writes
     expect(row?.pref_model).toBe('opus')
     expect(row?.pref_effort).toBe('ultracode')
     expect(row?.pref_source).toBe('launch')
+  })
+
+  // [R142b, chained through the REAL admission] Unlike the file's own header note ("requestChairRestore
+  // is NOT additionally driven here"), this ONE test needs it specifically: only
+  // `requestChairRestore` (not raw `ensureAgentSession`) runs DEC-3's dead-holder-adoption
+  // predicate, mints a ticket carrying `adoptionSignal`, and writes the 'adopted'/
+  // 'adopted_ensure_failed' audit rows the fix under test is about. Every other seam (db,
+  // stubbed launch scope, real `registerPtyHandlers` admission chain) reuses this file's own
+  // harness verbatim — see `buildRealRuntimeWithRealController`/`installDaemonTestProvider`
+  // above, the same real-admission wiring the file's header describes.
+  describe('R142b chained: requestChairRestore -> real admission -> SAME_GEN_PTY_ABSENCE', () => {
+    const HOLDER_SESSION_ID = 'sess-r142b-same-gen'
+    let r142bTempHome: string | undefined
+    let r142bOriginalHome: string | undefined
+
+    beforeEach(() => {
+      r142bOriginalHome = process.env.HOME
+    })
+
+    afterEach(async () => {
+      // `db` itself is closed by the outer describe's own afterEach (:395-396) — this block
+      // only tears down what THIS describe added (temp HOME, sweep lock, Date.now spy).
+      _resetRestoreSweepLockForTest()
+      vi.restoreAllMocks()
+      if (r142bTempHome) {
+        await rm(r142bTempHome, { recursive: true, force: true })
+        r142bTempHome = undefined
+      }
+      if (r142bOriginalHome !== undefined) {
+        process.env.HOME = r142bOriginalHome
+      }
+    })
+
+    it('a settled same-generation dead holder is refused as still-settling on the FIRST call, then adopted through the real admission chain on the SECOND call ≥REBIND_SETTLE_MS later (RED at base: adopted_ensure_failed)', async () => {
+      db = new OrchestrationDb(':memory:')
+      r142bTempHome = await mkdtemp(join(tmpdir(), 'orca-r142b-chained-'))
+      process.env.HOME = r142bTempHome
+      expect(homedir()).toBe(r142bTempHome)
+      const projectDir = join(r142bTempHome, '.claude', 'projects', 'proj')
+      await mkdir(projectDir, { recursive: true })
+      await writeFile(
+        join(projectDir, `${HOLDER_SESSION_ID}.jsonl`),
+        `${JSON.stringify({ type: 'user', message: { role: 'user', content: 'hi' } })}\n`
+      )
+
+      installDaemonTestProvider({
+        spawn: vi.fn(async () => ({ id: 'pty-r142b-new', incarnationId: 'inc-r142b-new' })),
+        listProcesses: vi.fn(async () => [{ id: 'pty-r142b-new', incarnationId: 'inc-r142b-new' }])
+      })
+      const runtime = buildRealRuntimeWithRealController()
+      runtime.setLiveReportPanesForSessionCheck(() => [])
+
+      const currentGen = runtime.getLaunchGenerationId()
+      const holderPaneKey = 'tab-r142b-old:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+      const holderPtyId = 'pty-r142b-holder'
+      const holderIncarnationId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+      const created = db.upsertAgentByPaneSuffix({
+        displayName: 'chair-r142b',
+        role: null,
+        hostId: HOST_ID,
+        paneKey: holderPaneKey,
+        terminalHandle: null,
+        processIncarnation: `${holderPtyId}:${holderIncarnationId}`,
+        worktreeId: null,
+        worktreePath: null,
+        branch: null,
+        title: null,
+        agentLabel: null,
+        originHandle: null,
+        originHostId: HOST_ID
+      })
+      if (created.outcome === 'name_taken') {
+        throw new Error('fixture setup failed')
+      }
+      // The holder's own launch row is under the SAME (current) generation — the R142b case,
+      // never the ordinary prior-generation GEN_ABSENCE/IDENTITY path.
+      const launched = db.recordLaunch({
+        hostId: HOST_ID,
+        paneKey: holderPaneKey,
+        agentType: 'claude',
+        sessionId: HOLDER_SESSION_ID,
+        launchGeneration: currentGen,
+        executionHostId: HOST_ID,
+        evidence: 'host_launch'
+      })
+      if (!launched.ok) {
+        throw new Error('fixture launch row failed')
+      }
+
+      // Identity present but ABSENT from every (non-null) round, no connected pty anywhere —
+      // same shape dead-holder-adoption-e2e.test.ts's negative-1 fixture uses for IDENTITY dead.
+      const deadInventory: ControllerInventory = {
+        allLivePtyIds: new Set(),
+        terminalIdentityByPtyId: new Map()
+      }
+      vi.spyOn(runtime, 'takeControllerInventoryForSweep').mockResolvedValue(deadInventory)
+      vi.spyOn(runtime, 'findConnectedPtyForPane').mockReturnValue(undefined)
+
+      const t0 = 1_700_000_000_000
+      const dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(t0)
+
+      // FIRST call: the D2-absence settle clock has just started (`holderAbsenceSettleObservations`
+      // clocks in at `t0`) — same-generation identity-dead-with-pty-absence is proven, but
+      // `holderSettledNotLive` is false (no time has passed), so DEC-3 refuses
+      // `same_generation_settling` rather than ever reaching admission.
+      const first = await runtime.requestChairRestore({
+        worktreeSelector: 'id:wt-1',
+        sessionId: HOLDER_SESSION_ID,
+        displayName: 'chair-r142b'
+      })
+      expect(first.ok).toBe(false)
+      if (first.ok) {
+        throw new Error('unreachable')
+      }
+      expect(first.reason).toBe('same_generation_settling')
+      expect(db.newestLaunchForPane(HOST_ID, holderPaneKey)?.launch_generation).toBe(currentGen)
+
+      // SECOND call, REBIND_SETTLE_MS later: the same clock now proves settle -> DEC-3 yields
+      // SAME_GEN_PTY_ABSENCE -> a ticket is minted carrying that signal -> ensureAgentSession
+      // drives the REAL `registerPtyHandlers` admission chain -> `checkHostResumeHolderUnmoved`
+      // re-verifies live (no connected pty) inside the pane lock -> proceeds.
+      dateNowSpy.mockReturnValue(t0 + 10_000)
+      const second = await runtime.requestChairRestore({
+        worktreeSelector: 'id:wt-1',
+        sessionId: HOLDER_SESSION_ID,
+        displayName: 'chair-r142b'
+      })
+
+      expect(second.ok).toBe(true)
+      if (!second.ok) {
+        throw new Error('unreachable')
+      }
+      expect(second.holderPaneKey).toBe(holderPaneKey)
+      expect(second.adoptionSignal).toBe('SAME_GEN_PTY_ABSENCE')
+
+      const newRow = db.newestLaunchForPane(HOST_ID, second.paneKey)
+      expect(newRow?.session_id).toBe(HOLDER_SESSION_ID)
+      expect(newRow?.evidence).toBe('host_restore')
+
+      // Holder superseded: its current_sessions row is gone, the session now names the new pane.
+      const rawWrite = (
+        db as unknown as { db: { prepare: (sql: string) => { get: (...a: unknown[]) => unknown } } }
+      ).db
+      expect(
+        rawWrite
+          .prepare('SELECT 1 FROM current_sessions WHERE host_id = ? AND pane_key = ?')
+          .get(HOST_ID, holderPaneKey)
+      ).toBeUndefined()
+
+      // Chair registered under the new pane.
+      const registeredChair = db.getAgentByPaneKey(HOST_ID, second.paneKey)
+      expect(registeredChair?.display_name).toBe('chair-r142b')
+
+      // writeAdoptionAudit writes TWO rows on success: 'session_adopted' (this restore's own
+      // outcome) then 'superseded' (the holder's row) — query by verb rather than by recency.
+      const auditRow = rawWrite
+        .prepare(
+          `SELECT verb, outcome, reason_code FROM agent_audit WHERE verb = 'session_adopted' ORDER BY seq DESC LIMIT 1`
+        )
+        .get() as { verb: string; outcome: string; reason_code: string }
+      expect(auditRow.verb).toBe('session_adopted')
+      expect(auditRow.outcome).toBe('adopted')
+      const supersededRow = rawWrite
+        .prepare(
+          `SELECT verb, outcome FROM agent_audit WHERE verb = 'superseded' ORDER BY seq DESC LIMIT 1`
+        )
+        .get() as { verb: string; outcome: string }
+      expect(supersededRow.outcome).toBe('superseded')
+    })
   })
 })

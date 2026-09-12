@@ -74,6 +74,9 @@ export type LaunchAdmission =
       launchSeq?: number
       evidence?: Extract<LaunchEvidence, 'sweep_record' | 'host_restore'> // [DEC-2] default sweep_record
       sequencedAgentLine?: string
+      /** [R142b] The redeemed ticket's own adoption signal (RestoreTicketPayload's field of the
+       * same name) — carried through unchanged for checkHostResumeHolderUnmoved's re-check. */
+      adoptionSignal?: 'IDENTITY' | 'D1' | 'GEN_ABSENCE' | 'SAME_GEN_PTY_ABSENCE'
     }
 
 // [S10-21d R118, forced deviation — see RETURN] AgentLaunchAdmissionContext itself moved to

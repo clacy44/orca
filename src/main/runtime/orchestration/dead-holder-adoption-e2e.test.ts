@@ -560,12 +560,19 @@ describe('D-R163 M3 negatives 1/2/6: dead-holder adoption, wired end to end', ()
       // Drive the REAL predicate `checkHostResumeHolderUnmoved` (agent-launch-admission-host-
       // resume.ts) against this exact db state, proving it genuinely yields
       // `restore_holder_moved` for this fixture rather than assuming it.
-      const realRefusal = checkHostResumeHolderUnmoved(db, HOST_ID, 'gen-new', SESSION_ID, {
-        evidence: 'host_restore',
-        predecessorPaneKey: holderPaneKey,
-        executionHostId: HOST_ID,
-        launchGeneration: 'gen-new'
-      })
+      const realRefusal = checkHostResumeHolderUnmoved(
+        db,
+        HOST_ID,
+        'gen-new',
+        SESSION_ID,
+        {
+          evidence: 'host_restore',
+          predecessorPaneKey: holderPaneKey,
+          executionHostId: HOST_ID,
+          launchGeneration: 'gen-new'
+        },
+        () => false
+      )
       expect(realRefusal).toBe('restore_holder_moved')
       if (!realRefusal) {
         throw new Error('unreachable: asserted above')

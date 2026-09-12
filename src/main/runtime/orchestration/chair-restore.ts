@@ -240,7 +240,12 @@ export async function requestChairRestore(
     sessionId: request.sessionId,
     // [S10-21d b3b, D-R163 H3 fix] resolved worktree host, never the compat constant.
     executionHostId: adoptingExecutionHostId,
-    launchGeneration: currentLaunchGeneration
+    launchGeneration: currentLaunchGeneration,
+    // [R142b] Carries the DEC-3 signal that justified this adoption into the ticket, so the
+    // admission-side pane-lock re-check can single out SAME_GEN_PTY_ABSENCE for its own live
+    // re-verification. `adoptionSignal` is null on the unheld path (no holder), which the
+    // payload's optional field represents by omission.
+    ...(adoptionSignal ? { adoptionSignal } : {})
   })
 
   // [G1-10o B6/C38 fix, extended per D-R170 M11/M12/M13] The supersede DELETE inside
