@@ -12726,12 +12726,20 @@ export class OrcaRuntimeService {
     // SURVIVED_PTY_ATTACH_BUDGET_MS for it — same reasoning as LIVENESS_PROBE_TIMEOUT_MS
     // (daemon-pty-adapter.ts:171-175); the sweep must never wait on the daemon
     // (SWEEP_LOCK_BOUND_MS 30s disarms guards).
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined
     const timeout = new Promise<boolean>((resolve) => {
-      const t = setTimeout(() => {
+      timeoutHandle = setTimeout(() => {
         console.warn(`[runtime] survived pty attach unconfirmed within 2000ms pty=${ptyId}`)
         resolve(false)
       }, SURVIVED_PTY_ATTACH_BUDGET_MS)
-      t.unref?.()
+      timeoutHandle.unref?.()
+    })
+    // Why: today this warn fires after EVERY survived attach, even a fast one — the budget
+    // timer must stop once `attempt` itself wins the race.
+    void attempt.finally(() => {
+      if (timeoutHandle !== undefined) {
+        clearTimeout(timeoutHandle)
+      }
     })
     return Promise.race([attempt, timeout])
   }

@@ -528,4 +528,35 @@ describe('S10-21e review C1: ensureProviderAttachForSurvivedPty is bounded', () 
       vi.useRealTimers()
     }
   })
+
+  it('R2: a fast attach clears the budget timer and never warns', async () => {
+    vi.useFakeTimers()
+    try {
+      const runtime = new OrcaRuntimeService()
+      const fastController = {
+        write: () => true,
+        kill: () => true,
+        attach: () => Promise.resolve(true)
+      }
+      runtime.setPtyController(fastController as never)
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+      const result = await runtime.ensureProviderAttachForSurvivedPty(PTY_ID)
+      // Why: today the 2000ms warn fires unconditionally — advance well past the budget and
+      // assert it never fired for a fast, already-resolved attach.
+      await vi.advanceTimersByTimeAsync(2_000)
+
+      expect(result).toBe(true)
+      expect(
+        warnSpy.mock.calls.some(
+          (call) =>
+            typeof call[0] === 'string' &&
+            call[0].includes('[runtime] survived pty attach unconfirmed within 2000ms')
+        )
+      ).toBe(false)
+      warnSpy.mockRestore()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })
