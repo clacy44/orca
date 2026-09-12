@@ -123,11 +123,13 @@ function isRemoteTerminalStaleMessage(message: string): boolean {
   return message.includes('terminal_handle_stale')
 }
 
-function isRemoteTerminalGoneMessage(message: string): boolean {
+function isRemoteTerminalGoneMessage(message: string, isRecovering: boolean): boolean {
   return (
     message.includes('terminal_exited') ||
     message.includes('terminal_gone') ||
-    message.includes('no_connected_pty') ||
+    // Why: a mid-restart runtime returns this for a not-yet-issued handle — while a
+    // recovery epoch is live it is a retry signal, not lifecycle evidence the pty is gone.
+    (!isRecovering && message.includes('no_connected_pty')) ||
     message.toLocaleLowerCase('en-US').includes('explicitly killed')
   )
 }
@@ -1474,9 +1476,14 @@ export function createRemoteRuntimePtyTransport(
       }
       return
     }
-    if (isRemoteTerminalGoneMessage(message)) {
+    if (isRemoteTerminalGoneMessage(message, recovery.isActive)) {
       // Why: an explicit terminal-gone response is lifecycle evidence, unlike a replaceable stale handle seen during reconnect.
       retireRemoteTerminalId()
+      return
+    }
+    if (message.includes('no_connected_pty') && recovery.isActive) {
+      // Why: a mid-restart runtime returns this for a not-yet-issued handle — retry, not retire (V2).
+      scheduleResubscribeAfterTransportClose()
       return
     }
     if (message.includes(SSH_SESSION_EXPIRED_ERROR)) {
@@ -2185,9 +2192,12 @@ export function createRemoteRuntimePtyTransport(
         if (!destroyed && lifecycleEpoch === connectLifecycleEpoch) {
           connecting = false
           const message = runtimeTerminalErrorMessage(error)
-          if (isRemoteTerminalGoneMessage(message)) {
+          if (isRemoteTerminalGoneMessage(message, recovery.isActive)) {
             recovery.cancel()
             handleRemoteTerminalError(error)
+          } else if (message.includes('no_connected_pty') && recovery.isActive) {
+            // Why: a mid-restart runtime returns this for a not-yet-issued handle — retry, not retire (V2).
+            recovery.markDisconnected()
           } else if (
             isRecoverableRemoteRuntimeConnectionError(toRemoteRuntimeClientErrorLike(error))
           ) {
