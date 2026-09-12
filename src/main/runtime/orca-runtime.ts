@@ -246,6 +246,11 @@ import {
   shouldLog as shouldLogDeliveryStarvation,
   type DeliveryStarvationRecord
 } from './orchestration/delivery-starvation'
+import {
+  LAUNCH_PROMPT_FENCE_MAX_MS,
+  isLaunchPromptFenceExpired,
+  isLaunchedClaudePromptTitle
+} from './orchestration/launch-prompt-fence'
 import { RUNTIME_NOTIFICATION_SENDER } from './orchestration/runtime-notification'
 import { resolveStaleBarePeerHandle } from './orchestration/stale-handle-resolution'
 import { MailPointerRepointScheduler } from './orchestration/mail-pointer-repoint-scheduler'
@@ -1526,6 +1531,11 @@ type RuntimePtyWorktreeRecord = {
   lastAgentStatus: AgentStatus | null
   /** False until a live OSC frame sets the status; restore seeds never set it. */
   lastAgentStatusObservedLive: boolean
+  /** [R197] Epoch ms at which a launch command for `launchAgent` was delivered into this pane;
+   *  null once the launched agent itself has been observed at its prompt this generation.
+   *  While non-null, no host-authored bytes may be written into the pane — the shell's own OSC
+   *  titles say nothing about whether the agent exists yet (INV-P-LAUNCH-EDGE). */
+  launchPromptFenceSince: number | null
   lastAgentStatusStartedAtEpochMs: number | null
   // A later semantic title interval cannot inherit rich fields from an earlier task.
   lastAgentStatusRichInvalidatedAtEpochMs: number | null
@@ -2346,7 +2356,9 @@ type PtyWriteFlight = {
 // 'awaiting_idle_edge' added S10-21a C9, Ruling 34 Addendum 5 §5(1)/N5 — a leafless pane's
 // delivery attempt landed before it was ever observed live this generation; the applyTracked-
 // PtyTitle idle edge is the delivery edge that will eventually pick this record up, never a
-// silent delete).
+// silent delete; 'awaiting_launch_prompt' added R197 — a launch command sits in the pane and
+// the launched agent has not yet been observed at its own prompt (INV-P-LAUNCH-EDGE); the
+// shell's own OSC titles do not count as that evidence).
 type WithheldDeliveryReason =
   | 'pane_busy'
   | 'not_agent_pane'
@@ -2355,6 +2367,7 @@ type WithheldDeliveryReason =
   | 'no_live_pane'
   | 'blocked_modal'
   | 'awaiting_idle_edge'
+  | 'awaiting_launch_prompt'
 
 // Why (S10-15 F8): the pointer/Enter push targets either a live leaf or a leafless pty record
 // — no renderer leaf exists for it, e.g. a headless `orca serve` session or a desktop pane
@@ -12090,6 +12103,9 @@ export class OrcaRuntimeService {
       pty.lastOscTitleEpochMs = observedAtEpochMs
       pty.lastAgentStatus = agentStatus
       pty.lastAgentStatusObservedLive = true
+      if (pty.launchPromptFenceSince !== null && isLaunchedClaudePromptTitle(rawTitle)) {
+        pty.launchPromptFenceSince = null
+      }
       if (prevStatus !== agentStatus) {
         pty.lastAgentStatusStartedAtEpochMs = observedAtEpochMs
       }
@@ -12215,6 +12231,9 @@ export class OrcaRuntimeService {
       // Why: the prior process's live frames say nothing about the replacement,
       // so the seed a same-id restore applies must not inherit its authority.
       pty.lastAgentStatusObservedLive = false
+      // [R197] A same-id respawn is a new process that will be handed a launch command again;
+      // leaving a cleared fence here would re-open the hole for exactly the daemon-respawn case.
+      pty.launchPromptFenceSince = pty.launchAgent === 'claude' ? Date.now() : null
       pty.lastAgentStatusStartedAtEpochMs = null
       pty.lastAgentStatusRichInvalidatedAtEpochMs = Date.now()
       pty.managementTitle = null
@@ -29178,6 +29197,8 @@ export class OrcaRuntimeService {
               pty.launchToken = null
               pty.launchIncarnationId = null
               pty.launchAgent = launchOpts.launchAgent ?? null
+              pty.launchPromptFenceSince =
+                launchOpts.launchAgent === 'claude' && launchOpts.command ? Date.now() : null
               if (!anchorSurvivesThisCreate) {
                 // S10-17/F1: drop any queued retry for this pane too, or a later successful
                 // drain could resurrect the anchor this forget is about to delete.
@@ -29197,6 +29218,8 @@ export class OrcaRuntimeService {
               pty.launchToken = launchToken
               pty.launchIncarnationId = pty.incarnationId
               pty.launchAgent = launchOpts.launchAgent ?? null
+              pty.launchPromptFenceSince =
+                launchOpts.launchAgent === 'claude' && launchOpts.command ? Date.now() : null
               // Why: persist the hash (never the token) so a daemon-survived pty after a runtime
               // restart — which has no live launchToken, only its own process env — can still
               // corroborate later via verifyLivePaneLaunchTokenHash's persisted-hash fallback (S10-10).
@@ -33181,6 +33204,7 @@ export class OrcaRuntimeService {
         lastExitCode: null,
         lastAgentStatus: null,
         lastAgentStatusObservedLive: false,
+        launchPromptFenceSince: null,
         lastAgentStatusStartedAtEpochMs: null,
         lastAgentStatusRichInvalidatedAtEpochMs: null,
         lastOscTitle: null,
@@ -36038,6 +36062,41 @@ export class OrcaRuntimeService {
     return false
   }
 
+  // [R197] INV-P-LAUNCH-EDGE: while a launch command sits in the pane and the launched agent
+  // has not yet reported its own prompt, no host-authored bytes may be written to it — see
+  // orchestration/launch-prompt-fence.ts.
+  private launchPromptFenceHolds(pty: RuntimePtyWorktreeRecord | null | undefined): boolean {
+    if (!pty || pty.launchPromptFenceSince === null) {
+      return false
+    }
+    const since = pty.launchPromptFenceSince
+    // A hook status RECEIVED AFTER the launch is agent-authored evidence; one received before it
+    // belongs to the previous occupant of this pane key (AGENT_STATUS_STALE_AFTER_MS is 30 min).
+    for (const entry of this.getAgentStatusSnapshotFn?.() ?? []) {
+      if (
+        entry.paneKey === pty.paneKey &&
+        entry.agentType === 'claude' &&
+        typeof entry.receivedAt === 'number' &&
+        entry.receivedAt >= since
+      ) {
+        pty.launchPromptFenceSince = null
+        return false
+      }
+    }
+    if (isLaunchPromptFenceExpired(since, Date.now(), LAUNCH_PROMPT_FENCE_MAX_MS)) {
+      // Loud degradation: the launched agent never reported a prompt. Fall back to the ordinary
+      // ladder rather than deafening the pane, and say so.
+      console.warn('[orchestration] launch-prompt fence expired without an agent prompt', {
+        paneKey: pty.paneKey,
+        ptyId: pty.ptyId,
+        heldMs: Date.now() - since
+      })
+      pty.launchPromptFenceSince = null
+      return false
+    }
+    return true
+  }
+
   // Why (S10-15 F9): the one hard gate that survives relaxing the busy check for Claude
   // panes — an injected Enter into a live permission/trust prompt would answer the dialog,
   // not the pane. Same modal detection probeTuiIdleForDelivery uses (detectTerminalWaitBlockedReason
@@ -36142,6 +36201,10 @@ export class OrcaRuntimeService {
       const livePty = this.getLivePtyForHandle(terminalHandle)
       if (livePty) {
         const { pty } = livePty
+        if (this.launchPromptFenceHolds(pty)) {
+          this.recordWithheldDelivery(handle, 'awaiting_launch_prompt')
+          return
+        }
         // Same live-observation gate as the leaf branch below, read off the pty record.
         if (pty.lastAgentStatus === 'idle' && pty.lastAgentStatusObservedLive) {
           this.withheldDeliveryAttemptsByHandle.delete(handle)
@@ -36215,6 +36278,10 @@ export class OrcaRuntimeService {
         return
       }
       const { leaf } = this.getLiveLeafForHandle(terminalHandle)
+      if (this.launchPromptFenceHolds(leaf.ptyId ? this.ptysById.get(leaf.ptyId) : null)) {
+        this.recordWithheldDelivery(handle, 'awaiting_launch_prompt')
+        return
+      }
       // Why lastAgentStatusObservedLive: a cold restore seeds `idle` from the
       // title persisted at snapshot time, so an agent that went busy across the
       // relaunch still reads idle until its first live frame. Pushing on that
@@ -37837,6 +37904,11 @@ export class OrcaRuntimeService {
     const mailboxHandle = options.mailboxHandle ?? handle
     const notifiedThreadIdKnown = options.notifiedThreadIdKnown ?? true
     const ptyId = resolved.ptyId
+
+    if (this.launchPromptFenceHolds(ptyId ? this.ptysById.get(ptyId) : null)) {
+      this.recordWithheldDelivery(mailboxHandle, 'awaiting_launch_prompt')
+      return
+    }
 
     if (ptyId && this.messageDeliveryFlightsByPtyId.has(ptyId)) {
       let parked = this.parkedMessageRedeliveriesByPtyId.get(ptyId)
