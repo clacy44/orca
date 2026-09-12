@@ -12709,6 +12709,10 @@ export class OrcaRuntimeService {
       return existing
     }
     const attach = controller.attach
+    // Why: mirrors ~11180/~13280 — a live chunk can land mid-attach, before the daemon
+    // confirms; without this the one-byte headless fragment wins the first snapshot race
+    // (serializeTerminalBufferFromAvailableState prefers headless when this set is empty).
+    this.providerSnapshotPreferredPtys.add(ptyId)
     // Async wrapper: a synchronous controller throw must not break the sweep.
     const attempt = (async () => attach(ptyId))().catch(() => false)
     this.subscriberDrivenProviderAttachesByPtyId.set(ptyId, attempt)

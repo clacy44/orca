@@ -21,6 +21,7 @@ import { TERMINAL_METHODS } from './methods/terminal'
 import {
   TerminalStreamOpcode,
   decodeTerminalStreamFrame,
+  decodeTerminalStreamText,
   encodeTerminalStreamFrame,
   encodeTerminalStreamJson
 } from '../../../shared/terminal-stream-protocol'
@@ -191,5 +192,33 @@ describe('R162 daemon-survived pty subscribe (headless, no leaves)', () => {
       messages.some((m) => m.result?.type === 'error' && m.result?.message === 'no_connected_pty')
     ).toBe(false)
     expect(messages.some((m) => m.result?.type === 'subscribed')).toBe(true)
+  }, 15_000)
+
+  it('R1: the first snapshot after the survived arm attaches carries the provider buffer, not the pre-attach fragment', async () => {
+    const { runtime, releaseAttach } = setupSurvivedDaemonPty()
+
+    const attachDone = runtime.ensureProviderAttachForSurvivedPty(PTY_ID)
+    // Why: a live chunk can land mid-attach, before the daemon confirms.
+    runtime.onPtyData(PTY_ID, 'x', Date.now())
+    releaseAttach(true)
+    await attachDone
+
+    const { messages, binaryFrames, handlers } = startMultiplex(runtime)
+    await vi.waitFor(() => expect(handlers.has(0)).toBe(true))
+
+    sendSubscribe(handlers, TERMINAL_HANDLE)
+
+    await vi.waitFor(
+      () => expect(messages.some((m) => m.result?.type === 'subscribed')).toBe(true),
+      { timeout: 12_000 }
+    )
+
+    const snapshotText = binaryFrames
+      .map(decodeTerminalStreamFrame)
+      .filter((f) => f?.opcode === TerminalStreamOpcode.SnapshotChunk)
+      .map((f) => decodeTerminalStreamText(f!.payload))
+      .join('')
+    expect(snapshotText).toContain('provider frozen screen')
+    expect(snapshotText).not.toBe('x')
   }, 15_000)
 })
