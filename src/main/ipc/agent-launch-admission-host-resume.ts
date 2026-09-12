@@ -17,6 +17,13 @@ export type HostResumeAdmission = {
   /** [R142b] The ticket's own dead-holder-adoption signal, carried through unchanged — see
    * RestoreTicketPayload's field of the same name for why. */
   adoptionSignal?: 'IDENTITY' | 'D1' | 'GEN_ABSENCE' | 'SAME_GEN_PTY_ABSENCE'
+  /** [F1] The holder's launch row `seq` as it stood at mint time (RestoreTicketPayload's field
+   * of the same name, threaded through LaunchAdmission unchanged) — lets the SAME_GEN_PTY_ABSENCE
+   * re-check below tell "the row judged at mint is still the pane's newest row" from "the pane
+   * relaunched and inserted a newer row between mint and admit", which a generation-only compare
+   * cannot: a relaunch under the SAME launch_generation leaves `launch_generation` unchanged but
+   * bumps `seq`. */
+  launchSeq?: number
 }
 
 /** Defaults `evidence` to the sweep's own 'sweep_record' (the only caller before this brief) and
@@ -59,6 +66,15 @@ export type HostResumeHolderRefusal =
   // 'restore_holder_current_generation' refusal below, which fires when no such proof was ever
   // offered for the current-generation case at all.
   | 'restore_holder_same_generation_live'
+  // [F1] The SAME_GEN_PTY_ABSENCE arm's OWN row (the holder's newest row at mint time,
+  // RestoreTicketPayload.launchSeq) is no longer the pane's newest row — the holder relaunched
+  // (a fresh launch row under the SAME generation) between mint and this admission's lock.
+  // findConnectedPtyForPane cannot see this: a freshly relaunched pane's pty may not have
+  // reconnected yet, so the connected-pty check alone would pass a holder that has, in fact,
+  // moved on. Distinct from `restore_holder_current_generation` (no SAME_GEN_PTY_ABSENCE proof
+  // was ever offered) and from `restore_holder_same_generation_live` (proof offered, re-verified
+  // live via pty) — this is proof offered, but for a row that is no longer the newest.
+  | 'restore_holder_relaunched'
 
 /** [S10-21d b3b, D-R163 H1 fix] Re-reads predecessor-pane holding + generation freshly INSIDE
  * the pane lock, right before the write — a launcher restore (evidence 'host_restore') evaluated
@@ -97,6 +113,13 @@ export function checkHostResumeHolderUnmoved(
   }
   if (admission.adoptionSignal !== 'SAME_GEN_PTY_ABSENCE') {
     return 'restore_holder_current_generation'
+  }
+  // [F1] Pin the holder's launch row at mint time: the newest row must still be the one the
+  // predicate judged. A relaunch between mint and admit inserts a NEWER row under this SAME
+  // generation, which the generation compare above cannot see — checked before the connected-pty
+  // re-verification because a freshly relaunched pane's pty may still read as absent.
+  if (admission.launchSeq !== undefined && holderRow?.seq !== admission.launchSeq) {
+    return 'restore_holder_relaunched'
   }
   return findConnectedPtyForPane(admission.predecessorPaneKey)
     ? 'restore_holder_same_generation_live'
