@@ -59,8 +59,17 @@ export type AgentLaunchAdmissionContext = {
   ) => void
   /** [S10-21f b2-10q, R143's sibling reason-code split] SYNC — the caller_resume collision arm
    * (agent-launch-admission.ts ~:327) reads this to tell a live holder pane apart from a
-   * dead-looking one for its refusal's reason code, never for admissibility itself (no behaviour
-   * change — the arm still refuses `unrecorded` either way). */
+   * dead-looking one for its refusal's reason code. [F4] No longer reason-code-only: R142b's
+   * `checkHostResumeHolderUnmoved` (agent-launch-admission-host-resume.ts) also reads this for
+   * the SAME_GEN_PTY_ABSENCE arm's live re-verification, where it IS admissibility-bearing —
+   * `true` there flips the outcome to `restore_holder_same_generation_live`. `false` means "no
+   * evidence of life", never "proven dead" — a pty that has not yet reconnected reads identically
+   * to one that never will. The wiring at pty.ts ~:951-954 fails OPEN toward `false` when
+   * `runtime.findConnectedPtyForPane` is absent, which for THIS caller would read as "no
+   * evidence, proceed" rather than refuse — but that branch is unreachable in practice: the same
+   * absent-runtime condition already makes `getDb` (pty.ts ~:868-871) return undefined, and
+   * `admitAgentLaunch` (agent-launch-admission.ts:131-133) refuses `launch_store_unavailable`
+   * before this field is ever read. */
   findConnectedPtyForPane: (paneKey: string) => boolean
 }
 
