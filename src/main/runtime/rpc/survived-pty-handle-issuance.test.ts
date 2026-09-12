@@ -32,12 +32,23 @@ const PTY_ID = `${WORKTREE_ID}@@survived-r162`
 const TERMINAL_HANDLE = 'term_survived_r162'
 const INCARNATION_ID = 'incarnation-survived-r162'
 
+// R177: a fresh spawn's pty id, distinct from the survived-pty fixtures above.
+const FRESH_PTY_ID = `${WORKTREE_ID}@@fresh-spawn-r177`
+const FRESH_TAB_ID = 'tab-fresh-r177'
+const FRESH_LEAF_ID = '11111111-1111-4111-8111-111111111111'
+
 type RuntimeInternals = {
   recordPtyWorktree: (
     ptyId: string,
     worktreeId: string,
     state?: { connected?: boolean; incarnationId?: string }
   ) => unknown
+  registerPty: (
+    ptyId: string,
+    worktreeId: string,
+    connectionId: string | null,
+    binding?: { tabId: string; leafId: string }
+  ) => void
   adoptControllerTerminalHandle: (
     ptyId: string,
     handle: string | undefined,
@@ -45,6 +56,7 @@ type RuntimeInternals = {
     options?: { exactRestoredSurface?: boolean }
   ) => void
   handleByPtyId: Map<string, string>
+  handles: Map<string, unknown>
 }
 
 function internals(runtime: OrcaRuntimeService): RuntimeInternals {
@@ -226,27 +238,18 @@ describe('R162 daemon-survived pty subscribe (headless, no leaves)', () => {
 })
 
 describe('R3 placement: adopt-first (production) ordering creates the leafless handle record', () => {
-  it('creates the handle record when adoptControllerTerminalHandle runs BEFORE recordPtyWorktree, with no second handle minted', () => {
-    const runtime = new OrcaRuntimeService()
-    const rt = internals(runtime)
-
-    // Production ordering: the controller-inventory sweep adopts the survived handle first —
-    // at this point there is no ptysById record yet.
-    rt.adoptControllerTerminalHandle(PTY_ID, TERMINAL_HANDLE, INCARNATION_ID, {
-      exactRestoredSurface: true
-    })
-    expect(runtime.resolveLiveLeafForHandle(TERMINAL_HANDLE)).toBeNull()
-
-    // Then the pty gets recorded, as recordPtyWorktree's NEW-record branch does on this path.
-    rt.recordPtyWorktree(PTY_ID, WORKTREE_ID, {
-      connected: true,
-      incarnationId: INCARNATION_ID
-    })
-
-    expect(runtime.resolveLiveLeafForHandle(TERMINAL_HANDLE)).toEqual({ ptyId: PTY_ID })
-    expect(rt.handleByPtyId.get(PTY_ID)).toBe(TERMINAL_HANDLE)
-  })
-
+  // R177 SCENARIO_CORRECTION: this describe block used to open with a unit-level case that
+  // drove `adoptControllerTerminalHandle` then `recordPtyWorktree` DIRECTLY and asserted a
+  // handle record appeared after `recordPtyWorktree` alone. R177 moves the adopt-first write
+  // from `recordPtyWorktree`'s own NEW-record branch into the controller-inventory sync
+  // caller (`refreshPtyWorktreeRecordsWithControllerInventory`), so `recordPtyWorktree` no
+  // longer writes a leafless record under ANY ordering of direct unit calls — only the real
+  // inventory-sync path does. That makes the deleted case's assertion false by construction
+  // (not a bug: driving the two private methods by hand no longer exercises the write site).
+  // It is also fully redundant with the case below, which drives the real
+  // `takeControllerInventoryForSweep` -> `refreshPtyWorktreeRecordsWithControllerInventory`
+  // pipeline and proves the same adopt-first-creates-the-record property against the
+  // production call path instead of a hand-rolled one. Deleted rather than reshaped.
   it('a single takeControllerInventoryForSweep pass creates the handle record for a survived session (adopt-first, real inventory sync)', async () => {
     const runtime = new OrcaRuntimeService()
     const rt = internals(runtime)
@@ -286,5 +289,82 @@ describe('R3 placement: adopt-first (production) ordering creates the leafless h
     })
 
     expect(runtime.resolveLiveLeafForHandle(TERMINAL_HANDLE)).toEqual({ ptyId: PTY_ID })
+  })
+})
+
+describe('R177: an ordinary fresh spawn must NOT get a leafless handle record', () => {
+  it('registerPty (no controller inventory, no leaf) leaves this.handles without a record for the spawned pty', () => {
+    const runtime = new OrcaRuntimeService()
+    const rt = internals(runtime)
+
+    // Mirrors src/main/ipc/pty.ts ~:2684: the env builder pre-allocates a handle by ptyId
+    // before the process exists, purely so the agent can self-identify via
+    // ORCA_TERMINAL_HANDLE — this must NOT create a `this.handles` record.
+    const handle = runtime.preAllocateHandleForPty(FRESH_PTY_ID)
+
+    // Then the ORDINARY registerPty path runs (chair restore / createTerminal / desktop
+    // spawn) — connected: true, no controller inventory, no leaf registered.
+    rt.registerPty(FRESH_PTY_ID, WORKTREE_ID, null, {
+      tabId: FRESH_TAB_ID,
+      leafId: FRESH_LEAF_ID
+    })
+
+    expect(rt.handleByPtyId.get(FRESH_PTY_ID)).toBe(handle)
+    // At base (8e7b485669) recordPtyWorktree's NEW-record branch called
+    // ensureLeaflessHandleRecord unconditionally, so this record existed for every ordinary
+    // spawn — that is the R177 defect: a `pty:` record makes getTerminalHandleForPaneKey
+    // resolve immediately, so writeHostNoticeToPane's queued "Launch admission notice" can
+    // type into a pane whose agent has not reached its startup prompt yet.
+    expect(rt.handles.has(handle)).toBe(false)
+    expect(runtime.resolveLiveLeafForHandle(handle)).toBeNull()
+
+    // Deviation from the brief's literal predicate (recorded per this seat's standing
+    // instruction to follow the tree over the brief when they disagree): the brief also asks
+    // to assert `getTerminalHandleForPaneKey(paneKey)` is null/undefined here, calling it "the
+    // predicate writeHostNoticeToPane gates on". Read at src/main/runtime/orca-runtime.ts
+    // ~:35437-35450, getTerminalHandleForPaneKey falls through to
+    // `getPtyRecordForPaneKey`+`issuePtyHandle` for a connected pty with a matching paneKey,
+    // and `issuePtyHandle` (~:37263) unconditionally self-heals: it mints a `this.handles`
+    // entry on first call whether or not this fix's `ensureLeaflessHandleRecord` call ever
+    // ran. Empirically (probed against this exact fixture pre-commit) it returns a non-null
+    // handle both before and after this diff — so that specific assertion would never
+    // distinguish RED from GREEN and was dropped rather than written as a tautology. The
+    // property this diff actually pins is upstream of that self-heal ladder: no `this.handles`
+    // record exists, and `resolveLiveLeafForHandle`/`waitForLeafPtyId` (what the daemon-restart
+    // 10s fix and this notice-timing fix both gate on) see nothing, until a real leaf binds or
+    // a controller-inventory pass adopts the pty. Flagged for the chair; not blocking.
+  })
+
+  it('a controller inventory pass after the same fresh-spawn fixture creates the record (inventory site, not the spawn site, is the writer)', async () => {
+    const runtime = new OrcaRuntimeService()
+    const rt = internals(runtime)
+    const handle = runtime.preAllocateHandleForPty(FRESH_PTY_ID)
+    rt.registerPty(FRESH_PTY_ID, WORKTREE_ID, null, {
+      tabId: FRESH_TAB_ID,
+      leafId: FRESH_LEAF_ID
+    })
+    expect(rt.handles.has(handle)).toBe(false)
+
+    const session: PtyProcessInfo = {
+      id: FRESH_PTY_ID,
+      cwd: '/tmp/wt',
+      title: 'fresh-spawn-now-survived',
+      incarnationId: INCARNATION_ID as unknown as PtyProcessInfo['incarnationId'],
+      terminalHandle: handle
+    }
+    const controller: ControllerStub & { listProcesses: () => Promise<PtyProcessInfo[]> } = {
+      write: () => true,
+      kill: () => true,
+      attach: async () => true,
+      serializeProviderBuffer: async () => null,
+      listProcesses: async () => [session]
+    }
+    runtime.setPtyController(controller as never)
+
+    const inventory = await runtime.takeControllerInventoryForSweep()
+
+    expect(inventory).not.toBeNull()
+    expect(rt.handles.has(handle)).toBe(true)
+    expect(runtime.resolveLiveLeafForHandle(handle)).toEqual({ ptyId: FRESH_PTY_ID })
   })
 })
