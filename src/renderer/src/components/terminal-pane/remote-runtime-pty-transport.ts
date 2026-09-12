@@ -1579,6 +1579,17 @@ export function createRemoteRuntimePtyTransport(
       )
       // Why: a stale error can strengthen policy after inventory returns but before this continuation runs.
       if (effectivePolicy === 'require-replacement' && nextHandle === previousHandle) {
+        // Why: inventory just proved THIS handle is what the host publishes, but a
+        // replacement is still required — a bare return here strands the recovery epoch
+        // with no path back. Park a retry for an external trigger, same as the
+        // undefined-handle branch above (V1, S10-21g r162); the deadline timer armed by
+        // recovery.begin() still disconnects on its own schedule.
+        recovery.parkRetryForExternalTrigger(recoveryEpoch, (nextEpoch) => {
+          scheduleResubscribeAfterTransportClose(
+            handle ? getRecoveryReplacementPolicy(handle) : 'reuse',
+            nextEpoch
+          )
+        })
         return
       }
       if (nextHandle !== previousHandle) {
