@@ -10688,8 +10688,28 @@ export class OrcaRuntimeService {
 
   registerPreAllocatedHandleForPty(ptyId: string, handle: string): void {
     this.handleByPtyId.set(ptyId, handle)
-    for (const leaf of this.getLeavesForPty(ptyId)) {
+    const leaves = this.getLeavesForPty(ptyId)
+    for (const leaf of leaves) {
       this.adoptPreAllocatedHandle(leaf)
+    }
+    // Why: on `orca serve` the leaf graph is empty (no renderer), so the loop above is a
+    // no-op — a survived pty's handle would otherwise sit only in handleByPtyId until a
+    // session listing lazily mints a DIFFERENT handle via issuePtyHandle. Mirror issuePtyHandle's
+    // own record shape directly so resolveLiveLeafForHandle/waitForLeafPtyId can find it now.
+    if (leaves.length === 0) {
+      const pty = this.ptysById.get(ptyId)
+      if (pty && !this.handles.has(handle)) {
+        this.handles.set(handle, {
+          handle,
+          runtimeId: this.runtimeId,
+          rendererGraphEpoch: this.rendererGraphEpoch,
+          worktreeId: pty.worktreeId,
+          tabId: `pty:${ptyId}`,
+          leafId: `pty:${ptyId}`,
+          ptyId,
+          ptyGeneration: 0
+        })
+      }
     }
   }
 
