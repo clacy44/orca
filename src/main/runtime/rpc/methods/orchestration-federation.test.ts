@@ -207,7 +207,10 @@ describe('orchestration federation', () => {
     expect(workerRuntime.sendTerminalAgentPrompt).toHaveBeenCalledWith(
       'term_windows_worker',
       expect.stringContaining(`Your task ID is: ${task.id}`),
-      expect.objectContaining({ beforeWrite: expect.any(Function) })
+      expect.objectContaining({
+        beforeWrite: expect.any(Function),
+        awaitLaunchPromptFenceMs: expect.any(Number)
+      })
     )
     // Strictly stronger than "a function was passed": the third argument IS the fresh-foreground
     // conjunct (Ruling 24(a) FULL profile) — invoking it drives isPeerPaneForegroundAgentLive for

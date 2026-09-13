@@ -404,3 +404,222 @@ describe('R203 T-Q: sendFullDispatchPaste awaits the launch-prompt fence with a 
     }
   }, 15_000)
 })
+
+describe('R203 T-Q-leaf: sendFullDispatchPaste awaits the launch-prompt fence on a leaf-backed pane', () => {
+  const LEAF_TAB_ID = 'tab-full-paste-leaf'
+  const LEAF_ID = '99999999-9999-4999-8999-999999999999'
+
+  it('a real ✳ title feed through onPtyData clears the fence mid-wait — exactly one paste and one submit written through the LEAF branch', async () => {
+    vi.useFakeTimers()
+    const runtime = new OrcaRuntimeService()
+    const db = new OrchestrationDb(':memory:')
+    try {
+      runtime.setOrchestrationDb(db)
+      const ptyId = 'pty-full-paste-leaf-clear'
+      const writes: string[] = []
+      runtime.setPtyController({
+        write: (_id, data) => {
+          writes.push(data)
+          return true
+        },
+        kill: () => true,
+        getForegroundProcess: async () => 'claude',
+        confirmForegroundProcess: async () => 'claude',
+        listProcesses: async () => []
+      })
+
+      runtime.registerPty(ptyId, TEST_WORKTREE_ID, null, {
+        tabId: LEAF_TAB_ID,
+        leafId: LEAF_ID
+      })
+      // Pre-allocate BEFORE the graph sync: syncWindowGraph's leaf loop adopts this into a LEAF
+      // handle (tabId = LEAF_TAB_ID, not the `pty:`-prefixed synthetic id), so
+      // sendFullDispatchPaste -> sendTerminalAgentPrompt resolves via getLiveLeafForHandle (the
+      // LEAF branch, orca-runtime.ts ~:19451-19457), not the direct pty branch T-Q already covers.
+      const handle = runtime.preAllocateHandleForPty(ptyId)
+      runtime.attachWindow(1)
+      runtime.syncWindowGraph(1, {
+        tabs: [
+          {
+            tabId: LEAF_TAB_ID,
+            worktreeId: TEST_WORKTREE_ID,
+            title: 'claude',
+            activeLeafId: LEAF_ID,
+            layout: null
+          }
+        ],
+        leaves: [
+          {
+            tabId: LEAF_TAB_ID,
+            worktreeId: TEST_WORKTREE_ID,
+            leafId: LEAF_ID,
+            paneRuntimeId: 1,
+            ptyId,
+            paneTitle: null
+          }
+        ]
+      })
+
+      const pty = (
+        runtime as unknown as {
+          ptysById: Map<string, { launchAgent?: string; launchPromptFenceSince: number | null }>
+        }
+      ).ptysById.get(ptyId)
+      if (!pty) {
+        throw new Error('fixture setup failed: no pty record for ptyId')
+      }
+      // noteTerminalSpawnCommand only arms the fence for launchAgent 'claude' (Case T-F) —
+      // registerPty itself never sets it.
+      pty.launchAgent = 'claude'
+      runtime.noteTerminalSpawnCommand(ptyId, 'claude --resume abc')
+      expect(pty.launchPromptFenceSince ?? null).not.toBeNull()
+
+      // isPeerPaneForegroundAgentLive (the beforeWrite conjunct) resolves only through
+      // getLivePtyForHandle, which is pty-branch-only and always null for a leaf-adopted
+      // handle — same isolation orchestration-federation.test.ts already uses around its own
+      // beforeWrite assertion, unrelated to the fence/leaf-branch behaviour under test here.
+      vi.spyOn(runtime, 'isPeerPaneForegroundAgentLive').mockResolvedValue(true)
+
+      const dispatchId = 'disp_full_paste_leaf_clear'
+      createStartingAttachment(db, runtime, dispatchId)
+
+      const sendPromise = sendFullDispatchPaste({
+        db,
+        runtime,
+        dispatchId,
+        taskId: 'task_full_paste_leaf',
+        taskSpec: 'do the leaf thing',
+        terminalHandle: handle,
+        effects: [],
+        awaitLaunchPromptFenceMs: 60_000
+      })
+
+      // t=2s: the agent's OWN idle title (real onPtyData feed, not a direct field assignment)
+      // clears the fence while the bounded wait is still polling (every 250ms).
+      await vi.advanceTimersByTimeAsync(2_000)
+      runtime.onPtyData(ptyId, '\x1b]0;✳ Claude Code\x07', 200)
+      expect(pty.launchPromptFenceSince ?? null).toBeNull()
+
+      // The poll notices the clear within 250ms, then writeTerminalAgentPrompt's own Claude
+      // render gate runs its 8s hard timeout (no render marker in this fixture).
+      await vi.advanceTimersByTimeAsync(8_500)
+      await sendPromise
+
+      const submitWrites = writes.filter((w) => w === AGENT_PROMPT_SUBMIT)
+      const pasteWrites = writes.filter((w) => w.includes('do the leaf thing'))
+      expect(pasteWrites).toHaveLength(1)
+      expect(submitWrites).toHaveLength(1)
+      expect(db.getRemoteDispatchAttachment(dispatchId)?.state).toBe('ready')
+    } finally {
+      db.close()
+    }
+  }, 15_000)
+
+  it('fence clear at entry: the fence is already clear when sendFullDispatchPaste is called — no fence-poll timer is ever scheduled', async () => {
+    vi.useFakeTimers()
+    const runtime = new OrcaRuntimeService()
+    const db = new OrchestrationDb(':memory:')
+    try {
+      runtime.setOrchestrationDb(db)
+      const ptyId = 'pty-full-paste-leaf-clear-at-entry'
+      const writes: string[] = []
+      runtime.setPtyController({
+        write: (_id, data) => {
+          writes.push(data)
+          return true
+        },
+        kill: () => true,
+        getForegroundProcess: async () => 'claude',
+        confirmForegroundProcess: async () => 'claude',
+        listProcesses: async () => []
+      })
+
+      runtime.registerPty(ptyId, TEST_WORKTREE_ID, null, {
+        tabId: LEAF_TAB_ID,
+        leafId: LEAF_ID
+      })
+      const handle = runtime.preAllocateHandleForPty(ptyId)
+      runtime.attachWindow(1)
+      runtime.syncWindowGraph(1, {
+        tabs: [
+          {
+            tabId: LEAF_TAB_ID,
+            worktreeId: TEST_WORKTREE_ID,
+            title: 'claude',
+            activeLeafId: LEAF_ID,
+            layout: null
+          }
+        ],
+        leaves: [
+          {
+            tabId: LEAF_TAB_ID,
+            worktreeId: TEST_WORKTREE_ID,
+            leafId: LEAF_ID,
+            paneRuntimeId: 1,
+            ptyId,
+            paneTitle: null
+          }
+        ]
+      })
+
+      // No noteTerminalSpawnCommand at all here — the fence was never armed, so
+      // waitForLaunchPromptFenceClear's single check-first hits `!holds` immediately and
+      // returns with NO setTimeout ever scheduled (the 250ms fence poll loop must never be
+      // entered). The console.warn below is the loop's own entry marker ("dispatch input
+      // waiting for launch prompt", emitted only once the check-first falls through to the
+      // poll) — asserting it never fires is the direct, observable proxy for "no fence timer
+      // was scheduled" (writeTerminalAgentPrompt's own unrelated 500ms submit-delay timer, for
+      // this non-Claude pane, still needs one bounded advance below).
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const pty = (
+        runtime as unknown as {
+          ptysById: Map<string, { launchPromptFenceSince: number | null }>
+        }
+      ).ptysById.get(ptyId)
+      if (!pty) {
+        throw new Error('fixture setup failed: no pty record for ptyId')
+      }
+      expect(pty.launchPromptFenceSince ?? null).toBeNull()
+
+      // isPeerPaneForegroundAgentLive (the beforeWrite conjunct) resolves only through
+      // getLivePtyForHandle, which is pty-branch-only and always null for a leaf-adopted
+      // handle — same isolation orchestration-federation.test.ts already uses around its own
+      // beforeWrite assertion, unrelated to the fence/leaf-branch behaviour under test here.
+      vi.spyOn(runtime, 'isPeerPaneForegroundAgentLive').mockResolvedValue(true)
+
+      const dispatchId = 'disp_full_paste_leaf_clear_at_entry'
+      createStartingAttachment(db, runtime, dispatchId)
+
+      const sendPromise = sendFullDispatchPaste({
+        db,
+        runtime,
+        dispatchId,
+        taskId: 'task_full_paste_leaf',
+        taskSpec: 'do the leaf thing',
+        terminalHandle: handle,
+        effects: [],
+        awaitLaunchPromptFenceMs: 60_000
+      })
+
+      // Only writeTerminalAgentPrompt's own submit-delay timer remains (this pane's launchAgent
+      // is unset, so createClaudeAgentPromptRenderGate returns null and the render-gate branch
+      // is skipped entirely) — 1500ms covers AGENT_PROMPT_SUBMIT_DELAY_MS on every platform,
+      // an order of magnitude below a single 250ms fence-poll tick's own budget window.
+      await vi.advanceTimersByTimeAsync(1_500)
+      await sendPromise
+
+      expect(warnSpy).not.toHaveBeenCalledWith(
+        '[orchestration] dispatch input waiting for launch prompt',
+        expect.anything()
+      )
+
+      const submitWrites = writes.filter((w) => w === AGENT_PROMPT_SUBMIT)
+      const pasteWrites = writes.filter((w) => w.includes('do the leaf thing'))
+      expect(pasteWrites).toHaveLength(1)
+      expect(submitWrites).toHaveLength(1)
+      expect(db.getRemoteDispatchAttachment(dispatchId)?.state).toBe('ready')
+    } finally {
+      db.close()
+    }
+  }, 15_000)
+})

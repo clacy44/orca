@@ -578,6 +578,161 @@ describe('R185/R200: shell-authored titles are not status evidence; tui-idle and
     expect(internals(runtime).withheldDeliveryAttemptsByHandle.has(handle)).toBe(false)
   })
 
+  it('Case T-N-leaf: the fence CLEAR is itself the resolving edge for an already-registered tui-idle waiter, leaf-backed', async () => {
+    vi.useFakeTimers()
+    const write = vi.fn(() => true)
+    const runtime = new OrcaRuntimeService()
+    runtime.setPtyController(makeController(write) as never)
+    const setupDb = new OrchestrationDb(':memory:')
+    runtime.setOrchestrationDb(setupDb)
+    db = setupDb
+
+    internals(runtime).registerPty(PTY_ID, WORKTREE_ID, null, { tabId: TAB_ID, leafId: LEAF_ID })
+    const pty = internals(runtime).ptysById.get(PTY_ID)
+    if (!pty) {
+      throw new Error('fixture setup failed: no pty record for ptyId')
+    }
+    pty.launchAgent = 'claude'
+    // Pre-allocate BEFORE the graph sync (idiom per preAllocateHandleForPty's own doc comment):
+    // syncWindowGraph's leaf loop calls adoptPreAllocatedHandle, converting this into a LEAF
+    // handle (tabId = TAB_ID, not the `pty:`-prefixed synthetic id) so waitForTerminal and the
+    // title-edge loop below drive the leaf branch (resolveTuiIdleWaiters/
+    // deliverPendingMessagesForLeaf), not their pty-only mirrors.
+    const handle = runtime.preAllocateHandleForPty(PTY_ID)
+
+    // Bind a leaf to the pty in the synced graph — same idiom as Case T-K LEAF PATH.
+    runtime.attachWindow(1)
+    runtime.syncWindowGraph(1, {
+      tabs: [
+        {
+          tabId: TAB_ID,
+          worktreeId: WORKTREE_ID,
+          title: 'claude',
+          activeLeafId: LEAF_ID,
+          layout: null
+        }
+      ],
+      leaves: [
+        {
+          tabId: TAB_ID,
+          worktreeId: WORKTREE_ID,
+          leafId: LEAF_ID,
+          paneRuntimeId: 1,
+          ptyId: PTY_ID,
+          paneTitle: null
+        }
+      ]
+    })
+
+    runtime.noteTerminalSpawnCommand(PTY_ID, 'claude --resume abc')
+    expect(pty.launchPromptFenceSince ?? null).not.toBeNull()
+
+    const waitPromise = runtime.waitForTerminal(handle, {
+      condition: 'tui-idle',
+      timeoutMs: 5_000
+    })
+    let resolved = false
+    waitPromise.then(() => {
+      resolved = true
+    })
+
+    // RED at base: the bare idle-classified title resolves the waiter immediately (no fence
+    // check on the resolving edge at all) — `resolved` flips true here, before the agent's own
+    // evidence ever arrives.
+    runtime.onPtyData(PTY_ID, '\x1b]0;Claude Code\x07', 100)
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(resolved).toBe(false)
+
+    // Waiter still registered (fence held it) — now feed the agent's OWN idle title while it is
+    // still pending. RED after A4/A5 alone (no fenceJustCleared disjunct yet): prevStatus is
+    // already 'idle' from the title above, so resolveTuiIdleWaiters is never called again and
+    // the waiter hangs to timeout instead of resolving on the clear.
+    runtime.onPtyData(PTY_ID, '\x1b]0;✳ Claude Code\x07', 200)
+
+    await expect(waitPromise).resolves.toMatchObject({ handle })
+    expect(pty.launchPromptFenceSince ?? null).toBeNull()
+
+    // A second ✳ title after the first produces no second edge (no duplicate resolve/delivery):
+    // fenceJustCleared is false this time (the field is already null), so neither
+    // resolveTuiIdleWaiters nor deliverPendingMessagesForLeaf is invoked again off this title.
+    const resolveSpy = vi.spyOn(
+      runtime as unknown as { resolveTuiIdleWaiters: (...args: unknown[]) => void },
+      'resolveTuiIdleWaiters'
+    )
+    const deliverSpy = vi.spyOn(
+      runtime as unknown as { deliverPendingMessagesForLeaf: (...args: unknown[]) => void },
+      'deliverPendingMessagesForLeaf'
+    )
+    runtime.onPtyData(PTY_ID, '\x1b]0;✳ Claude Code\x07', 300)
+    expect(resolveSpy).not.toHaveBeenCalled()
+    expect(deliverSpy).not.toHaveBeenCalled()
+  })
+
+  it('Case T-O-leaf: the fence clear flushes a withheld delivery for a leaf-backed handle', async () => {
+    vi.useFakeTimers()
+    const write = vi.fn(() => true)
+    const runtime = new OrcaRuntimeService()
+    runtime.setPtyController(makeController(write) as never)
+    const setupDb = new OrchestrationDb(':memory:')
+    runtime.setOrchestrationDb(setupDb)
+    db = setupDb
+
+    internals(runtime).registerPty(PTY_ID, WORKTREE_ID, null, { tabId: TAB_ID, leafId: LEAF_ID })
+    const pty = internals(runtime).ptysById.get(PTY_ID)
+    if (!pty) {
+      throw new Error('fixture setup failed: no pty record for ptyId')
+    }
+    pty.launchAgent = 'claude'
+    const handle = runtime.preAllocateHandleForPty(PTY_ID)
+
+    runtime.attachWindow(1)
+    runtime.syncWindowGraph(1, {
+      tabs: [
+        {
+          tabId: TAB_ID,
+          worktreeId: WORKTREE_ID,
+          title: 'claude',
+          activeLeafId: LEAF_ID,
+          layout: null
+        }
+      ],
+      leaves: [
+        {
+          tabId: TAB_ID,
+          worktreeId: WORKTREE_ID,
+          leafId: LEAF_ID,
+          paneRuntimeId: 1,
+          ptyId: PTY_ID,
+          paneTitle: null
+        }
+      ]
+    })
+
+    runtime.noteTerminalSpawnCommand(PTY_ID, 'claude --resume abc')
+    expect(pty.launchPromptFenceSince ?? null).not.toBeNull()
+
+    db.insertMessage({ from: 'peer', to: handle, subject: 'T-O-leaf fence flush check' })
+
+    runtime.notifyMessageArrived(handle, 'status', null, null)
+    await Promise.resolve()
+    expect(internals(runtime).withheldDeliveryAttemptsByHandle.get(handle)?.reason).toBe(
+      'awaiting_launch_prompt'
+    )
+    expect(pointerCalls(write, PTY_ID)).toHaveLength(0)
+
+    // The fence clear (via the agent's own ✳ title) is delivered on the LEAF path: a leaf is
+    // bound to this pty, so applyTrackedPtyTitle's `!this.leafExistsForPty(ptyId)` guard skips
+    // deliverPendingMessagesForPty and the per-leaf loop's deliverPendingMessagesForLeaf fires
+    // instead.
+    runtime.onPtyData(PTY_ID, '\x1b]0;Claude Code\x07', 100)
+    runtime.onPtyData(PTY_ID, '\x1b]0;✳ Claude Code\x07', 200)
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(pointerCalls(write, PTY_ID)).toHaveLength(1)
+    expect(internals(runtime).withheldDeliveryAttemptsByHandle.has(handle)).toBe(false)
+  })
+
   it('Case T-P: the fence clearing via a fresh hook status also flushes withheld delivery', async () => {
     vi.useFakeTimers()
     const write = vi.fn(() => true)
