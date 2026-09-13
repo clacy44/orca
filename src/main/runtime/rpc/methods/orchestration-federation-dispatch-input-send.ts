@@ -30,6 +30,7 @@ export async function sendPeerDispatchMailPointer(args: {
   capability?: string
   cliCommand?: 'orca' | 'orca-ide'
   effects: FederationEffect[]
+  awaitLaunchPromptFenceMs?: number
 }): Promise<DispatchInputSendResult> {
   const mailInsert = args.db.insertGatedMessage({
     from: 'Run home (relayed by Orca)',
@@ -57,7 +58,8 @@ export async function sendPeerDispatchMailPointer(args: {
         if (!(await args.runtime.isPeerPaneForegroundAgentLive(args.terminalHandle))) {
           throw new Error('agent_not_live')
         }
-      }
+      },
+      awaitLaunchPromptFenceMs: args.awaitLaunchPromptFenceMs
     }
   )
   const inputEvidence = captureDispatchInputEvidence(args.runtime, args.terminalHandle)
@@ -86,6 +88,7 @@ export async function sendFullDispatchPaste(args: {
   cliCommand?: 'orca' | 'orca-ide'
   devMode?: boolean
   effects: FederationEffect[]
+  awaitLaunchPromptFenceMs?: number
 }): Promise<DispatchInputSendResult> {
   await args.runtime.sendTerminalAgentPrompt(
     args.terminalHandle,
@@ -104,7 +107,8 @@ export async function sendFullDispatchPaste(args: {
         if (!(await args.runtime.isPeerPaneForegroundAgentLive(args.terminalHandle))) {
           throw new Error('agent_not_live')
         }
-      }
+      },
+      awaitLaunchPromptFenceMs: args.awaitLaunchPromptFenceMs
     }
   )
   // Why the peer reads its own terminal: the home never sees this PTY, so the only runtime that

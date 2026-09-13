@@ -19376,12 +19376,36 @@ export class OrcaRuntimeService {
     }
   }
 
+  // [R203] INV-P-LAUNCH-EDGE: a bounded wait for dispatch-input callers, instead of a bare
+  // refusal on the first hit. Checks launchPromptFenceHolds ONCE — if it does not hold, returns
+  // immediately with no timer at all (a fake-timer test fixture must never be left hanging on a
+  // wait that was never needed). Only when it holds does this enter the 250ms poll loop until it
+  // clears or the budget expires. The caller's own notBlockedCheck
+  // (assertTerminalAgentPromptNotBlocked) still runs at write time and still throws
+  // terminal_awaiting_launch_prompt if the fence still holds, or terminal_blocked_modal if the
+  // tail shows a modal.
+  private async waitForLaunchPromptFenceClear(
+    handle: string,
+    pty: RuntimePtyWorktreeRecord | null | undefined,
+    budgetMs: number
+  ): Promise<void> {
+    if (!this.launchPromptFenceHolds(pty)) {
+      return
+    }
+    console.warn('[orchestration] dispatch input waiting for launch prompt', { handle, budgetMs })
+    const deadline = Date.now() + budgetMs
+    while (this.launchPromptFenceHolds(pty) && Date.now() < deadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 250))
+    }
+  }
+
   async sendTerminalAgentPrompt(
     handle: string,
     prompt: string,
     options: {
       beforeWrite?: (ptyId: string) => void | Promise<void>
       suffixFailureError?: string
+      awaitLaunchPromptFenceMs?: number
     } = {}
   ): Promise<RuntimeTerminalSend> {
     const payload = buildAgentPromptPasteBytes(prompt)
@@ -19392,6 +19416,9 @@ export class OrcaRuntimeService {
         throw new Error('terminal_not_writable')
       }
       await assertTerminalInputWithinLimitWithYield(payload)
+      if (options.awaitLaunchPromptFenceMs && options.awaitLaunchPromptFenceMs > 0) {
+        await this.waitForLaunchPromptFenceClear(handle, pty.pty, options.awaitLaunchPromptFenceMs)
+      }
       // [R200] Existing refusals (e.g. options.beforeWrite's agent_not_live) keep their reason
       // codes; the launch fence is the later gate — run via writeTerminalAgentPrompt's
       // notBlockedCheck so it fires after the caller-supplied beforeWrite conjunct, not before.
@@ -19420,6 +19447,13 @@ export class OrcaRuntimeService {
     // accept a prompt into a void; unknown liveness still proceeds.
     if (await this.isLeafPtyProvenAbsent(leaf.ptyId)) {
       throw new Error('terminal_not_writable')
+    }
+    if (options.awaitLaunchPromptFenceMs && options.awaitLaunchPromptFenceMs > 0) {
+      await this.waitForLaunchPromptFenceClear(
+        handle,
+        leaf.ptyId ? this.ptysById.get(leaf.ptyId) : null,
+        options.awaitLaunchPromptFenceMs
+      )
     }
     // [R200] Existing refusals (e.g. options.beforeWrite's agent_not_live) keep their reason
     // codes; the launch fence is the later gate — run via writeTerminalAgentPrompt's

@@ -207,11 +207,18 @@ export const ORCHESTRATION_FEDERATION_ATTACH_METHODS: RpcMethod[] = [
         failedStage = 'agent_readiness'
         // §14B: a peer-supplied timeoutMs is clamped, never extended past the host's ceiling
         // (G-5) — a paired FULL caller keeps today's plain default, unclamped.
+        // [R203 amendment C2] One shared deadline for readiness + the launch-prompt-fence wait
+        // threaded into the dispatch-input send below — not two independent budgets — so the
+        // two together never exceed the caller's own (clamped) timeout. The home's RPC deadline
+        // is timeoutMs + 15s (orchestration-federated-worker-start.ts), so this must stay
+        // within the clamped timeout, never add to it.
+        const effectiveTimeoutMs = isPeerCaller
+          ? clampPeerAttachTimeoutMs(params.timeoutMs)
+          : (params.timeoutMs ?? 60_000)
+        const deadlineAt = Date.now() + effectiveTimeoutMs
         const wait = await runtime.waitForTerminal(terminalHandle, {
           condition: 'tui-idle',
-          timeoutMs: isPeerCaller
-            ? clampPeerAttachTimeoutMs(params.timeoutMs)
-            : (params.timeoutMs ?? 60_000)
+          timeoutMs: Math.max(0, deadlineAt - Date.now())
         })
         persistFederatedSetupWaitOutcome({ ...setupStage, wait })
         if (!wait.satisfied) {
@@ -248,7 +255,8 @@ export const ORCHESTRATION_FEDERATION_ATTACH_METHODS: RpcMethod[] = [
           taskSpec: params.taskSpec,
           terminalHandle,
           capability,
-          cliCommand
+          cliCommand,
+          awaitLaunchPromptFenceMs: Math.max(0, deadlineAt - Date.now())
         }
         // Ruling 24(a): PEER never types taskSpec (mail pointer only); FULL keeps the paste,
         // stripped of submit bytes and gated on live foreground agent ownership.
