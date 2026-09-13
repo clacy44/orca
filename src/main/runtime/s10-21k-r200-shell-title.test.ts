@@ -36,6 +36,7 @@ type RuntimeInternals = {
       launchPromptFenceSince?: number | null
       lastAgentStatus?: string | null
       lastAgentStatusObservedLive?: boolean
+      paneKey?: string | null
     }
   >
   withheldDeliveryAttemptsByHandle: Map<string, { reason: string }>
@@ -524,6 +525,21 @@ describe('R185/R200: shell-authored titles are not status evidence; tui-idle and
 
     await expect(waitPromise).resolves.toMatchObject({ handle })
     expect(pty.launchPromptFenceSince ?? null).toBeNull()
+
+    // A second ✳ title after the first produces no second edge (no duplicate resolve/delivery):
+    // fenceJustCleared is false this time (the field is already null), so neither
+    // resolvePtyTuiIdleWaiters nor deliverPendingMessagesForPty is invoked again off this title.
+    const resolveSpy = vi.spyOn(
+      runtime as unknown as { resolvePtyTuiIdleWaiters: (...args: unknown[]) => void },
+      'resolvePtyTuiIdleWaiters'
+    )
+    const deliverSpy = vi.spyOn(
+      runtime as unknown as { deliverPendingMessagesForPty: (...args: unknown[]) => void },
+      'deliverPendingMessagesForPty'
+    )
+    runtime.onPtyData(PTY_ID, '\x1b]0;✳ Claude Code\x07', 300)
+    expect(resolveSpy).not.toHaveBeenCalled()
+    expect(deliverSpy).not.toHaveBeenCalled()
   })
 
   it('Case T-O: the fence clear flushes a withheld delivery (starvation) for a pty-only handle', async () => {
@@ -580,6 +596,24 @@ describe('R185/R200: shell-authored titles are not status evidence; tui-idle and
     runtime.noteTerminalSpawnCommand(PTY_ID, 'claude --resume abc')
     pty.launchPromptFenceSince = since
     expect(pty.launchPromptFenceSince ?? null).not.toBeNull()
+    // The pane is already genuinely idle+live (e.g. observed before this generation's fence was
+    // armed) — the ONLY thing standing between the withheld row and delivery is the fence.
+    pty.lastAgentStatus = 'idle'
+    pty.lastAgentStatusObservedLive = true
+
+    const handle = runtime.preAllocateHandleForPty(PTY_ID)
+    db.insertMessage({ from: 'peer', to: handle, subject: 'T-P hook clear flush check' })
+
+    // Still fenced (no hook status yet): withheld, nothing written.
+    runtime.deliverPendingMessagesForHandle(handle)
+    expect(internals(runtime).withheldDeliveryAttemptsByHandle.get(handle)?.reason).toBe(
+      'awaiting_launch_prompt'
+    )
+    expect(pointerCalls(write, PTY_ID)).toHaveLength(0)
+
+    // The hook status now arrives. A caller OTHER than deliverPendingMessagesForHandle
+    // (waitForTerminal's own sync fast path) is what actually evaluates launchPromptFenceHolds
+    // next — it clears the fence as a side effect but does not itself re-drive delivery.
     ;(
       runtime as unknown as {
         getAgentStatusSnapshotFn: () => { paneKey: string; agentType: string; receivedAt: number }[]
@@ -587,21 +621,53 @@ describe('R185/R200: shell-authored titles are not status evidence; tui-idle and
     ).getAgentStatusSnapshotFn = () => [
       { paneKey: PANE_KEY, agentType: 'claude', receivedAt: since + 1 }
     ]
-
-    const handle = runtime.preAllocateHandleForPty(PTY_ID)
-    db.insertMessage({ from: 'peer', to: handle, subject: 'T-P hook clear flush check' })
-
-    // Trigger a delivery attempt: launchPromptFenceHolds evaluates the stubbed snapshot,
-    // observes the fresh hook status, and clears the fence inline (hook-clear branch).
-    runtime.deliverPendingMessagesForHandle(handle)
+    await runtime.waitForTerminal(handle, { condition: 'tui-idle', timeoutMs: 5_000 })
     expect(pty.launchPromptFenceSince ?? null).toBeNull()
 
-    // RED today: the hook-clear branch nulls the field but never re-drives delivery — the
-    // withheld/queued row strands with no scheduled flush.
-    await vi.advanceTimersByTimeAsync(0)
+    // The hook-clear branch schedules a repoint through the existing deferred, deduped
+    // mailPointerRepointScheduler (2s delay, mail-pointer-repoint-scheduler.ts) rather than
+    // flushing synchronously — nothing has re-driven delivery yet on this tick. RED today: the
+    // hook-clear branch nulls the field but schedules nothing at all, so this row strands with
+    // no repoint ever firing.
+    expect(pointerCalls(write, PTY_ID)).toHaveLength(0)
+    await vi.advanceTimersByTimeAsync(2_000)
 
     expect(pointerCalls(write, PTY_ID)).toHaveLength(1)
     expect(internals(runtime).withheldDeliveryAttemptsByHandle.has(handle)).toBe(false)
+  })
+
+  it('Case T-S: a fence expiry (no ✳ ever) gets NO repoint — the slow mailbox retry path is untouched', () => {
+    vi.useFakeTimers()
+    const write = vi.fn(() => true)
+    const setup = setUp(write)
+    db = setup.db
+    const { runtime } = setup
+
+    internals(runtime).registerPty(PTY_ID, WORKTREE_ID, null, { tabId: TAB_ID, leafId: LEAF_ID })
+    const pty = internals(runtime).ptysById.get(PTY_ID)
+    if (!pty) {
+      throw new Error('fixture setup failed: no pty record for ptyId')
+    }
+    pty.launchAgent = 'claude'
+    runtime.noteTerminalSpawnCommand(PTY_ID, 'claude --resume abc')
+    expect(pty.launchPromptFenceSince ?? null).not.toBeNull()
+
+    const handle = runtime.preAllocateHandleForPty(PTY_ID)
+    db.insertMessage({ from: 'peer', to: handle, subject: 'T-S expiry stays quiet check' })
+    runtime.deliverPendingMessagesForHandle(handle)
+    expect(internals(runtime).withheldDeliveryAttemptsByHandle.get(handle)?.reason).toBe(
+      'awaiting_launch_prompt'
+    )
+
+    // Advance past LAUNCH_PROMPT_FENCE_MAX_MS (5 min) so the NEXT launchPromptFenceHolds
+    // evaluation takes the expiry-clear branch, then trigger exactly one evaluation.
+    vi.advanceTimersByTime(5 * 60 * 1000 + 1)
+    runtime.deliverPendingMessagesForHandle(handle)
+    expect(pty.launchPromptFenceSince ?? null).toBeNull()
+
+    // No pointer written on this tick — expiry gets no repoint/drain of its own; only the
+    // existing (untouched) slow mailbox retry may eventually re-attempt this row.
+    expect(pointerCalls(write, PTY_ID)).toHaveLength(0)
   })
 
   it('Case T-R: negative — fence-clear resolution never bypasses the modal refusal in sendTerminalAgentPrompt', async () => {

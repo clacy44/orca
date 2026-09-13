@@ -12135,7 +12135,8 @@ export class OrcaRuntimeService {
     // [R203] INV-P-LAUNCH-EDGE: the fence's own clear is a delivery/idle edge, not only its
     // evaluating arms — computed before the field is nulled below so both the pty and leaf
     // loops can gate resolution on it.
-    let fenceJustCleared = false
+    const fenceJustCleared =
+      !!pty && pty.launchPromptFenceSince !== null && isLaunchedClaudePromptTitle(rawTitle)
     if (pty) {
       const prevStatus = pty.lastAgentStatus
       const prevTitle = pty.lastOscTitle
@@ -12156,8 +12157,6 @@ export class OrcaRuntimeService {
       pty.lastOscTitleEpochMs = observedAtEpochMs
       pty.lastAgentStatus = effectiveAgentStatus
       pty.lastAgentStatusObservedLive = true
-      fenceJustCleared =
-        pty.launchPromptFenceSince !== null && isLaunchedClaudePromptTitle(rawTitle)
       if (fenceJustCleared) {
         pty.launchPromptFenceSince = null
       }
@@ -19237,11 +19236,6 @@ export class OrcaRuntimeService {
   private readonly probeDeferredDeliveryPtyIds = new Set<string>()
   // S10-20: re-entrancy guard for the delivery foreground guard's own confirm-and-continue.
   private readonly foregroundGuardPendingPtyIds = new Set<string>()
-  // [R203] INV-P-LAUNCH-EDGE: launchPromptFenceHolds's own hook-clear/expiry-clear branches
-  // are a delivery edge, deferred to a macrotask since launchPromptFenceHolds is itself
-  // called from inside the delivery paths — a synchronous flush would re-enter them.
-  private readonly pendingLaunchPromptFenceFlushPtyIds = new Set<string>()
-  private launchPromptFenceFlushScheduled = false
 
   private controllerKnowsPtyIsLive(ptyId: string): boolean {
     try {
@@ -36204,7 +36198,12 @@ export class OrcaRuntimeService {
         entry.receivedAt >= since
       ) {
         pty.launchPromptFenceSince = null
-        this.scheduleLaunchPromptFenceFlush(pty.ptyId)
+        // [R203 amendment] launchPromptFenceHolds is a mutating predicate that (after A4/A5)
+        // now runs on the title-edge hot path too — this clear is itself a delivery edge, but
+        // scheduling must stay deferred and idempotent. Reuse the existing deferred, deduped
+        // repoint primitive (mailPointerRepointScheduler) exactly as retirePendingMessageDeliveryForPty
+        // does, rather than a bespoke synchronous/immediate flush.
+        this.scheduleLaunchPromptFenceHookClearRepoint(pty)
         return false
       }
     }
@@ -36217,41 +36216,38 @@ export class OrcaRuntimeService {
         heldMs: Date.now() - since
       })
       pty.launchPromptFenceSince = null
-      this.scheduleLaunchPromptFenceFlush(pty.ptyId)
+      // [R203 amendment] Expiry deliberately gets NO repoint/drain: the existing slow mailbox
+      // retry already covers this case, and a pane that never showed its own prompt may be
+      // sitting at an unanswered trust dialog — delivering promptly here would be the
+      // dangerous case, not the safe one.
       return false
     }
     return true
   }
 
-  // [R203] INV-P-LAUNCH-EDGE: launchPromptFenceHolds clearing the fence is itself a delivery
-  // edge, but launchPromptFenceHolds is called from inside the delivery paths — a synchronous
-  // flush here would re-enter them. Defer to a macrotask; coalesce concurrent clears into one
-  // drain.
-  private scheduleLaunchPromptFenceFlush(ptyId: string): void {
-    this.pendingLaunchPromptFenceFlushPtyIds.add(ptyId)
-    if (this.launchPromptFenceFlushScheduled) {
-      return
+  // [R203 amendment] Mirrors retirePendingMessageDeliveryForPty's handle enumeration exactly
+  // (this pty's own handle, plus each leaf's handle/run-mailbox/dispatch-mailbox), but only
+  // schedules a repoint — it never deletes pointer-sequence state, since this is a wake-up for
+  // an existing withheld attempt, not a forced resend.
+  private scheduleLaunchPromptFenceHookClearRepoint(pty: RuntimePtyWorktreeRecord): void {
+    const ptyHandle = this.handleByPtyId.get(pty.ptyId)
+    if (ptyHandle) {
+      this.mailPointerRepointScheduler.schedule(ptyHandle)
     }
-    this.launchPromptFenceFlushScheduled = true
-    const timer = setTimeout(() => {
-      this.launchPromptFenceFlushScheduled = false
-      const ids = [...this.pendingLaunchPromptFenceFlushPtyIds]
-      this.pendingLaunchPromptFenceFlushPtyIds.clear()
-      for (const id of ids) {
-        const p = this.ptysById.get(id)
-        if (!p) {
-          continue
-        }
-        if (this.leafExistsForPty(id)) {
-          for (const leaf of this.getLeavesForPty(id)) {
-            this.deliverPendingMessagesForLeaf(leaf)
-          }
-        } else {
-          this.deliverPendingMessagesForPty(p)
-        }
+    for (const leaf of this.getLeavesForPty(pty.ptyId)) {
+      const handle = this.handleByLeafKey.get(this.getLeafKey(leaf.tabId, leaf.leafId))
+      if (handle) {
+        this.mailPointerRepointScheduler.schedule(handle)
       }
-    }, 0)
-    timer.unref?.()
+      const run = this._orchestrationDb?.getCurrentRunForPane?.(`${leaf.tabId}:${leaf.leafId}`)
+      if (run) {
+        this.mailPointerRepointScheduler.schedule(`run:${run.id}`)
+      }
+      const dispatchMailbox = this.resolveDispatchMailboxForLeaf(leaf)
+      if (dispatchMailbox) {
+        this.mailPointerRepointScheduler.schedule(dispatchMailbox)
+      }
+    }
   }
 
   /** [R185/R200/R189] INV-P-LAUNCH-EDGE, prompt-injection leg: refuse a HOST-authored prompt
