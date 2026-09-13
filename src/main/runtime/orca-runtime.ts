@@ -19372,14 +19372,20 @@ export class OrcaRuntimeService {
       if (!pty.pty.connected) {
         throw new Error('terminal_not_writable')
       }
-      this.assertTerminalAgentPromptNotBlocked(
-        pty.pty.ptyId,
-        pty.pty.tailBuffer,
-        pty.pty.tailPartialLine,
-        pty.pty.preview
-      )
       await assertTerminalInputWithinLimitWithYield(payload)
-      await this.writeTerminalAgentPrompt(pty.pty.ptyId, payload, options)
+      // [R200] Existing refusals (e.g. options.beforeWrite's agent_not_live) keep their reason
+      // codes; the launch fence is the later gate — run via writeTerminalAgentPrompt's
+      // notBlockedCheck so it fires after the caller-supplied beforeWrite conjunct, not before.
+      await this.writeTerminalAgentPrompt(pty.pty.ptyId, payload, {
+        ...options,
+        notBlockedCheck: () =>
+          this.assertTerminalAgentPromptNotBlocked(
+            pty.pty.ptyId,
+            pty.pty.tailBuffer,
+            pty.pty.tailPartialLine,
+            pty.pty.preview
+          )
+      })
       return { handle, accepted: true, bytesWritten }
     }
 
@@ -19390,19 +19396,25 @@ export class OrcaRuntimeService {
     if (this.isPtyProviderTransportConfirmedDown(leaf.ptyId)) {
       throw new TerminalNotConnectedError()
     }
-    this.assertTerminalAgentPromptNotBlocked(
-      leaf.ptyId,
-      leaf.tailBuffer,
-      leaf.tailPartialLine,
-      leaf.preview
-    )
     await assertTerminalInputWithinLimitWithYield(payload)
     // Why: same absence gate as sendTerminal — a stale graph mirror must not
     // accept a prompt into a void; unknown liveness still proceeds.
     if (await this.isLeafPtyProvenAbsent(leaf.ptyId)) {
       throw new Error('terminal_not_writable')
     }
-    await this.writeTerminalAgentPrompt(leaf.ptyId, payload, options)
+    // [R200] Existing refusals (e.g. options.beforeWrite's agent_not_live) keep their reason
+    // codes; the launch fence is the later gate — run via writeTerminalAgentPrompt's
+    // notBlockedCheck so it fires after the caller-supplied beforeWrite conjunct, not before.
+    await this.writeTerminalAgentPrompt(leaf.ptyId, payload, {
+      ...options,
+      notBlockedCheck: () =>
+        this.assertTerminalAgentPromptNotBlocked(
+          leaf.ptyId,
+          leaf.tailBuffer,
+          leaf.tailPartialLine,
+          leaf.preview
+        )
+    })
     return { handle, accepted: true, bytesWritten }
   }
 
@@ -19980,6 +19992,10 @@ export class OrcaRuntimeService {
     options: {
       beforeWrite?: (ptyId: string) => void | Promise<void>
       suffixFailureError?: string
+      // [R200] Runs once, immediately after the first beforeWrite conjunct and before any byte
+      // is written: existing refusals (agent_not_live) keep their reason codes; the launch
+      // fence is the later gate, checked only once beforeWrite has let the write proceed.
+      notBlockedCheck?: (ptyId: string) => void
     } = {}
   ): Promise<void> {
     const flight = await this.claimStructuredPtyWrite(ptyId)
@@ -19987,12 +20003,17 @@ export class OrcaRuntimeService {
       const renderGate = this.createClaudeAgentPromptRenderGate(ptyId)
       let wrotePasteBytes = false
       let completedPaste = false
+      let notBlockedChecked = false
       try {
         const chunks = iterateTerminalInputChunks(pastePayload)
         let chunk = chunks.next()
         while (!chunk.done) {
           const nextChunk = chunks.next()
           await options.beforeWrite?.(ptyId)
+          if (!notBlockedChecked) {
+            options.notBlockedCheck?.(ptyId)
+            notBlockedChecked = true
+          }
           if (nextChunk.done) {
             renderGate?.arm()
           }

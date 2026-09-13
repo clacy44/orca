@@ -100,6 +100,10 @@ describe('S10-19 W-3 review M4: sendPeerDispatchMailPointer marks ready only AFT
       createStartingAttachment(db, runtime, dispatchId)
       expect(db.getRemoteDispatchAttachment(dispatchId)?.state).toBe('starting')
 
+      // [R200 / INV-P-LAUNCH-EDGE] a launched Claude pane is ready only on its own prompt
+      // evidence, not on the foreground process alone.
+      runtime.onPtyData('pty-peer-mail-ok', '\x1b]0;✳ peer\x07', 100)
+
       await sendPeerDispatchMailPointer({
         db,
         runtime,
@@ -218,6 +222,10 @@ describe('S10-19 W-3 review M6: the peer preamble write carries the same fresh-f
       })
       const dispatchId = 'disp_peer_mail_live'
       createStartingAttachment(db, runtime, dispatchId)
+
+      // [R200 / INV-P-LAUNCH-EDGE] a launched Claude pane is ready only on its own prompt
+      // evidence, not on the foreground process alone.
+      runtime.onPtyData('pty-peer-mail-live', '\x1b]0;✳ peer\x07', 100)
 
       await sendPeerDispatchMailPointer({
         db,
