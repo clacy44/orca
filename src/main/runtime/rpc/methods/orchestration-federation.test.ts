@@ -216,6 +216,8 @@ describe('orchestration federation', () => {
       .spyOn(workerRuntime, 'isPeerPaneForegroundAgentLive')
       .mockResolvedValue(true)
     const options = vi.mocked(workerRuntime.sendTerminalAgentPrompt).mock.calls[0]?.[2]
+    // [R203 C2] The same call also carries the bounded launch-prompt-fence budget.
+    expect(options?.awaitLaunchPromptFenceMs).toEqual(expect.any(Number))
     await options?.beforeWrite?.('pty-windows-worker')
     expect(isForegroundLive).toHaveBeenCalledWith('term_windows_worker')
   })

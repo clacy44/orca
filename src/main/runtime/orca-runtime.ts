@@ -12132,6 +12132,11 @@ export class OrcaRuntimeService {
     // allowed to touch either record's status below.
     const shellAuthoredForLaunchedPane =
       !identityOnlyTitle && !!pty && this.isShellAuthoredTitleForLaunchedPane(pty, rawTitle)
+    // [R203] INV-P-LAUNCH-EDGE: the fence's own clear is a delivery/idle edge, not only its
+    // evaluating arms — computed before the field is nulled below so both the pty and leaf
+    // loops can gate resolution on it.
+    const fenceJustCleared =
+      !!pty && pty.launchPromptFenceSince !== null && isLaunchedClaudePromptTitle(rawTitle)
     if (pty) {
       const prevStatus = pty.lastAgentStatus
       const prevTitle = pty.lastOscTitle
@@ -12152,7 +12157,7 @@ export class OrcaRuntimeService {
       pty.lastOscTitleEpochMs = observedAtEpochMs
       pty.lastAgentStatus = effectiveAgentStatus
       pty.lastAgentStatusObservedLive = true
-      if (pty.launchPromptFenceSince !== null && isLaunchedClaudePromptTitle(rawTitle)) {
+      if (fenceJustCleared) {
         pty.launchPromptFenceSince = null
       }
       if (prevStatus !== effectiveAgentStatus) {
@@ -12174,7 +12179,7 @@ export class OrcaRuntimeService {
         this.setPtyManagementTitleFromObservedTitle(pty, normalizedTitle, observedAt)
       }
       ptyRecordChanged = prevTitle !== recordedTitle || prevStatus !== effectiveAgentStatus
-      if (effectiveAgentStatus === 'idle' && prevStatus !== 'idle') {
+      if (effectiveAgentStatus === 'idle' && (prevStatus !== 'idle' || fenceJustCleared)) {
         this.resolvePtyTuiIdleWaiters(pty, ptyId)
       }
       // Why gated on no-leaf, not unconditional (S10-15 F8 fix A): a headless run or a
@@ -12185,7 +12190,7 @@ export class OrcaRuntimeService {
       // this pty-only path cannot substitute for it).
       if (
         effectiveAgentStatus === 'idle' &&
-        (prevStatus !== 'idle' || !prevObservedLive) &&
+        (prevStatus !== 'idle' || !prevObservedLive || fenceJustCleared) &&
         !this.leafExistsForPty(ptyId)
       ) {
         this.deliverPendingMessagesForPty(pty)
@@ -12242,7 +12247,7 @@ export class OrcaRuntimeService {
       // working→idle transition that never comes. Permission→idle is excluded:
       // it means the agent was blocked on user approval and the user said no,
       // which isn't a task-completion signal.
-      if (leafEffectiveAgentStatus === 'idle' && prevStatus !== 'idle') {
+      if (leafEffectiveAgentStatus === 'idle' && (prevStatus !== 'idle' || fenceJustCleared)) {
         this.resolveTuiIdleWaiters(leaf)
       }
       // Why the second condition: push delivery is gated on LIVE idle, so its
@@ -12251,7 +12256,10 @@ export class OrcaRuntimeService {
       // an agent whose first live title is already idle (claude --resume at its
       // prompt) then shows no transition — the row would strand, which is
       // exactly #12536. Waiter semantics stay transition-only above.
-      if (leafEffectiveAgentStatus === 'idle' && (prevStatus !== 'idle' || !prevObservedLive)) {
+      if (
+        leafEffectiveAgentStatus === 'idle' &&
+        (prevStatus !== 'idle' || !prevObservedLive || fenceJustCleared)
+      ) {
         this.deliverPendingMessagesForLeaf(leaf)
       }
     }
@@ -19368,12 +19376,46 @@ export class OrcaRuntimeService {
     }
   }
 
+  // [R203] INV-P-LAUNCH-EDGE: a bounded wait for dispatch-input callers, instead of a bare
+  // refusal on the first hit. Checks launchPromptFenceHolds ONCE — if it does not hold, returns
+  // immediately with no timer at all (a fake-timer test fixture must never be left hanging on a
+  // wait that was never needed). Only when it holds does this enter the 250ms poll loop until it
+  // clears or the budget expires. The caller's own notBlockedCheck
+  // (assertTerminalAgentPromptNotBlocked) still runs at write time and still throws
+  // terminal_awaiting_launch_prompt if the fence still holds, or terminal_blocked_modal if the
+  // tail shows a modal.
+  private async waitForLaunchPromptFenceClear(
+    handle: string,
+    ptyId: string | null | undefined,
+    budgetMs: number
+  ): Promise<void> {
+    if (!this.launchPromptFenceHolds(ptyId ? this.ptysById.get(ptyId) : null)) {
+      return
+    }
+    console.warn('[orchestration] dispatch input waiting for launch prompt', { handle, budgetMs })
+    const deadline = Date.now() + budgetMs
+    while (Date.now() < deadline) {
+      // [R203 C1] Re-resolve the pty record by id on every tick rather than closing over a
+      // stale reference: a pty that is torn down mid-wait must stop the poll immediately
+      // instead of spinning on a detached object until the budget expires.
+      const pty = ptyId ? this.ptysById.get(ptyId) : null
+      if (!pty) {
+        return
+      }
+      if (!this.launchPromptFenceHolds(pty)) {
+        return
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 250))
+    }
+  }
+
   async sendTerminalAgentPrompt(
     handle: string,
     prompt: string,
     options: {
       beforeWrite?: (ptyId: string) => void | Promise<void>
       suffixFailureError?: string
+      awaitLaunchPromptFenceMs?: number
     } = {}
   ): Promise<RuntimeTerminalSend> {
     const payload = buildAgentPromptPasteBytes(prompt)
@@ -19384,6 +19426,13 @@ export class OrcaRuntimeService {
         throw new Error('terminal_not_writable')
       }
       await assertTerminalInputWithinLimitWithYield(payload)
+      if (options.awaitLaunchPromptFenceMs && options.awaitLaunchPromptFenceMs > 0) {
+        await this.waitForLaunchPromptFenceClear(
+          handle,
+          pty.pty.ptyId,
+          options.awaitLaunchPromptFenceMs
+        )
+      }
       // [R200] Existing refusals (e.g. options.beforeWrite's agent_not_live) keep their reason
       // codes; the launch fence is the later gate — run via writeTerminalAgentPrompt's
       // notBlockedCheck so it fires after the caller-supplied beforeWrite conjunct, not before.
@@ -19412,6 +19461,9 @@ export class OrcaRuntimeService {
     // accept a prompt into a void; unknown liveness still proceeds.
     if (await this.isLeafPtyProvenAbsent(leaf.ptyId)) {
       throw new Error('terminal_not_writable')
+    }
+    if (options.awaitLaunchPromptFenceMs && options.awaitLaunchPromptFenceMs > 0) {
+      await this.waitForLaunchPromptFenceClear(handle, leaf.ptyId, options.awaitLaunchPromptFenceMs)
     }
     // [R200] Existing refusals (e.g. options.beforeWrite's agent_not_live) keep their reason
     // codes; the launch fence is the later gate — run via writeTerminalAgentPrompt's
@@ -36190,6 +36242,12 @@ export class OrcaRuntimeService {
         entry.receivedAt >= since
       ) {
         pty.launchPromptFenceSince = null
+        // [R203 amendment] launchPromptFenceHolds is a mutating predicate that (after A4/A5)
+        // now runs on the title-edge hot path too — this clear is itself a delivery edge, but
+        // scheduling must stay deferred and idempotent. Reuse the existing deferred, deduped
+        // repoint primitive (mailPointerRepointScheduler) exactly as retirePendingMessageDeliveryForPty
+        // does, rather than a bespoke synchronous/immediate flush.
+        this.scheduleLaunchPromptFenceHookClearRepoint(pty)
         return false
       }
     }
@@ -36202,9 +36260,38 @@ export class OrcaRuntimeService {
         heldMs: Date.now() - since
       })
       pty.launchPromptFenceSince = null
+      // [R203 amendment] Expiry deliberately gets NO repoint/drain: the existing slow mailbox
+      // retry already covers this case, and a pane that never showed its own prompt may be
+      // sitting at an unanswered trust dialog — delivering promptly here would be the
+      // dangerous case, not the safe one.
       return false
     }
     return true
+  }
+
+  // [R203 amendment] Mirrors retirePendingMessageDeliveryForPty's handle enumeration exactly
+  // (this pty's own handle, plus each leaf's handle/run-mailbox/dispatch-mailbox), but only
+  // schedules a repoint — it never deletes pointer-sequence state, since this is a wake-up for
+  // an existing withheld attempt, not a forced resend.
+  private scheduleLaunchPromptFenceHookClearRepoint(pty: RuntimePtyWorktreeRecord): void {
+    const ptyHandle = this.handleByPtyId.get(pty.ptyId)
+    if (ptyHandle) {
+      this.mailPointerRepointScheduler.schedule(ptyHandle)
+    }
+    for (const leaf of this.getLeavesForPty(pty.ptyId)) {
+      const handle = this.handleByLeafKey.get(this.getLeafKey(leaf.tabId, leaf.leafId))
+      if (handle) {
+        this.mailPointerRepointScheduler.schedule(handle)
+      }
+      const run = this._orchestrationDb?.getCurrentRunForPane?.(`${leaf.tabId}:${leaf.leafId}`)
+      if (run) {
+        this.mailPointerRepointScheduler.schedule(`run:${run.id}`)
+      }
+      const dispatchMailbox = this.resolveDispatchMailboxForLeaf(leaf)
+      if (dispatchMailbox) {
+        this.mailPointerRepointScheduler.schedule(dispatchMailbox)
+      }
+    }
   }
 
   /** [R185/R200/R189] INV-P-LAUNCH-EDGE, prompt-injection leg: refuse a HOST-authored prompt
@@ -37567,6 +37654,9 @@ export class OrcaRuntimeService {
   }
 
   private resolveTuiIdleWaiters(leaf: RuntimeLeafRecord): void {
+    if (this.launchPromptFenceHolds(leaf.ptyId ? this.ptysById.get(leaf.ptyId) : null)) {
+      return
+    }
     const handle = this.handleByLeafKey.get(this.getLeafKey(leaf.tabId, leaf.leafId))
     if (!handle) {
       return
@@ -37602,6 +37692,9 @@ export class OrcaRuntimeService {
   }
 
   private resolvePtyTuiIdleWaiters(pty: RuntimePtyWorktreeRecord, ptyId: string): void {
+    if (this.launchPromptFenceHolds(pty)) {
+      return
+    }
     const handle = this.handleByPtyId.get(ptyId)
     if (!handle) {
       return

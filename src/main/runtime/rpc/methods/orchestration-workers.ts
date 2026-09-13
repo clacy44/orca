@@ -207,9 +207,13 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
         persistWorkerReadinessStage(setupStage)
 
         failedStage = 'agent_readiness'
+        // [R203 amendment C2] One shared deadline for readiness + the launch-prompt-fence wait
+        // below — not two independent 60s budgets — so the two together never exceed the
+        // caller's own timeout.
+        const deadlineAt = Date.now() + (params.timeoutMs ?? 60_000)
         const wait = await runtime.waitForTerminal(terminalHandle, {
           condition: 'tui-idle',
-          timeoutMs: params.timeoutMs ?? 60_000
+          timeoutMs: Math.max(0, deadlineAt - Date.now())
         })
         persistWorkerSetupWaitOutcome({ ...setupStage, wait })
         if (!wait.satisfied) {
@@ -244,7 +248,9 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
           devMode: params.devMode,
           cliCommand: runtime.getTerminalOrchestrationCliCommand(terminalHandle)
         })
-        await runtime.sendTerminalAgentPrompt(terminalHandle, preamble)
+        await runtime.sendTerminalAgentPrompt(terminalHandle, preamble, {
+          awaitLaunchPromptFenceMs: Math.max(0, deadlineAt - Date.now())
+        })
         // Why read the tail here and not one tick later: `ready` has always meant "the bytes were
         // written", and this is the only moment where a gate already on screen can be attributed to
         // the submit rather than to something the agent did afterwards (A1 section 2).
