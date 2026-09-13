@@ -673,6 +673,7 @@ describe('D-R163 M3 negatives 1/2/6: dead-holder adoption, wired end to end', ()
     runtime.setOrchestrationDb(db)
     stubLaunchScope(runtime)
     installRecordingPtyController(runtime, db)
+    const noticeSpy = vi.spyOn(runtime, 'writeHostNoticeToPane')
 
     tempHome = await mkdtemp(join(tmpdir(), 'orca-dead-holder-e2e-r142-'))
     process.env.HOME = tempHome
@@ -761,6 +762,8 @@ describe('D-R163 M3 negatives 1/2/6: dead-holder adoption, wired end to end', ()
       }
       expect(result.holderPaneKey).toBe(holderPaneKey)
       expect(result.adoptionSignal).toBe('SAME_GEN_PTY_ABSENCE')
+      // [R184, owner ruling 2026-09-13] no pane-typed adoption notice on success
+      expect(noticeSpy).not.toHaveBeenCalled()
       expect(db.newestLaunchForPane(HOST_ID, result.paneKey)?.evidence).toBe('host_restore')
       // [D-R192 C3] No sweep-restore mark on this holder -> the audit row records it as such.
       const r142AdoptedAudit = rawDb()
