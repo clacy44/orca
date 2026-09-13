@@ -19386,15 +19386,25 @@ export class OrcaRuntimeService {
   // tail shows a modal.
   private async waitForLaunchPromptFenceClear(
     handle: string,
-    pty: RuntimePtyWorktreeRecord | null | undefined,
+    ptyId: string | null | undefined,
     budgetMs: number
   ): Promise<void> {
-    if (!this.launchPromptFenceHolds(pty)) {
+    if (!this.launchPromptFenceHolds(ptyId ? this.ptysById.get(ptyId) : null)) {
       return
     }
     console.warn('[orchestration] dispatch input waiting for launch prompt', { handle, budgetMs })
     const deadline = Date.now() + budgetMs
-    while (this.launchPromptFenceHolds(pty) && Date.now() < deadline) {
+    while (Date.now() < deadline) {
+      // [R203 C1] Re-resolve the pty record by id on every tick rather than closing over a
+      // stale reference: a pty that is torn down mid-wait must stop the poll immediately
+      // instead of spinning on a detached object until the budget expires.
+      const pty = ptyId ? this.ptysById.get(ptyId) : null
+      if (!pty) {
+        return
+      }
+      if (!this.launchPromptFenceHolds(pty)) {
+        return
+      }
       await new Promise<void>((resolve) => setTimeout(resolve, 250))
     }
   }
@@ -19417,7 +19427,11 @@ export class OrcaRuntimeService {
       }
       await assertTerminalInputWithinLimitWithYield(payload)
       if (options.awaitLaunchPromptFenceMs && options.awaitLaunchPromptFenceMs > 0) {
-        await this.waitForLaunchPromptFenceClear(handle, pty.pty, options.awaitLaunchPromptFenceMs)
+        await this.waitForLaunchPromptFenceClear(
+          handle,
+          pty.pty.ptyId,
+          options.awaitLaunchPromptFenceMs
+        )
       }
       // [R200] Existing refusals (e.g. options.beforeWrite's agent_not_live) keep their reason
       // codes; the launch fence is the later gate — run via writeTerminalAgentPrompt's
@@ -19449,11 +19463,7 @@ export class OrcaRuntimeService {
       throw new Error('terminal_not_writable')
     }
     if (options.awaitLaunchPromptFenceMs && options.awaitLaunchPromptFenceMs > 0) {
-      await this.waitForLaunchPromptFenceClear(
-        handle,
-        leaf.ptyId ? this.ptysById.get(leaf.ptyId) : null,
-        options.awaitLaunchPromptFenceMs
-      )
+      await this.waitForLaunchPromptFenceClear(handle, leaf.ptyId, options.awaitLaunchPromptFenceMs)
     }
     // [R200] Existing refusals (e.g. options.beforeWrite's agent_not_live) keep their reason
     // codes; the launch fence is the later gate — run via writeTerminalAgentPrompt's
