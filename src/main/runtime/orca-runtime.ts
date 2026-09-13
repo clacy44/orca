@@ -12191,7 +12191,7 @@ export class OrcaRuntimeService {
       // this pty-only path cannot substitute for it).
       if (
         effectiveAgentStatus === 'idle' &&
-        (prevStatus !== 'idle' || !prevObservedLive) &&
+        (prevStatus !== 'idle' || !prevObservedLive || fenceJustCleared) &&
         !this.leafExistsForPty(ptyId)
       ) {
         this.deliverPendingMessagesForPty(pty)
@@ -12257,7 +12257,10 @@ export class OrcaRuntimeService {
       // an agent whose first live title is already idle (claude --resume at its
       // prompt) then shows no transition — the row would strand, which is
       // exactly #12536. Waiter semantics stay transition-only above.
-      if (leafEffectiveAgentStatus === 'idle' && (prevStatus !== 'idle' || !prevObservedLive)) {
+      if (
+        leafEffectiveAgentStatus === 'idle' &&
+        (prevStatus !== 'idle' || !prevObservedLive || fenceJustCleared)
+      ) {
         this.deliverPendingMessagesForLeaf(leaf)
       }
     }
@@ -19234,6 +19237,11 @@ export class OrcaRuntimeService {
   private readonly probeDeferredDeliveryPtyIds = new Set<string>()
   // S10-20: re-entrancy guard for the delivery foreground guard's own confirm-and-continue.
   private readonly foregroundGuardPendingPtyIds = new Set<string>()
+  // [R203] INV-P-LAUNCH-EDGE: launchPromptFenceHolds's own hook-clear/expiry-clear branches
+  // are a delivery edge, deferred to a macrotask since launchPromptFenceHolds is itself
+  // called from inside the delivery paths — a synchronous flush would re-enter them.
+  private readonly pendingLaunchPromptFenceFlushPtyIds = new Set<string>()
+  private launchPromptFenceFlushScheduled = false
 
   private controllerKnowsPtyIsLive(ptyId: string): boolean {
     try {
@@ -36196,6 +36204,7 @@ export class OrcaRuntimeService {
         entry.receivedAt >= since
       ) {
         pty.launchPromptFenceSince = null
+        this.scheduleLaunchPromptFenceFlush(pty.ptyId)
         return false
       }
     }
@@ -36208,9 +36217,41 @@ export class OrcaRuntimeService {
         heldMs: Date.now() - since
       })
       pty.launchPromptFenceSince = null
+      this.scheduleLaunchPromptFenceFlush(pty.ptyId)
       return false
     }
     return true
+  }
+
+  // [R203] INV-P-LAUNCH-EDGE: launchPromptFenceHolds clearing the fence is itself a delivery
+  // edge, but launchPromptFenceHolds is called from inside the delivery paths — a synchronous
+  // flush here would re-enter them. Defer to a macrotask; coalesce concurrent clears into one
+  // drain.
+  private scheduleLaunchPromptFenceFlush(ptyId: string): void {
+    this.pendingLaunchPromptFenceFlushPtyIds.add(ptyId)
+    if (this.launchPromptFenceFlushScheduled) {
+      return
+    }
+    this.launchPromptFenceFlushScheduled = true
+    const timer = setTimeout(() => {
+      this.launchPromptFenceFlushScheduled = false
+      const ids = [...this.pendingLaunchPromptFenceFlushPtyIds]
+      this.pendingLaunchPromptFenceFlushPtyIds.clear()
+      for (const id of ids) {
+        const p = this.ptysById.get(id)
+        if (!p) {
+          continue
+        }
+        if (this.leafExistsForPty(id)) {
+          for (const leaf of this.getLeavesForPty(id)) {
+            this.deliverPendingMessagesForLeaf(leaf)
+          }
+        } else {
+          this.deliverPendingMessagesForPty(p)
+        }
+      }
+    }, 0)
+    timer.unref?.()
   }
 
   /** [R185/R200/R189] INV-P-LAUNCH-EDGE, prompt-injection leg: refuse a HOST-authored prompt

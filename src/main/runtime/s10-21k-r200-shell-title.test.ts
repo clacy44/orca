@@ -525,4 +525,113 @@ describe('R185/R200: shell-authored titles are not status evidence; tui-idle and
     await expect(waitPromise).resolves.toMatchObject({ handle })
     expect(pty.launchPromptFenceSince ?? null).toBeNull()
   })
+
+  it('Case T-O: the fence clear flushes a withheld delivery (starvation) for a pty-only handle', async () => {
+    vi.useFakeTimers()
+    const write = vi.fn(() => true)
+    const setup = setUp(write)
+    db = setup.db
+    const { runtime } = setup
+
+    internals(runtime).registerPty(PTY_ID, WORKTREE_ID, null, { tabId: TAB_ID, leafId: LEAF_ID })
+    const pty = internals(runtime).ptysById.get(PTY_ID)
+    if (!pty) {
+      throw new Error('fixture setup failed: no pty record for ptyId')
+    }
+    pty.launchAgent = 'claude'
+    runtime.noteTerminalSpawnCommand(PTY_ID, 'claude --resume abc')
+    expect(pty.launchPromptFenceSince ?? null).not.toBeNull()
+
+    const handle = runtime.preAllocateHandleForPty(PTY_ID)
+    db.insertMessage({ from: 'peer', to: handle, subject: 'T-O fence flush check' })
+
+    runtime.notifyMessageArrived(handle, 'status', null, null)
+    await Promise.resolve()
+    expect(internals(runtime).withheldDeliveryAttemptsByHandle.get(handle)?.reason).toBe(
+      'awaiting_launch_prompt'
+    )
+    expect(pointerCalls(write, PTY_ID)).toHaveLength(0)
+
+    // RED today: the fence's own clear has no delivery-side effect at all — nothing re-drives
+    // the withheld row, so it strands until some unrelated future title/notify happens to hit it.
+    runtime.onPtyData(PTY_ID, '\x1b]0;Claude Code\x07', 100)
+    runtime.onPtyData(PTY_ID, '\x1b]0;✳ Claude Code\x07', 200)
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(pointerCalls(write, PTY_ID)).toHaveLength(1)
+    expect(internals(runtime).withheldDeliveryAttemptsByHandle.has(handle)).toBe(false)
+  })
+
+  it('Case T-P: the fence clearing via a fresh hook status also flushes withheld delivery', async () => {
+    vi.useFakeTimers()
+    const write = vi.fn(() => true)
+    const setup = setUp(write)
+    db = setup.db
+    const { runtime } = setup
+
+    internals(runtime).registerPty(PTY_ID, WORKTREE_ID, null, { tabId: TAB_ID, leafId: LEAF_ID })
+    const pty = internals(runtime).ptysById.get(PTY_ID)
+    if (!pty) {
+      throw new Error('fixture setup failed: no pty record for ptyId')
+    }
+    pty.launchAgent = 'claude'
+    pty.paneKey = PANE_KEY
+    const since = Date.now()
+    runtime.noteTerminalSpawnCommand(PTY_ID, 'claude --resume abc')
+    pty.launchPromptFenceSince = since
+    expect(pty.launchPromptFenceSince ?? null).not.toBeNull()
+    ;(
+      runtime as unknown as {
+        getAgentStatusSnapshotFn: () => { paneKey: string; agentType: string; receivedAt: number }[]
+      }
+    ).getAgentStatusSnapshotFn = () => [
+      { paneKey: PANE_KEY, agentType: 'claude', receivedAt: since + 1 }
+    ]
+
+    const handle = runtime.preAllocateHandleForPty(PTY_ID)
+    db.insertMessage({ from: 'peer', to: handle, subject: 'T-P hook clear flush check' })
+
+    // Trigger a delivery attempt: launchPromptFenceHolds evaluates the stubbed snapshot,
+    // observes the fresh hook status, and clears the fence inline (hook-clear branch).
+    runtime.deliverPendingMessagesForHandle(handle)
+    expect(pty.launchPromptFenceSince ?? null).toBeNull()
+
+    // RED today: the hook-clear branch nulls the field but never re-drives delivery — the
+    // withheld/queued row strands with no scheduled flush.
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(pointerCalls(write, PTY_ID)).toHaveLength(1)
+    expect(internals(runtime).withheldDeliveryAttemptsByHandle.has(handle)).toBe(false)
+  })
+
+  it('Case T-R: negative — fence-clear resolution never bypasses the modal refusal in sendTerminalAgentPrompt', async () => {
+    vi.useFakeTimers()
+    const write = vi.fn(() => true)
+    const setup = setUp(write)
+    db = setup.db
+    const { runtime } = setup
+
+    internals(runtime).registerPty(PTY_ID, WORKTREE_ID, null, { tabId: TAB_ID, leafId: LEAF_ID })
+    const pty = internals(runtime).ptysById.get(PTY_ID)
+    if (!pty) {
+      throw new Error('fixture setup failed: no pty record for ptyId')
+    }
+    pty.launchAgent = 'claude'
+    runtime.noteTerminalSpawnCommand(PTY_ID, 'claude --resume abc')
+    expect(pty.launchPromptFenceSince ?? null).not.toBeNull()
+    const handle = runtime.preAllocateHandleForPty(PTY_ID)
+
+    // The agent's own idle title clears the fence, but the tail still shows the folder-trust
+    // modal — sendTerminalAgentPrompt must still refuse, and sendTerminal must still write.
+    runtime.onPtyData(PTY_ID, '\x1b]0;✳ x\x07', 100)
+    runtime.onPtyData(PTY_ID, 'Do you trust the files in this folder?\r\n', 101)
+    expect(pty.launchPromptFenceSince ?? null).toBeNull()
+
+    await expect(runtime.sendTerminalAgentPrompt(handle, 'hello')).rejects.toThrow(
+      'terminal_blocked_modal'
+    )
+    write.mockClear()
+    await runtime.sendTerminal(handle, { text: 'y' })
+    expect(write).toHaveBeenCalled()
+  })
 })
