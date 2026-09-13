@@ -398,17 +398,9 @@ export async function requestChairRestore(
     return { ok: false, reason: `register_failed: ${registration.reason}` }
   }
   writeAdoptionAudit(registration.agent.id, newPaneKey, 'ok')
-  // [D-R170 M13] Only on the success path, same guard as writeAdoptionAudit — the closure used
-  // to also fire this from the register-failed exit, printing a success banner into a pane
-  // whose restore was refused. holderPaneKey/adoptionSignal are both null on an unheld restore
-  // (DEC-2, no adoption to announce).
-  if (holderPaneKey !== null && adoptionSignal !== null) {
-    deps.runtime.writeHostNoticeToPane(
-      newPaneKey,
-      `Session adopted from ${holderPaneKey} (${adoptionSignal}).`,
-      { rateKey: 'session_adopted' }
-    )
-  }
+  // [R184, owner ruling 2026-09-13] No pane-typed adoption notice on the CLI path: the CLI
+  // prints the result and agent_audit (session_adopted/superseded) is the durable record; a
+  // host notice here was the message typed into a launching pane before its agent existed (R197).
   return {
     ok: true,
     paneKey: newPaneKey,
