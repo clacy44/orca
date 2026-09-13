@@ -53,6 +53,11 @@ type TerminalTitleTrackerChunkOptions = {
 export type TerminalTitleTrackerCallbacks = {
   /** Fired once per observed OSC title, in byte order — including the synthesized cleared title when the stale-working timer fires. */
   onTitle?: (normalizedTitle: string, rawTitle: string, meta?: TerminalTitleFactMeta) => void
+  /** [R185/R200 B1] Consulted BEFORE the title reaches the agent-status tracker itself: a
+   *  `true` return gates it out of the tracker entirely (no lastStatus advance, no
+   *  onAgentExited eligibility) — not merely suppressed downstream in a record. Called with
+   *  the same raw title `onTitle` receives, right before (not instead of) the tracker feed. */
+  shouldSkipAgentStatusForTitle?: (rawTitle: string) => boolean
   onAgentBecameIdle?: (title: string, meta?: TerminalTitleFactMeta) => void
   onAgentBecameWorking?: () => void
   onAgentExited?: () => void
@@ -114,6 +119,7 @@ export function createTerminalTitleTracker(
 ): TerminalTitleTracker {
   const {
     onTitle,
+    shouldSkipAgentStatusForTitle,
     onAgentBecameIdle,
     onAgentBecameWorking,
     onAgentExited,
@@ -178,7 +184,12 @@ export function createTerminalTitleTracker(
     }
     lastEmittedTitle = normalizeTerminalTitle(rawTitle)
     onTitle?.(lastEmittedTitle, rawTitle)
-    agentTracker?.handleTitle(rawTitle)
+    // [R185/R200 B1] the guard runs BEFORE the tracker: a shell-authored title on a launched
+    // pane never reaches agentTracker.handleTitle, so lastStatus cannot advance and
+    // onAgentExited cannot fire from it — not merely suppressed on the records downstream.
+    if (!shouldSkipAgentStatusForTitle?.(rawTitle)) {
+      agentTracker?.handleTitle(rawTitle)
+    }
   }
 
   function handleChunk(data: string, options: TerminalTitleTrackerChunkOptions = {}): void {

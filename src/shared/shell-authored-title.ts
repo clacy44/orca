@@ -11,6 +11,7 @@ const BARE_AGENT_NAME_TITLE_RE = new RegExp(
   `^(?:${AGENT_NAMES.join('|')})(?:\\.(?:exe|cmd|bat|ps1))?$`,
   'i'
 )
+const WINDOWS_EXECUTABLE_SUFFIXES = ['.exe', '.cmd', '.bat', '.ps1']
 // Why: omz preexec picks the first word that is not an assignment, a flag, or one of these
 // wrappers (lib/termsupport.zsh:99).
 const PREEXEC_SKIPPED_WRAPPERS = new Set(['sudo', 'ssh', 'mosh', 'rake', 'env', 'nohup', 'exec'])
@@ -21,9 +22,20 @@ const MIN_TRUNCATED_PREFIX = 8
 
 /** True when `title`, trimmed, is EXACTLY one agent-name token (optionally with a Windows
  *  executable suffix). Never a substring, never a decorated title: `claude` yes, `✳ claude`,
- *  `claude ready`, `Codex ready` no. */
-export function isBareAgentNameTitle(title: string): boolean {
-  return BARE_AGENT_NAME_TITLE_RE.test(title.trim())
+ *  `claude ready`, `Codex ready` no.
+ *  [C3] With `agentName` given, matches only THAT name (`.exe`/`.cmd`/`.bat`/`.ps1` tolerated) —
+ *  not any AGENT_NAMES token. Omit `agentName` to keep the general (any-agent) shape. */
+export function isBareAgentNameTitle(title: string, agentName?: string): boolean {
+  const trimmed = title.trim()
+  if (agentName === undefined) {
+    return BARE_AGENT_NAME_TITLE_RE.test(trimmed)
+  }
+  const trimmedLower = trimmed.toLowerCase()
+  const nameLower = agentName.toLowerCase()
+  if (trimmedLower === nameLower) {
+    return true
+  }
+  return WINDOWS_EXECUTABLE_SUFFIXES.some((suffix) => trimmedLower === nameLower + suffix)
 }
 
 /** True when `title` is the shell's own echo of `launchCommand` — the full line (OSC2, possibly

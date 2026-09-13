@@ -1,8 +1,10 @@
 // [R197] INV-P-LAUNCH-EDGE: from the moment the host delivers a launch command into a pane
 // until the LAUNCHED agent itself is observed at its prompt in that pane generation, no
 // host-authored bytes (pointer text, Enter, prompt injection) may be written into that pane.
-// This fences mail pointers and their armed Enter delivered through deliverPendingMessages; it
-// does NOT fence prompt injection (sendTerminal / sendTerminalAgentPrompt) — tracked separately.
+// This fences mail pointers and their armed Enter delivered through deliverPendingMessages, the
+// sendTerminalAgentPrompt prompt-injection door, and the tui-idle readiness wait — none of those
+// may be satisfied or written while the fence holds. sendTerminal (caller-authored keystrokes,
+// e.g. the peer-owned dialog-dismissal keystroke) is deliberately NOT fenced.
 // A shell that titles itself after the command it is about to run is not the agent: with shell
 // auto-titling on, the bare token `claude` classifies as an idle AGENT_NAMES title
 // (agent-title-status.ts:198-201,225), so `detectAgentStatusFromTitle` cannot be the authority

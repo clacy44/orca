@@ -284,4 +284,174 @@ describe('R185/R200: shell-authored titles are not status evidence; tui-idle and
       runtime.waitForTerminal(handle, { condition: 'tui-idle', timeoutMs: 5_000 })
     ).resolves.toMatchObject({ handle })
   })
+
+  it('Case T-I NO-EXIT: a shell-authored title sequence on a fenced Claude pane never fires onAgentExited', () => {
+    vi.useFakeTimers()
+    const write = vi.fn(() => true)
+    const setup = setUp(write)
+    db = setup.db
+    const { runtime } = setup
+
+    internals(runtime).registerPty(PTY_ID, WORKTREE_ID, null, { tabId: TAB_ID, leafId: LEAF_ID })
+    const pty = internals(runtime).ptysById.get(PTY_ID)
+    if (!pty) {
+      throw new Error('fixture setup failed: no pty record for ptyId')
+    }
+    pty.launchAgent = 'claude'
+    runtime.noteTerminalSpawnCommand(PTY_ID, LAUNCH_COMMAND)
+
+    const confirmSpy = vi.spyOn(
+      runtime as unknown as { confirmPtyAgentExit: (ptyId: string) => void },
+      'confirmPtyAgentExit'
+    )
+
+    // OSC2 echo of the launch command: shell-authored, classifies 'permission' via the pure
+    // detector's "permissions" substring (see Case T-C). B1: must never reach the tracker.
+    runtime.onPtyData(PTY_ID, `\x1b]2;${LAUNCH_COMMAND}\x07`, 100)
+    // A plain shell prompt — NOT shell-authored (not the bare agent name, not a launch echo) —
+    // classifies null. RED at base (tracker-level guard absent): lastStatus 'permission' -> null
+    // reads as an exit and fires onAgentExited/confirmPtyAgentExit.
+    runtime.onPtyData(PTY_ID, '\x1b]0;~\x07', 101)
+
+    expect(confirmSpy).not.toHaveBeenCalled()
+    expect(pty.lastAgentStatus ?? null).toBeNull()
+  })
+
+  it('Case T-J SCOPE: a bare OSC1 title for a DIFFERENT agent classifies idle exactly as today, whether the pane was launched as that agent or as Claude', () => {
+    const write = vi.fn(() => true)
+    const setup = setUp(write)
+    db = setup.db
+    const { runtime } = setup
+
+    // A pane launched as codex, titled with its own bare name: untouched by this dispatch's
+    // Claude-only scope (D-R201 §6).
+    const codexPtyId = 'pty-shell-title-scope-codex'
+    internals(runtime).registerPty(codexPtyId, WORKTREE_ID, null, {
+      tabId: 'tab-shell-title-scope-codex',
+      leafId: '88888888-8888-4888-8888-888888888888'
+    })
+    const codexPty = internals(runtime).ptysById.get(codexPtyId)
+    if (!codexPty) {
+      throw new Error('fixture setup failed: no pty record for codex ptyId')
+    }
+    codexPty.launchAgent = 'codex'
+    runtime.onPtyData(codexPtyId, '\x1b]1;codex\x07', 100)
+    expect(codexPty.lastAgentStatus).toBe('idle')
+
+    // A Claude-launched pane titled with `codex` — another agent's name, not the pane's OWN
+    // agent name — the guard matches only the pane's own agent name (plus its launch-command
+    // echo), so this still classifies idle exactly as today.
+    internals(runtime).registerPty(PTY_ID, WORKTREE_ID, null, { tabId: TAB_ID, leafId: LEAF_ID })
+    const pty = internals(runtime).ptysById.get(PTY_ID)
+    if (!pty) {
+      throw new Error('fixture setup failed: no pty record for ptyId')
+    }
+    pty.launchAgent = 'claude'
+    runtime.onPtyData(PTY_ID, '\x1b]1;codex\x07', 100)
+    expect(pty.lastAgentStatus).toBe('idle')
+  })
+
+  it('Case T-K LEAF PATH: the same shell-title sequence on a pane WITH a synced leaf fires no exit and leaves the leaf status untouched', () => {
+    vi.useFakeTimers()
+    const write = vi.fn(() => true)
+    const runtime = new OrcaRuntimeService()
+    runtime.setPtyController(makeController(write) as never)
+    const setupDb = new OrchestrationDb(':memory:')
+    runtime.setOrchestrationDb(setupDb)
+    db = setupDb
+
+    internals(runtime).registerPty(PTY_ID, WORKTREE_ID, null, { tabId: TAB_ID, leafId: LEAF_ID })
+    const pty = internals(runtime).ptysById.get(PTY_ID)
+    if (!pty) {
+      throw new Error('fixture setup failed: no pty record for ptyId')
+    }
+    pty.launchAgent = 'claude'
+
+    // Bind a leaf to the pty in the synced graph (idiom per s10-21g-r197/r200 fixtures'
+    // syncSinglePty), so applyTrackedPtyTitle's leaf loop and any exit-restore write are live.
+    runtime.attachWindow(1)
+    runtime.syncWindowGraph(1, {
+      tabs: [
+        {
+          tabId: TAB_ID,
+          worktreeId: WORKTREE_ID,
+          title: 'claude',
+          activeLeafId: LEAF_ID,
+          layout: null
+        }
+      ],
+      leaves: [
+        {
+          tabId: TAB_ID,
+          worktreeId: WORKTREE_ID,
+          leafId: LEAF_ID,
+          paneRuntimeId: 1,
+          ptyId: PTY_ID,
+          paneTitle: null
+        }
+      ]
+    })
+    const leafRecords = (
+      runtime as unknown as {
+        leavesByPtyId: Map<string, { lastAgentStatus?: string | null }[]>
+      }
+    ).leavesByPtyId.get(PTY_ID)
+    if (!leafRecords || leafRecords.length === 0) {
+      throw new Error('fixture setup failed: no leaf bound to ptyId')
+    }
+    const leaf = leafRecords[0]
+
+    runtime.noteTerminalSpawnCommand(PTY_ID, LAUNCH_COMMAND)
+    const confirmSpy = vi.spyOn(
+      runtime as unknown as { confirmPtyAgentExit: (ptyId: string) => void },
+      'confirmPtyAgentExit'
+    )
+
+    runtime.onPtyData(PTY_ID, `\x1b]2;${LAUNCH_COMMAND}\x07`, 100)
+    runtime.onPtyData(PTY_ID, '\x1b]0;~\x07', 101)
+
+    expect(confirmSpy).not.toHaveBeenCalled()
+    expect(leaf.lastAgentStatus ?? null).toBeNull()
+  })
+
+  it('Case T-L: tui-idle single early check — a fenced pane with a retained Codex-ready-banner tail is NOT satisfied; satisfied after the fence clears', async () => {
+    vi.useFakeTimers()
+    const write = vi.fn(() => true)
+    const setup = setUp(write)
+    db = setup.db
+    const { runtime } = setup
+
+    internals(runtime).registerPty(PTY_ID, WORKTREE_ID, null, { tabId: TAB_ID, leafId: LEAF_ID })
+    const pty = internals(runtime).ptysById.get(PTY_ID)
+    if (!pty) {
+      throw new Error('fixture setup failed: no pty record for ptyId')
+    }
+    pty.launchAgent = 'claude'
+    runtime.noteTerminalSpawnCommand(PTY_ID, 'claude --resume abc')
+    expect(pty.launchPromptFenceSince ?? null).not.toBeNull()
+
+    // A Codex ready banner in the retained tail (isKnownReadyPromptPreview's shape) — left over
+    // from the pane's previous occupant before Claude launched into it.
+    runtime.onPtyData(
+      PTY_ID,
+      [' >_ OpenAI Codex (v0.131.0)\n', ' model:       gpt-5.5\n', ' directory:   ~/x\n'].join(''),
+      100
+    )
+
+    const handle = runtime.preAllocateHandleForPty(PTY_ID)
+
+    // RED at the current lane tip: the successor arm (isKnownReadyPromptPreview) was not gated
+    // by the fence, so this resolved instantly despite the fence holding.
+    const waitPromise = runtime.waitForTerminal(handle, { condition: 'tui-idle', timeoutMs: 5_000 })
+    const rejection = expect(waitPromise).rejects.toThrow('timeout')
+    await vi.advanceTimersByTimeAsync(5_000)
+    await rejection
+
+    // Claude's OWN idle title clears the fence; the wait now satisfies immediately.
+    runtime.onPtyData(PTY_ID, '\x1b]0;✳ x\x07', 200)
+    expect(pty.launchPromptFenceSince ?? null).toBeNull()
+    await expect(
+      runtime.waitForTerminal(handle, { condition: 'tui-idle', timeoutMs: 5_000 })
+    ).resolves.toMatchObject({ handle })
+  })
 })
