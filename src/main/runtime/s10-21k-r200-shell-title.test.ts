@@ -454,4 +454,75 @@ describe('R185/R200: shell-authored titles are not status evidence; tui-idle and
       runtime.waitForTerminal(handle, { condition: 'tui-idle', timeoutMs: 5_000 })
     ).resolves.toMatchObject({ handle })
   })
+
+  it('Case T-M: a bare idle-classified title on a fenced pane does not resolve a registered tui-idle waiter', async () => {
+    vi.useFakeTimers()
+    const write = vi.fn(() => true)
+    const setup = setUp(write)
+    db = setup.db
+    const { runtime } = setup
+
+    internals(runtime).registerPty(PTY_ID, WORKTREE_ID, null, { tabId: TAB_ID, leafId: LEAF_ID })
+    const pty = internals(runtime).ptysById.get(PTY_ID)
+    if (!pty) {
+      throw new Error('fixture setup failed: no pty record for ptyId')
+    }
+    pty.launchAgent = 'claude'
+    runtime.noteTerminalSpawnCommand(PTY_ID, 'claude --resume abc')
+    expect(pty.launchPromptFenceSince ?? null).not.toBeNull()
+
+    const handle = runtime.preAllocateHandleForPty(PTY_ID)
+    const waitPromise = runtime.waitForTerminal(handle, { condition: 'tui-idle', timeoutMs: 5_000 })
+    const rejection = expect(waitPromise).rejects.toThrow('timeout')
+
+    // RED at base: this title classifies idle (bare AGENT_NAMES match, not the agent's own ✳
+    // glyph) and today's resolveTuiIdleWaiters carries no fence check at all, so it resolves the
+    // waiter despite the fence still holding.
+    runtime.onPtyData(PTY_ID, '\x1b]0;Claude Code\x07', 100)
+
+    await vi.advanceTimersByTimeAsync(5_000)
+    await rejection
+    expect(pty.launchPromptFenceSince ?? null).not.toBeNull()
+  })
+
+  it('Case T-N: the fence CLEAR is itself the resolving edge for an already-registered tui-idle waiter', async () => {
+    vi.useFakeTimers()
+    const write = vi.fn(() => true)
+    const setup = setUp(write)
+    db = setup.db
+    const { runtime } = setup
+
+    internals(runtime).registerPty(PTY_ID, WORKTREE_ID, null, { tabId: TAB_ID, leafId: LEAF_ID })
+    const pty = internals(runtime).ptysById.get(PTY_ID)
+    if (!pty) {
+      throw new Error('fixture setup failed: no pty record for ptyId')
+    }
+    pty.launchAgent = 'claude'
+    runtime.noteTerminalSpawnCommand(PTY_ID, 'claude --resume abc')
+    expect(pty.launchPromptFenceSince ?? null).not.toBeNull()
+
+    const handle = runtime.preAllocateHandleForPty(PTY_ID)
+    const waitPromise = runtime.waitForTerminal(handle, { condition: 'tui-idle', timeoutMs: 5_000 })
+    let resolved = false
+    waitPromise.then(() => {
+      resolved = true
+    })
+
+    // RED at base: the bare idle-classified title resolves the waiter immediately (no fence
+    // check on the resolving edge at all) — `resolved` flips true here, before the agent's own
+    // evidence ever arrives.
+    runtime.onPtyData(PTY_ID, '\x1b]0;Claude Code\x07', 100)
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(resolved).toBe(false)
+
+    // Waiter still registered (fence held it) — now feed the agent's OWN idle title while it is
+    // still pending. RED after A4/A5 alone (no fenceJustCleared disjunct yet): prevStatus is
+    // already 'idle' from the title above, so resolvePtyTuiIdleWaiters is never called again and
+    // the waiter hangs to timeout instead of resolving on the clear.
+    runtime.onPtyData(PTY_ID, '\x1b]0;✳ Claude Code\x07', 200)
+
+    await expect(waitPromise).resolves.toMatchObject({ handle })
+    expect(pty.launchPromptFenceSince ?? null).toBeNull()
+  })
 })

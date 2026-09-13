@@ -12132,6 +12132,10 @@ export class OrcaRuntimeService {
     // allowed to touch either record's status below.
     const shellAuthoredForLaunchedPane =
       !identityOnlyTitle && !!pty && this.isShellAuthoredTitleForLaunchedPane(pty, rawTitle)
+    // [R203] INV-P-LAUNCH-EDGE: the fence's own clear is a delivery/idle edge, not only its
+    // evaluating arms — computed before the field is nulled below so both the pty and leaf
+    // loops can gate resolution on it.
+    let fenceJustCleared = false
     if (pty) {
       const prevStatus = pty.lastAgentStatus
       const prevTitle = pty.lastOscTitle
@@ -12152,7 +12156,9 @@ export class OrcaRuntimeService {
       pty.lastOscTitleEpochMs = observedAtEpochMs
       pty.lastAgentStatus = effectiveAgentStatus
       pty.lastAgentStatusObservedLive = true
-      if (pty.launchPromptFenceSince !== null && isLaunchedClaudePromptTitle(rawTitle)) {
+      fenceJustCleared =
+        pty.launchPromptFenceSince !== null && isLaunchedClaudePromptTitle(rawTitle)
+      if (fenceJustCleared) {
         pty.launchPromptFenceSince = null
       }
       if (prevStatus !== effectiveAgentStatus) {
@@ -12174,7 +12180,7 @@ export class OrcaRuntimeService {
         this.setPtyManagementTitleFromObservedTitle(pty, normalizedTitle, observedAt)
       }
       ptyRecordChanged = prevTitle !== recordedTitle || prevStatus !== effectiveAgentStatus
-      if (effectiveAgentStatus === 'idle' && prevStatus !== 'idle') {
+      if (effectiveAgentStatus === 'idle' && (prevStatus !== 'idle' || fenceJustCleared)) {
         this.resolvePtyTuiIdleWaiters(pty, ptyId)
       }
       // Why gated on no-leaf, not unconditional (S10-15 F8 fix A): a headless run or a
@@ -12242,7 +12248,7 @@ export class OrcaRuntimeService {
       // working→idle transition that never comes. Permission→idle is excluded:
       // it means the agent was blocked on user approval and the user said no,
       // which isn't a task-completion signal.
-      if (leafEffectiveAgentStatus === 'idle' && prevStatus !== 'idle') {
+      if (leafEffectiveAgentStatus === 'idle' && (prevStatus !== 'idle' || fenceJustCleared)) {
         this.resolveTuiIdleWaiters(leaf)
       }
       // Why the second condition: push delivery is gated on LIVE idle, so its
@@ -37567,6 +37573,9 @@ export class OrcaRuntimeService {
   }
 
   private resolveTuiIdleWaiters(leaf: RuntimeLeafRecord): void {
+    if (this.launchPromptFenceHolds(leaf.ptyId ? this.ptysById.get(leaf.ptyId) : null)) {
+      return
+    }
     const handle = this.handleByLeafKey.get(this.getLeafKey(leaf.tabId, leaf.leafId))
     if (!handle) {
       return
@@ -37602,6 +37611,9 @@ export class OrcaRuntimeService {
   }
 
   private resolvePtyTuiIdleWaiters(pty: RuntimePtyWorktreeRecord, ptyId: string): void {
+    if (this.launchPromptFenceHolds(pty)) {
+      return
+    }
     const handle = this.handleByPtyId.get(ptyId)
     if (!handle) {
       return
