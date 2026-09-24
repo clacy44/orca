@@ -12,7 +12,11 @@ import {
 } from '../../orca-runtime'
 import type { RpcContext } from '../core'
 import { RpcDispatcher } from '../dispatcher'
-import { BUS_POLL_LIMIT_PER_WINDOW, isBusPollCheck } from './orchestration-bus-poll-guard'
+import {
+  BUS_POLL_LIMIT_PER_WINDOW,
+  hasAckForm,
+  isBusPollCheck
+} from './orchestration-bus-poll-guard'
 
 function rawDb(db: OrchestrationDb): Database.Database {
   return (db as unknown as { db: Database.Database }).db
@@ -317,6 +321,10 @@ describe('bus-poll guard (R223b)', () => {
     expect(isBusPollCheck({ compatibilityAck: '{}' })).toBe(false)
     expect(isBusPollCheck({ compatibilityQuestionAck: '{}' })).toBe(false)
 
+    expect(hasAckForm({})).toBe(false)
+    expect(hasAckForm({ ack: 'd' })).toBe(true)
+    expect(hasAckForm({ compatibilityQuestionAck: '{}' })).toBe(true)
+
     setup()
     await call(
       'orchestration.send',
@@ -501,6 +509,29 @@ describe('bus-poll guard (R223b)', () => {
 
     await expect(
       call('orchestration.check', { terminal: 'term_a' }, EVIDENCE_A)
+    ).rejects.toMatchObject({ code: 'polling_detected' })
+
+    expect(countDeliveries()).toBe(before)
+  })
+
+  it('12b: a refused wait:true check on the agent mailbox mints no delivery row', async () => {
+    setup()
+    await call(
+      'orchestration.send',
+      { from: 'term_b', to: `agent:${agentAId}`, subject: 'x' },
+      EVIDENCE_B
+    )
+    await exhaust(EVIDENCE_A)
+    const countDeliveries = () =>
+      (
+        rawDb(db)
+          .prepare('SELECT COUNT(*) AS n FROM mailbox_deliveries WHERE mailbox_handle = ?')
+          .get(`agent:${agentAId}`) as { n: number }
+      ).n
+    const before = countDeliveries()
+
+    await expect(
+      call('orchestration.check', { terminal: 'term_a', wait: true }, EVIDENCE_A)
     ).rejects.toMatchObject({ code: 'polling_detected' })
 
     expect(countDeliveries()).toBe(before)

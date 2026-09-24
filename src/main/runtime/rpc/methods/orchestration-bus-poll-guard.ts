@@ -1,9 +1,12 @@
 // R223b: a per-pane polling guard on the bus-read verbs. A pane that reads the read-only bus
 // verbs (orchestration.check / .inbox / agents threads.get / threads.list / thread.get) above a
 // fixed budget in a fixed window is refused with a typed `polling_detected` error naming the
-// rule, audited once per window — single reads, `check --wait`, every ack form, `agents wait`,
-// unattested callers and paired devices are unaffected. See design doc D-R209 (referenced by
-// brief b1-10y-r223) for the rationale.
+// rule, audited once per window — single reads are unaffected; every ack form (ack /
+// compatibilityAck / compatibilityQuestionAck) is exempt; a `check --wait` is exempt only where
+// it can park (run, dispatch and bare-handle mailboxes) — on a registered agent's own mailbox it
+// returns immediately and is metered like a plain read; `agents wait`, unattested callers and
+// paired devices are never counted. See design doc D-R209 (referenced by brief b1-10y-r223) for
+// the rationale.
 import type { RpcContext } from '../core'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import { hostIdFor } from './agent-directory-rpc-view'
@@ -27,23 +30,35 @@ export type BusPollMethod =
   | 'orchestration.threads.list'
   | 'orchestration.thread'
 
-/** True only when `params` is a plain (non-blocking, non-ack) read: `wait !== true` and none of
- * the ack forms (ack / compatibilityAck / compatibilityQuestionAck) are present. Used to exempt
- * `check --wait` and every ack form from the polling budget. */
-export function isBusPollCheck(params: unknown): boolean {
+/** True when `params` carries any of the three ack forms (ack / compatibilityAck /
+ * compatibilityQuestionAck). Every ack form is exempt from the polling budget. */
+export function hasAckForm(params: unknown): boolean {
   const p = (params ?? {}) as Record<string, unknown>
   return (
-    p.wait !== true &&
-    p.ack === undefined &&
-    p.compatibilityAck === undefined &&
-    p.compatibilityQuestionAck === undefined
+    p.ack !== undefined ||
+    p.compatibilityAck !== undefined ||
+    p.compatibilityQuestionAck !== undefined
   )
 }
 
+/** True only when `params` is a plain (non-blocking, non-ack) read: `wait !== true` and none of
+ * the ack forms (ack / compatibilityAck / compatibilityQuestionAck) are present. Used to exempt
+ * every ack form from the polling budget; note that a `check --wait` on a registered agent's own
+ * mailbox returns immediately and is metered like a plain read (it only parks, and is thereby
+ * exempt, on run, dispatch and bare-handle mailboxes — see assertNotBusPolling below). */
+export function isBusPollCheck(params: unknown): boolean {
+  const p = (params ?? {}) as Record<string, unknown>
+  return p.wait !== true && !hasAckForm(p)
+}
+
 /** Refuses with `polling_detected` once a pane has read the bus-read verbs more than
- * BUS_POLL_LIMIT_PER_WINDOW times in the current BUS_POLL_WINDOW_MS window. Unattested callers
- * (no resolvable authority) are never counted. Audits the refusal once per window, best-effort —
- * an audit-write failure never blocks or changes the refusal. */
+ * BUS_POLL_LIMIT_PER_WINDOW times in the current BUS_POLL_WINDOW_MS window. Single reads are
+ * unaffected; every ack form (ack / compatibilityAck / compatibilityQuestionAck) is exempt; a
+ * `check --wait` is exempt only where it can park (run, dispatch and bare-handle mailboxes) — on
+ * a registered agent's own mailbox it returns immediately and is metered like a plain read;
+ * `agents wait`, unattested callers (no resolvable authority) and paired devices are never
+ * counted. Audits the refusal once per window, best-effort — an audit-write failure never blocks
+ * or changes the refusal. */
 export function assertNotBusPolling(
   runtime: RpcContext['runtime'],
   evidence: OrchestrationCompatibilityEvidence | null | undefined,
@@ -90,7 +105,7 @@ export function assertNotBusPolling(
   throw new OrchestrationError(
     POLLING_DETECTED_CODE,
     'polling detected; new mail is delivered to this pane when it is idle; use orca agents wait ' +
-      `(limit: ${BUS_POLL_LIMIT_PER_WINDOW} reads of orchestration check/inbox/thread and agents threads/thread per pane per ${BUS_POLL_WINDOW_MS / 1000}s)`,
+      `(limit: ${BUS_POLL_LIMIT_PER_WINDOW} reads of orchestration check/inbox/thread, agents threads/thread and agents reply --thread (one thread read) per pane per ${BUS_POLL_WINDOW_MS / 1000}s)`,
     {
       effectsApplied: false,
       retryAfterMs: rate.retryAfterMs,

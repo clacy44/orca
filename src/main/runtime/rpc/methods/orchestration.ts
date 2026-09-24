@@ -100,7 +100,7 @@ import { ORCHESTRATION_FEDERATED_PEER_SEND_METHODS } from './orchestration-feder
 import { ORCHESTRATION_LINK_BINDING_PEER_METHODS } from './orchestration-link-binding-peer'
 import { ORCHESTRATION_LINK_BINDING_LOCAL_METHODS } from './orchestration-link-binding-local'
 import { isLocalOnlyCaller } from './orchestration-link-binding-caller-gate'
-import { assertNotBusPolling, isBusPollCheck } from './orchestration-bus-poll-guard'
+import { assertNotBusPolling, hasAckForm, isBusPollCheck } from './orchestration-bus-poll-guard'
 import { relayPeerSendToHost } from './orchestration-peer-send-relay'
 import {
   assertPayloadKindNotCallerSet,
@@ -1909,12 +1909,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           // R223b: this branch has no waitForMessage to park on, so a `wait:true` call still
           // returns immediately and must be metered as a bus-poll read (unless it already was
           // above, or the caller supplied an ack form, which stays exempt regardless of `wait`).
-          if (
-            !busPollMetered &&
-            params.ack === undefined &&
-            params.compatibilityAck === undefined &&
-            params.compatibilityQuestionAck === undefined
-          ) {
+          if (!busPollMetered && !hasAckForm(params)) {
             assertNotBusPolling(runtime, orchestrationCompatibilityEvidence, 'orchestration.check')
           }
           // Safe: callerAgentRow is only ever set (above) when attestedForAgentCheck is truthy.
