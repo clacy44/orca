@@ -19,6 +19,7 @@ import { resolveThreadReplay } from './orchestration-thread'
 import type { OrchestrationDb } from '../../orchestration/db'
 import { resolveCallerAgent } from './orchestration-caller-identity'
 import { wakePactThreadBoth } from './orchestration-pact-wake'
+import { assertNotBusPolling } from './orchestration-bus-poll-guard'
 
 const CreateParams = z.object({
   subject: OptionalString,
@@ -106,6 +107,7 @@ export const ORCHESTRATION_THREADS_METHODS: RpcMethod[] = [
     name: 'orchestration.threads.get',
     params: GetParams,
     handler: (params, { runtime, orchestrationCompatibilityEvidence }) => {
+      assertNotBusPolling(runtime, orchestrationCompatibilityEvidence, 'orchestration.threads.get')
       const db = runtime.getOrchestrationDb()
       const replay = resolveThreadReplay(
         runtime,
@@ -123,6 +125,7 @@ export const ORCHESTRATION_THREADS_METHODS: RpcMethod[] = [
     name: 'orchestration.threads.list',
     params: ListParams,
     handler: (params, { runtime, orchestrationCompatibilityEvidence }) => {
+      assertNotBusPolling(runtime, orchestrationCompatibilityEvidence, 'orchestration.threads.list')
       const db = runtime.getOrchestrationDb()
       const caller = resolveCallerAgent(db, runtime, orchestrationCompatibilityEvidence)
       const threads = db.listThreadsForParticipant({

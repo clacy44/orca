@@ -100,6 +100,7 @@ import { ORCHESTRATION_FEDERATED_PEER_SEND_METHODS } from './orchestration-feder
 import { ORCHESTRATION_LINK_BINDING_PEER_METHODS } from './orchestration-link-binding-peer'
 import { ORCHESTRATION_LINK_BINDING_LOCAL_METHODS } from './orchestration-link-binding-local'
 import { isLocalOnlyCaller } from './orchestration-link-binding-caller-gate'
+import { assertNotBusPolling, isBusPollCheck } from './orchestration-bus-poll-guard'
 import { relayPeerSendToHost } from './orchestration-peer-send-relay'
 import {
   assertPayloadKindNotCallerSet,
@@ -1463,6 +1464,9 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           }
         }
         assertPeerMailboxMeter(runtime, accessProfile, authenticatedCallerFingerprint)
+        if (isBusPollCheck(params)) {
+          assertNotBusPolling(runtime, orchestrationCompatibilityEvidence, 'orchestration.check')
+        }
         const db = runtime.getOrchestrationDb()
         const handle = params.terminal ?? 'unknown'
         const typeFilter = parseMessageTypes(params.types)
@@ -2752,6 +2756,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
     name: 'orchestration.inbox',
     params: InboxParams,
     handler: (params, { runtime, orchestrationCompatibilityEvidence }) => {
+      assertNotBusPolling(runtime, orchestrationCompatibilityEvidence, 'orchestration.inbox')
       const db = runtime.getOrchestrationDb()
       // Why: stale/unknown handles return empty rather than error — historical rows survive handle deletion (design doc §3.3).
       // Why threadId routes through resolveThreadReplay (ruling 1): `--thread-id` used to call

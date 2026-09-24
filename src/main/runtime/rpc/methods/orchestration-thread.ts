@@ -4,6 +4,7 @@ import { OptionalString, requiredString } from '../schemas'
 import { parseThreadSinceCursor } from '../../orchestration/thread-replay-since-filter'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import type { MessageRow } from '../../orchestration/types'
+import { assertNotBusPolling } from './orchestration-bus-poll-guard'
 
 // Why (S10-9 R4): a thread replay is where a sender goes to check on mail they sent into it —
 // annotate their OWN messages with the same honest delivery state `orchestration sent` reports,
@@ -140,6 +141,7 @@ export const ORCHESTRATION_THREAD_METHODS: RpcMethod[] = [
     name: 'orchestration.thread',
     params: ThreadParams,
     handler: (params, { runtime, orchestrationCompatibilityEvidence }) => {
+      assertNotBusPolling(runtime, orchestrationCompatibilityEvidence, 'orchestration.thread')
       return resolveThreadReplay(
         runtime,
         orchestrationCompatibilityEvidence,
