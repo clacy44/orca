@@ -131,6 +131,8 @@ const STRUCTURED_RUNTIME_PASSTHROUGH_CODES: ReadonlySet<string> = new Set([
   'unauthenticated_lane',
   'stale_environment_pairing',
   'rate_limited',
+  // R223b: the bus-poll guard's refusal code; carries retryAfterMs/limit/windowMs/nextSteps.
+  'polling_detected',
   'payload_kind_reserved',
   'body_gate_refused',
   'not_a_participant',

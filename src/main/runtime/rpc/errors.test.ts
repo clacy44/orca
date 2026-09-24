@@ -218,7 +218,8 @@ describe('S10-15 D8: agent_retired and its family survive mapRuntimeError with d
     'no_registered_identity',
     'unauthenticated_lane',
     'stale_environment_pairing',
-    'rate_limited'
+    'rate_limited',
+    'polling_detected'
   ])('preserves %s (S10-15 finding 18) with data intact', (code) => {
     const error = new OrchestrationError(code, `message for ${code}`, {
       nextSteps: ['a next step']

@@ -100,6 +100,7 @@ import { ORCHESTRATION_FEDERATED_PEER_SEND_METHODS } from './orchestration-feder
 import { ORCHESTRATION_LINK_BINDING_PEER_METHODS } from './orchestration-link-binding-peer'
 import { ORCHESTRATION_LINK_BINDING_LOCAL_METHODS } from './orchestration-link-binding-local'
 import { isLocalOnlyCaller } from './orchestration-link-binding-caller-gate'
+import { assertNotBusPolling, hasAckForm, isBusPollCheck } from './orchestration-bus-poll-guard'
 import { relayPeerSendToHost } from './orchestration-peer-send-relay'
 import {
   assertPayloadKindNotCallerSet,
@@ -1463,6 +1464,11 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           }
         }
         assertPeerMailboxMeter(runtime, accessProfile, authenticatedCallerFingerprint)
+        let busPollMetered = false
+        if (isBusPollCheck(params)) {
+          assertNotBusPolling(runtime, orchestrationCompatibilityEvidence, 'orchestration.check')
+          busPollMetered = true
+        }
         const db = runtime.getOrchestrationDb()
         const handle = params.terminal ?? 'unknown'
         const typeFilter = parseMessageTypes(params.types)
@@ -1900,6 +1906,12 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         // before the bare-handle branch below so a registered agent's mail never
         // falls through to the legacy-fenced path.
         if (callerAgentRow && !callerAgentRow.tombstoned_at && callerAgentRow.derived !== 1) {
+          // R223b: this branch has no waitForMessage to park on, so a `wait:true` call still
+          // returns immediately and must be metered as a bus-poll read (unless it already was
+          // above, or the caller supplied an ack form, which stays exempt regardless of `wait`).
+          if (!busPollMetered && !hasAckForm(params)) {
+            assertNotBusPolling(runtime, orchestrationCompatibilityEvidence, 'orchestration.check')
+          }
           // Safe: callerAgentRow is only ever set (above) when attestedForAgentCheck is truthy.
           const attestedProcessIncarnation = attestedForAgentCheck?.processIncarnation
           const address = callerAgentMailbox as string
@@ -2752,6 +2764,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
     name: 'orchestration.inbox',
     params: InboxParams,
     handler: (params, { runtime, orchestrationCompatibilityEvidence }) => {
+      assertNotBusPolling(runtime, orchestrationCompatibilityEvidence, 'orchestration.inbox')
       const db = runtime.getOrchestrationDb()
       // Why: stale/unknown handles return empty rather than error — historical rows survive handle deletion (design doc §3.3).
       // Why threadId routes through resolveThreadReplay (ruling 1): `--thread-id` used to call
