@@ -1464,8 +1464,10 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
           }
         }
         assertPeerMailboxMeter(runtime, accessProfile, authenticatedCallerFingerprint)
+        let busPollMetered = false
         if (isBusPollCheck(params)) {
           assertNotBusPolling(runtime, orchestrationCompatibilityEvidence, 'orchestration.check')
+          busPollMetered = true
         }
         const db = runtime.getOrchestrationDb()
         const handle = params.terminal ?? 'unknown'
@@ -1904,6 +1906,17 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         // before the bare-handle branch below so a registered agent's mail never
         // falls through to the legacy-fenced path.
         if (callerAgentRow && !callerAgentRow.tombstoned_at && callerAgentRow.derived !== 1) {
+          // R223b: this branch has no waitForMessage to park on, so a `wait:true` call still
+          // returns immediately and must be metered as a bus-poll read (unless it already was
+          // above, or the caller supplied an ack form, which stays exempt regardless of `wait`).
+          if (
+            !busPollMetered &&
+            params.ack === undefined &&
+            params.compatibilityAck === undefined &&
+            params.compatibilityQuestionAck === undefined
+          ) {
+            assertNotBusPolling(runtime, orchestrationCompatibilityEvidence, 'orchestration.check')
+          }
           // Safe: callerAgentRow is only ever set (above) when attestedForAgentCheck is truthy.
           const attestedProcessIncarnation = attestedForAgentCheck?.processIncarnation
           const address = callerAgentMailbox as string

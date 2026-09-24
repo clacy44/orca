@@ -5,13 +5,18 @@
 import { afterEach, describe, expect, it, vi, type MockInstance } from 'vitest'
 import { ORCHESTRATION_METHODS } from './orchestration'
 import { OrchestrationDb } from '../../orchestration/db'
+import type Database from '../../../sqlite/sync-database'
 import {
   OrcaRuntimeService,
   type OrchestrationCompatibilityCallerAuthority
 } from '../../orca-runtime'
 import type { RpcContext } from '../core'
 import { RpcDispatcher } from '../dispatcher'
-import { isBusPollCheck } from './orchestration-bus-poll-guard'
+import { BUS_POLL_LIMIT_PER_WINDOW, isBusPollCheck } from './orchestration-bus-poll-guard'
+
+function rawDb(db: OrchestrationDb): Database.Database {
+  return (db as unknown as { db: Database.Database }).db
+}
 
 const PANE_A = 'tabA:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const PANE_B = 'tabB:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
@@ -75,7 +80,7 @@ describe('bus-poll guard (R223b)', () => {
   }
 
   async function exhaust(evidence: unknown): Promise<void> {
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < BUS_POLL_LIMIT_PER_WINDOW; i++) {
       await call('orchestration.threads.get', { id: 'thr_missing' }, evidence)
     }
   }
@@ -184,7 +189,7 @@ describe('bus-poll guard (R223b)', () => {
       subjectKey: PANE_B,
       verb: 'bus_poll',
       windowMs: 60_000,
-      limit: 20
+      limit: BUS_POLL_LIMIT_PER_WINDOW
     })
     expect(bumps()).toBe(4)
     expect(audits()).toEqual([])
@@ -198,7 +203,12 @@ describe('bus-poll guard (R223b)', () => {
       call('orchestration.threads.get', { id: 'thr_missing' }, EVIDENCE_A)
     ).rejects.toMatchObject({
       code: 'polling_detected',
-      data: { effectsApplied: false, retryAfterMs: 60_000, limit: 20, windowMs: 60_000 }
+      data: {
+        effectsApplied: false,
+        retryAfterMs: 60_000,
+        limit: BUS_POLL_LIMIT_PER_WINDOW,
+        windowMs: 60_000
+      }
     })
     try {
       await call('orchestration.threads.get', { id: 'thr_missing' }, EVIDENCE_A)
@@ -221,23 +231,24 @@ describe('bus-poll guard (R223b)', () => {
         actorHostId: 'local',
         agentId: agentAId,
         outcome: 'polling_detected',
-        reasonCode: 'method=orchestration.threads.get limit=20 window_ms=60000'
+        reasonCode: `method=orchestration.threads.get limit=${BUS_POLL_LIMIT_PER_WINDOW} window_ms=60000`
       })
     ])
   })
 
   it('3: all verbs share one budget', async () => {
     setup()
-    for (let i = 0; i < 5; i++) {
+    const quarter = BUS_POLL_LIMIT_PER_WINDOW / 4
+    for (let i = 0; i < quarter; i++) {
       await call('orchestration.check', { terminal: 'term_b' }, EVIDENCE_B)
     }
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < quarter; i++) {
       await call('orchestration.inbox', {}, EVIDENCE_B)
     }
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < quarter; i++) {
       await call('orchestration.threads.list', {}, EVIDENCE_B)
     }
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < quarter; i++) {
       await call('orchestration.threads.get', { id: 'thr_missing' }, EVIDENCE_B)
     }
 
@@ -288,7 +299,7 @@ describe('bus-poll guard (R223b)', () => {
     ).rejects.toMatchObject({ data: { retryAfterMs: 1 } })
 
     vi.spyOn(Date, 'now').mockReturnValue(T0 + 60_000)
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < BUS_POLL_LIMIT_PER_WINDOW; i++) {
       await call('orchestration.threads.get', { id: 'thr_missing' }, EVIDENCE_A)
     }
     await expect(
@@ -319,14 +330,14 @@ describe('bus-poll guard (R223b)', () => {
     expect(first.messages).toHaveLength(1)
     expect(first.deliveryId).toBeTruthy()
 
-    for (let i = 0; i < 19; i++) {
+    for (let i = 0; i < BUS_POLL_LIMIT_PER_WINDOW - 1; i++) {
       await call('orchestration.threads.get', { id: 'thr_missing' }, EVIDENCE_B)
     }
 
     await expect(
       call('orchestration.check', { terminal: 'term_b' }, EVIDENCE_B)
     ).rejects.toMatchObject({ code: 'polling_detected' })
-    expect(bumps()).toBe(21)
+    expect(bumps()).toBe(BUS_POLL_LIMIT_PER_WINDOW + 1)
 
     const acked = (await call(
       'orchestration.check',
@@ -335,12 +346,15 @@ describe('bus-poll guard (R223b)', () => {
     )) as { messages: unknown[]; pendingBehind: number }
     expect(acked.messages).toHaveLength(0)
     expect(acked.pendingBehind).toBe(0)
-    expect(bumps()).toBe(21)
+    expect(bumps()).toBe(BUS_POLL_LIMIT_PER_WINDOW + 1)
 
-    vi.spyOn(Date, 'now').mockRestore()
-    vi.spyOn(runtime, 'waitForMessage').mockResolvedValue('timed_out')
-    await call('orchestration.check', { terminal: 'term_b', wait: true, timeoutMs: 1 }, EVIDENCE_B)
-    expect(bumps()).toBe(21)
+    // R223b: the agent-mailbox branch has no waitForMessage to park on, so `wait:true` no
+    // longer exempts a caller from the budget — it is counted and, over budget, refused.
+    const beforeWait = bumps()
+    await expect(
+      call('orchestration.check', { terminal: 'term_b', wait: true, timeoutMs: 1 }, EVIDENCE_B)
+    ).rejects.toMatchObject({ code: 'polling_detected' })
+    expect(bumps()).toBe(beforeWait + 1)
   })
 
   it('7: agents wait unaffected', async () => {
@@ -349,7 +363,7 @@ describe('bus-poll guard (R223b)', () => {
     await expect(
       call('orchestration.threads.get', { id: 'thr_missing' }, EVIDENCE_A)
     ).rejects.toMatchObject({ code: 'polling_detected' })
-    expect(bumps()).toBe(21)
+    expect(bumps()).toBe(BUS_POLL_LIMIT_PER_WINDOW + 1)
 
     const created = (await call(
       'orchestration.threads.create',
@@ -372,12 +386,12 @@ describe('bus-poll guard (R223b)', () => {
       EVIDENCE_A
     )) as { outcome: string }
     expect(waited.outcome).toBe('reply')
-    expect(bumps()).toBe(21)
+    expect(bumps()).toBe(BUS_POLL_LIMIT_PER_WINDOW + 1)
   })
 
   it('8: unattested callers never counted', async () => {
     setup()
-    for (let i = 0; i < 25; i++) {
+    for (let i = 0; i < BUS_POLL_LIMIT_PER_WINDOW + 5; i++) {
       await call('orchestration.inbox', {}, EVIDENCE_FORGED)
     }
     expect(bumps()).toBe(0)
@@ -391,7 +405,7 @@ describe('bus-poll guard (R223b)', () => {
   it('9: refusal reaches the wire', async () => {
     setup()
     const dispatcher = new RpcDispatcher({ runtime })
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < BUS_POLL_LIMIT_PER_WINDOW; i++) {
       const response = await dispatcher.dispatch({
         id: `r${i}`,
         authToken: 'test',
@@ -419,7 +433,7 @@ describe('bus-poll guard (R223b)', () => {
 
   it('10 (chair addition): orchestration.thread shares the budget', async () => {
     setup()
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < BUS_POLL_LIMIT_PER_WINDOW; i++) {
       await call('orchestration.thread', { id: 'thr_missing' }, EVIDENCE_A)
     }
     let error: unknown
@@ -431,7 +445,85 @@ describe('bus-poll guard (R223b)', () => {
     }
     expect(error).toMatchObject({ code: 'polling_detected' })
     expect(audits()[0]).toMatchObject({
-      reasonCode: 'method=orchestration.thread limit=20 window_ms=60000'
+      reasonCode: `method=orchestration.thread limit=${BUS_POLL_LIMIT_PER_WINDOW} window_ms=60000`
+    })
+  })
+
+  it('11: a refused threads.get leaves last_read_sequence unchanged', async () => {
+    setup()
+    const created = (await call(
+      'orchestration.threads.create',
+      { with: `agent:${agentBId}` },
+      EVIDENCE_A
+    )) as { thread: { id: string } }
+    const message = db.insertMessage({
+      from: `agent:${agentBId}`,
+      to: `agent:${agentAId}`,
+      subject: 're',
+      body: 'unread body',
+      threadId: created.thread.id
+    })
+    db.bumpThreadOnMessage(created.thread.id, message)
+
+    await exhaust(EVIDENCE_A)
+    const readLastReadSequence = () =>
+      (
+        rawDb(db)
+          .prepare(
+            'SELECT last_read_sequence FROM thread_participants WHERE thread_id = ? AND participant_key = ?'
+          )
+          .get(created.thread.id, agentAId) as { last_read_sequence: number }
+      ).last_read_sequence
+    const before = readLastReadSequence()
+
+    await expect(
+      call('orchestration.threads.get', { id: created.thread.id }, EVIDENCE_A)
+    ).rejects.toMatchObject({ code: 'polling_detected' })
+
+    expect(readLastReadSequence()).toBe(before)
+  })
+
+  it('12: a refused plain check mints no delivery row', async () => {
+    setup()
+    await call(
+      'orchestration.send',
+      { from: 'term_b', to: `agent:${agentAId}`, subject: 'x' },
+      EVIDENCE_B
+    )
+    await exhaust(EVIDENCE_A)
+    const countDeliveries = () =>
+      (
+        rawDb(db)
+          .prepare('SELECT COUNT(*) AS n FROM mailbox_deliveries WHERE mailbox_handle = ?')
+          .get(`agent:${agentAId}`) as { n: number }
+      ).n
+    const before = countDeliveries()
+
+    await expect(
+      call('orchestration.check', { terminal: 'term_a' }, EVIDENCE_A)
+    ).rejects.toMatchObject({ code: 'polling_detected' })
+
+    expect(countDeliveries()).toBe(before)
+  })
+
+  it('13: the audit row is asserted through the database', async () => {
+    setup()
+    await exhaust(EVIDENCE_A)
+    await expect(
+      call('orchestration.threads.get', { id: 'thr_missing' }, EVIDENCE_A)
+    ).rejects.toMatchObject({ code: 'polling_detected' })
+
+    const rows = rawDb(db)
+      .prepare(
+        `SELECT verb, outcome, actor_pane_key FROM agent_audit
+         WHERE verb = 'bus_poll' AND outcome = 'polling_detected' AND actor_pane_key = ?`
+      )
+      .all(PANE_A) as { verb: string; outcome: string; actor_pane_key: string }[]
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      verb: 'bus_poll',
+      outcome: 'polling_detected',
+      actor_pane_key: PANE_A
     })
   })
 })

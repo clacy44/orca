@@ -10,7 +10,7 @@ import { hostIdFor } from './agent-directory-rpc-view'
 import type { OrchestrationCompatibilityEvidence } from '../../../../shared/orchestration-compatibility-evidence'
 
 export const BUS_POLL_WINDOW_MS = 60_000
-export const BUS_POLL_LIMIT_PER_WINDOW = 20
+export const BUS_POLL_LIMIT_PER_WINDOW = 60
 export const POLLING_DETECTED_CODE = 'polling_detected'
 
 const BUS_POLL_RATE_VERB = 'bus_poll'
@@ -90,16 +90,16 @@ export function assertNotBusPolling(
   throw new OrchestrationError(
     POLLING_DETECTED_CODE,
     'polling detected; new mail is delivered to this pane when it is idle; use orca agents wait ' +
-      '(limit: 20 reads of orchestration check/inbox/thread and agents threads/thread per pane per 60s)',
+      `(limit: ${BUS_POLL_LIMIT_PER_WINDOW} reads of orchestration check/inbox/thread and agents threads/thread per pane per ${BUS_POLL_WINDOW_MS / 1000}s)`,
     {
       effectsApplied: false,
       retryAfterMs: rate.retryAfterMs,
       limit: BUS_POLL_LIMIT_PER_WINDOW,
       windowMs: BUS_POLL_WINDOW_MS,
       nextSteps: [
-        'stop the polling loop; new mail is typed into this pane when it goes idle',
+        'stop the polling loop; new mail is delivered to this pane when it is idle',
         'to block on one thread: orca agents wait --thread <thread-id>',
-        'to block on this mailbox: orca orchestration check --wait'
+        "run coordinators and workers: orca orchestration check --wait (a registered agent's own mailbox does not park; rely on the delivered mail or agents wait)"
       ]
     }
   )
