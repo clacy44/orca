@@ -2,7 +2,7 @@
 // array literal, one name per line — args.ts's data-as-string re-encoding of this list evaded
 // the max-lines cap on the CONTROL rather than meeting it by splitting the file (Gate 1/D-5).
 // Byte-identical to the prior BOOLEAN_FLAG_NAMES set — 56 names — asserted by the existing
-// flag-grammar test.
+// flag-grammar test, plus `hook`/`markdown` added for S10-22a chair succession (58 names).
 export const BOOLEAN_FLAG_NAMES = [
   'accept-legacy',
   'accept-unverified-platform',
@@ -24,6 +24,7 @@ export const BOOLEAN_FLAG_NAMES = [
   'force',
   'full',
   'help',
+  'hook',
   'inject',
   'include-archived',
   'include-quarantined',
@@ -33,6 +34,7 @@ export const BOOLEAN_FLAG_NAMES = [
   'leave',
   'lift',
   'local',
+  'markdown',
   'messages',
   'me',
   'mobile',

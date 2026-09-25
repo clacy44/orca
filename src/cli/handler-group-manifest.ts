@@ -29,6 +29,11 @@ export const HANDLER_GROUPS: readonly HandlerGroup[] = [
     load: async () => (await import('./handlers/chairs.js')).CHAIRS_HANDLERS
   },
   {
+    name: 'chairs-succession',
+    keys: ['chairs succeed', 'chairs succession-accept', 'chairs resume-context'],
+    load: async () => (await import('./handlers/chairs-succession.js')).CHAIRS_SUCCESSION_HANDLERS
+  },
+  {
     name: 'lane',
     keys: [
       'lane persons',
