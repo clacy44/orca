@@ -1,0 +1,220 @@
+// S10-22a WAVE 1 (b1-slice1-succession.md rule list; D-R215 §Protocol step 3 "checkpoint
+// re-read + sha + validated"): the checkpoint format's whole validation, in one pure function.
+// Order of checks below is deliberate (schema → structural line shapes → heading structure →
+// size → per-section blankness → secret shapes → unsupported claims) so that a fixture built to
+// red-prove one rule cannot accidentally trip an earlier one first; it is not itself part of the
+// contract (a checkpoint with two defects reports whichever this order reaches first).
+import { createHash } from 'node:crypto'
+import {
+  CHECKPOINT_SECTION_ORDER,
+  CHECKPOINT_SECTION_TITLES,
+  type CheckpointSections
+} from './chair-succession-types'
+
+export const CHECKPOINT_SCHEMA_LINE = 'schema: orca.chair-checkpoint/1'
+
+export type ChairCheckpointErrorCode =
+  | 'checkpoint_schema'
+  | 'checkpoint_sections'
+  | 'checkpoint_empty_section'
+  | 'checkpoint_fence_line'
+  | 'checkpoint_tag_line'
+  | 'checkpoint_too_large'
+  | 'checkpoint_secret_shape'
+  | 'checkpoint_unsupported_claim'
+
+export type ChairCheckpointError = {
+  code: ChairCheckpointErrorCode
+  reason: string
+  line?: number
+}
+
+export type ChairCheckpointResult =
+  | { ok: true; sections: CheckpointSections; sha256: string; bytes: number }
+  | { ok: false; error: ChairCheckpointError }
+
+const PER_SECTION_CAP_BYTES = 8 * 1024
+const TOTAL_CAP_BYTES = 32 * 1024
+
+const FENCE_LINE_RE = /^(```|~~~)/
+const TAG_LINE_RE = /^\s*<[A-Za-z!?/]/
+const OWNER_CLAIM_RE = /\bowner\b/i
+const OWNER_CLAIM_VERB_RE = /\b(approved|ratified|authorized|authorised)\b/i
+const MESSAGE_ID_RE = /\bmsg_[0-9a-f]{12}\b/
+
+// Credential shapes refused wherever they appear (rule 7): private-key PEM blocks, Anthropic and
+// GitHub token prefixes, AWS access-key ids, an orca pairing code, and any long bearer token.
+const SECRET_SHAPE_PATTERNS: RegExp[] = [
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
+  /sk-ant-/,
+  /ghp_[A-Za-z0-9]+/,
+  /AKIA[0-9A-Z]{12,}/,
+  /orca:\/\/pair\?code=/,
+  /Bearer\s+[A-Za-z0-9\-._~+/]{20,}/
+]
+
+function byteLength(text: string): number {
+  return Buffer.byteLength(text, 'utf8')
+}
+
+function fail(
+  code: ChairCheckpointErrorCode,
+  reason: string,
+  line?: number
+): ChairCheckpointResult {
+  return { ok: false, error: line === undefined ? { code, reason } : { code, reason, line } }
+}
+
+/** Rules 4 and 5: no fence-delimiter line and no tag-shaped line anywhere in the document — the
+ * checkpoint is embedded inside a fence when rendered, and must never smuggle a system tag. */
+function findLineShapeViolation(lines: string[]): ChairCheckpointResult | null {
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i]
+    if (FENCE_LINE_RE.test(line)) {
+      return fail('checkpoint_fence_line', 'a line begins with ``` or ~~~', i + 1)
+    }
+    if (TAG_LINE_RE.test(line)) {
+      return fail('checkpoint_tag_line', 'a line is shaped like a tag', i + 1)
+    }
+  }
+  return null
+}
+
+type HeadingIndex = { key: keyof CheckpointSections; lineIndex: number }
+
+/** Rule 2: exactly eight `## ` headings, in order, with the exact titles. Returns the located
+ * headings on success so the caller can slice section bodies from them. */
+function locateHeadings(lines: string[]): HeadingIndex[] | ChairCheckpointResult {
+  const found: { title: string; lineIndex: number }[] = []
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].startsWith('## ')) {
+      found.push({ title: lines[i].slice(3), lineIndex: i })
+    }
+  }
+  if (found.length !== CHECKPOINT_SECTION_ORDER.length) {
+    return fail(
+      'checkpoint_sections',
+      `expected exactly ${CHECKPOINT_SECTION_ORDER.length} "## " headings, found ${found.length}`
+    )
+  }
+  const headings: HeadingIndex[] = []
+  for (let i = 0; i < CHECKPOINT_SECTION_ORDER.length; i += 1) {
+    const key = CHECKPOINT_SECTION_ORDER[i]
+    const expectedTitle = CHECKPOINT_SECTION_TITLES[key]
+    const { title, lineIndex } = found[i]
+    if (title !== expectedTitle) {
+      return fail(
+        'checkpoint_sections',
+        `heading ${i + 1} must be "## ${expectedTitle}", found "## ${title}"`,
+        lineIndex + 1
+      )
+    }
+    headings.push({ key, lineIndex })
+  }
+  return headings
+}
+
+function sectionBody(lines: string[], headings: HeadingIndex[], index: number): string {
+  const start = headings[index].lineIndex + 1
+  const end = index + 1 < headings.length ? headings[index + 1].lineIndex : lines.length
+  return lines.slice(start, end).join('\n').trim()
+}
+
+function findSecretShape(text: string): RegExpMatchArray | null {
+  for (const pattern of SECRET_SHAPE_PATTERNS) {
+    const match = text.match(pattern)
+    if (match) {
+      return match
+    }
+  }
+  return null
+}
+
+/** Rule 8: an "Unsaved rulings" line claiming owner approval must cite a message id. */
+function findUnsupportedClaimLine(unsavedRulings: string): string | null {
+  if (unsavedRulings === 'none') {
+    return null
+  }
+  for (const line of unsavedRulings.split('\n')) {
+    if (OWNER_CLAIM_RE.test(line) && OWNER_CLAIM_VERB_RE.test(line) && !MESSAGE_ID_RE.test(line)) {
+      return line
+    }
+  }
+  return null
+}
+
+export function parseChairCheckpoint(text: string): ChairCheckpointResult {
+  const bytes = byteLength(text)
+  if (bytes > TOTAL_CAP_BYTES) {
+    return fail('checkpoint_too_large', `total size ${bytes} bytes exceeds ${TOTAL_CAP_BYTES}`)
+  }
+
+  const lines = text.split('\n')
+
+  const firstNonEmptyIndex = lines.findIndex((line) => line.trim().length > 0)
+  if (firstNonEmptyIndex === -1 || lines[firstNonEmptyIndex] !== CHECKPOINT_SCHEMA_LINE) {
+    return fail(
+      'checkpoint_schema',
+      `first non-empty line must be exactly "${CHECKPOINT_SCHEMA_LINE}"`,
+      firstNonEmptyIndex === -1 ? undefined : firstNonEmptyIndex + 1
+    )
+  }
+
+  const lineShapeViolation = findLineShapeViolation(lines)
+  if (lineShapeViolation) {
+    return lineShapeViolation
+  }
+
+  const headings = locateHeadings(lines)
+  if (!Array.isArray(headings)) {
+    return headings
+  }
+
+  const sections = {} as CheckpointSections
+  for (let i = 0; i < headings.length; i += 1) {
+    const key = headings[i].key
+    const body = sectionBody(lines, headings, i)
+    if (byteLength(body) > PER_SECTION_CAP_BYTES) {
+      return fail(
+        'checkpoint_too_large',
+        `section "${CHECKPOINT_SECTION_TITLES[key]}" exceeds ${PER_SECTION_CAP_BYTES} bytes`,
+        headings[i].lineIndex + 1
+      )
+    }
+    if (body.length === 0) {
+      return fail(
+        'checkpoint_empty_section',
+        `section "${CHECKPOINT_SECTION_TITLES[key]}" is blank (use "none")`,
+        headings[i].lineIndex + 1
+      )
+    }
+    sections[key] = body
+  }
+
+  const secretMatch = findSecretShape(text)
+  if (secretMatch) {
+    const lineIndex = lines.findIndex((line) => line.includes(secretMatch[0]))
+    return fail(
+      'checkpoint_secret_shape',
+      'the checkpoint contains a credential-shaped string',
+      lineIndex === -1 ? undefined : lineIndex + 1
+    )
+  }
+
+  const unsupportedClaimLine = findUnsupportedClaimLine(sections.unsavedRulings)
+  if (unsupportedClaimLine !== null) {
+    const lineIndex = lines.indexOf(unsupportedClaimLine)
+    return fail(
+      'checkpoint_unsupported_claim',
+      'a line in "Unsaved rulings" claims owner approval without citing a msg_ id',
+      lineIndex === -1 ? undefined : lineIndex + 1
+    )
+  }
+
+  return {
+    ok: true,
+    sections,
+    sha256: createHash('sha256').update(text, 'utf8').digest('hex'),
+    bytes
+  }
+}
