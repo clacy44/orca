@@ -31,12 +31,14 @@ function renderCharterBlock(input: ResumeContextInput): string {
 
 function renderRunBinding(input: ResumeContextInput): string {
   const { runBinding } = input
+  // [M7 residue] `generation` is dropped from the render: it's the seal-time launch
+  // generation, and the successor's own launch mints a NEW generation, so a rendered value
+  // is stale (and misleading, unlabeled) by the time this text is ever read.
   return [
     '## Run binding',
     `Chair: ${runBinding.chair}`,
     `Agent id: ${runBinding.agentId}`,
     `Run id: ${runBinding.runId}`,
-    `Generation: ${runBinding.generation}`,
     `Handle: ${runBinding.handle}`,
     `Lane: ${runBinding.lane}`,
     `Worktree: ${runBinding.worktree}`

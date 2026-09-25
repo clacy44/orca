@@ -56,7 +56,7 @@ export async function launchSuccessor(
       agent: 'claude',
       prompt: `orca chairs succession-accept ${meta.id}`,
       promptDelivery: 'auto-submit',
-      ...(entry.launchArgs ? { agentArgs: entry.launchArgs.join(' ') } : {}),
+      ...(entry.launchArgs ? { appendAgentArgs: entry.launchArgs.join(' ') } : {}),
       ...(model || effort
         ? {
             launchPreferences: {

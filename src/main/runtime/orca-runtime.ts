@@ -2108,6 +2108,16 @@ function isClientDisconnectedError(error: unknown): boolean {
   return error instanceof Error && error.message === 'client_disconnected'
 }
 
+/** Appends `extra` after `base` (host defaults first) instead of replacing them — chair
+ * restore/succession launches so the manifest's launchArgs layer onto host defaults. */
+function appendAgentArgs(base: string, extra: string | null | undefined): string {
+  const trimmedExtra = extra?.trim()
+  if (!trimmedExtra) {
+    return base
+  }
+  return base ? `${base} ${trimmedExtra}` : trimmedExtra
+}
+
 function createTerminalRevealWarning(handle: string, error?: unknown): string {
   const reason =
     error instanceof Error && error.message.trim().length > 0
@@ -28418,7 +28428,10 @@ export class OrcaRuntimeService {
       agent: request.agent,
       providerSession: identity.providerSession,
       cmdOverrides: laneScoped.cmdOverrides,
-      agentArgs: request.agentArgs !== undefined ? request.agentArgs : laneScoped.agentArgs,
+      agentArgs:
+        request.agentArgs !== undefined
+          ? request.agentArgs
+          : appendAgentArgs(laneScoped.agentArgs, request.appendAgentArgs),
       agentEnv: laneScoped.agentEnv,
       ompResumeFilePath: request.ompResumeFilePath,
       sessionOptions: this.toAgentSessionOptions(request.launchPreferences),
@@ -28602,7 +28615,10 @@ export class OrcaRuntimeService {
       const startupArgs = {
         agent: request.agent,
         cmdOverrides: laneScoped.cmdOverrides,
-        agentArgs: request.agentArgs !== undefined ? request.agentArgs : laneScoped.agentArgs,
+        agentArgs:
+          request.agentArgs !== undefined
+            ? request.agentArgs
+            : appendAgentArgs(laneScoped.agentArgs, request.appendAgentArgs),
         agentEnv: laneScoped.agentEnv,
         sessionOptions: this.toAgentSessionOptions(request.launchPreferences),
         platform,

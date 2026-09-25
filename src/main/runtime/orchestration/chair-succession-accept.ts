@@ -26,6 +26,7 @@ import type { ChairSuccessionDeps } from './chair-succession-execute'
 import { readManifestEntry } from './chair-succession-manifest-entry'
 import { getHoldRecord, settleHold } from './chair-succession-hold'
 import { refreshRetiredHandlesIndexSync } from './chair-succession-retired-index'
+import { purgeSuccessionsForChair } from './chair-succession-purge'
 import { writeManifestLastSessionId } from './chair-succession-manifest-session-write'
 import { enterConfirming } from './chair-succession-accept-confirm-lock'
 
@@ -228,6 +229,25 @@ export async function acceptSuccession(
   // Never actually reaches the incumbent (its pane is already closed) — released here only so
   // the held `succeed` Promise doesn't leak forever.
   settleHold(params.successionId, { ok: true, confirmed: true, successionId: params.successionId })
+
+  // [G1-10z Q8 repair] Best-effort post-confirm purge (bounded old succession dirs + retired
+  // handles for this chair) — a purge fault must never fail an already-confirmed succession.
+  try {
+    await purgeSuccessionsForChair(storeDepsFor(deps), chair)
+  } catch (err) {
+    deps.db.writeAgentAudit({
+      agentId: registration.agent.id,
+      actorPaneKey: params.callerPaneKey,
+      actorHostId: params.hostId,
+      verb: 'succession_confirm',
+      outcome: 'purge_failed',
+      reasonCode:
+        `succession=${params.successionId} ${err instanceof Error ? err.message : String(err)}`.slice(
+          0,
+          200
+        )
+    })
+  }
 
   // D-R219 (chair ruling, G1 repair M3): the "served" set is gone — accept ALWAYS returns the
   // resume context, regardless of whether the SessionStart hook already served it.

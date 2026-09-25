@@ -62,6 +62,15 @@ describe('S10-22a chair-resume-context: section order and END marker', () => {
     expect(lines.at(-1)).toBe(`END SUCCESSION CONTEXT ${'e'.repeat(64)}`)
   })
 
+  it('M7: does not render the seal-time launch generation (stale by the time this is read)', () => {
+    const result = renderResumeContext(baseInput())
+    expect(result.ok).toBe(true)
+    if (!result.ok) {
+      return
+    }
+    expect(result.text).not.toContain('Generation')
+  })
+
   it('includes the precedence statement naming the charter path and sha', () => {
     const result = renderResumeContext(baseInput())
     expect(result.ok).toBe(true)

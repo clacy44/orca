@@ -131,10 +131,15 @@ describe('orchestration RPC methods', () => {
     // orchestration.agents.quarantineRemote (orchestration-agents-quarantine-remote.ts, design
     // §4.7: the RPC/CLI caller for setLocalRemoteAgentQuarantine). S10-21d b4 adds
     // orchestration.chairs.restore/.status/.export (chairs-restore.ts, design-r105-r112 ITEM 2).
-    expect(registry.size).toBe(75)
+    // S10-22a wave 2b adds orchestration.chairs.succeed/.successionAccept/.resumeContext
+    // (chairs-succession.ts: the chair-succession CLI's three RPC methods).
+    expect(registry.size).toBe(78)
     expect(registry.has('orchestration.chairs.restore')).toBe(true)
     expect(registry.has('orchestration.chairs.status')).toBe(true)
     expect(registry.has('orchestration.chairs.export')).toBe(true)
+    expect(registry.has('orchestration.chairs.succeed')).toBe(true)
+    expect(registry.has('orchestration.chairs.successionAccept')).toBe(true)
+    expect(registry.has('orchestration.chairs.resumeContext')).toBe(true)
     expect(registry.has('orchestration.agents.quarantineRemote')).toBe(true)
     expect(registry.has('orchestration.federatedAsk')).toBe(true)
     expect(registry.has('orchestration.federatedSend')).toBe(true)

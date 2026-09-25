@@ -347,7 +347,7 @@ export async function requestChairRestore(
         providerSession: { key: 'session_id', id: request.sessionId },
         presentation: 'background',
         ...(request.launchArgs && request.launchArgs.length > 0
-          ? { agentArgs: request.launchArgs.join(' ') }
+          ? { appendAgentArgs: request.launchArgs.join(' ') }
           : {}),
         ...(request.model || request.effort
           ? {

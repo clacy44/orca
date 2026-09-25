@@ -643,7 +643,7 @@ describe('S10-22a WAVE 2: chair-succession-execute', () => {
           agent: 'claude',
           prompt: `orca chairs succession-accept ${sealedMeta.id}`,
           promptDelivery: 'auto-submit',
-          agentArgs: '--flag-a --flag-b',
+          appendAgentArgs: '--flag-a --flag-b',
           presentation: 'background',
           launchPreferences: { model: 'incumbent-model', effort: 'high' }
         })

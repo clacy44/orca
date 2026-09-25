@@ -99,7 +99,7 @@ describe('S10-22a Wave 2: chairs restore launches with manifest launchArgs', () 
       getSettings: () => ({
         disabledTuiAgents: [],
         agentCmdOverrides: {},
-        agentDefaultArgs: {},
+        agentDefaultArgs: { claude: 'X' },
         agentDefaultEnv: {}
       }),
       getWorkspaceSession: () => ({ tabsByWorktree: {} }),
@@ -163,5 +163,10 @@ describe('S10-22a Wave 2: chairs restore launches with manifest launchArgs', () 
     expect(seenCommands).toHaveLength(1)
     expect(seenCommands[0]).toContain('--autocompact')
     expect(seenCommands[0]).toContain('200000')
+    // [G1 L2] launchArgs APPEND after the host default args ('X'), never replace them.
+    const hostDefaultIndex = seenCommands[0].indexOf("'X'")
+    const autocompactIndex = seenCommands[0].indexOf('--autocompact')
+    expect(hostDefaultIndex).toBeGreaterThan(-1)
+    expect(autocompactIndex).toBeGreaterThan(hostDefaultIndex)
   })
 })

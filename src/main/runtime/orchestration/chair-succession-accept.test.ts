@@ -15,6 +15,7 @@ import {
   createSealed,
   transition,
   read,
+  retiredHandlesPath,
   type ChairSuccessionStoreDeps
 } from './chair-succession-store'
 import {
@@ -239,6 +240,49 @@ describe('S10-22a WAVE 2: chair-succession-accept', () => {
         pendingPeerQuestionThreadIds: [],
         pactTurnsHeld: 0
       })
+    })
+
+    it('Q8: a confirm triggers the post-confirm purge, trimming an over-cap retired-handles.json', async () => {
+      await writeManifest('chair-purge')
+      registerChair('chair-purge', PANE_A, HANDLE_A)
+      const runId = bindRunTo(PANE_A, HANDLE_A)
+      db.recordLaunch({
+        hostId,
+        paneKey: SUCCESSOR_PANE,
+        agentType: 'claude',
+        sessionId: 'sess-purge',
+        launchGeneration: runtime.getLaunchGenerationId(),
+        executionHostId: 'local',
+        evidence: 'host_launch'
+      })
+      const meta = await sealedLaunching('chair-purge', runId)
+      vi.spyOn(runtime, 'closeTerminal').mockResolvedValue({} as never)
+      vi.spyOn(runtime, 'waitForTerminal').mockResolvedValue({
+        handle: HANDLE_A,
+        condition: 'exit'
+      } as never)
+      const retiredPath = retiredHandlesPath({ orcaHome: tmp }, 'chair-purge')
+      await mkdir(join(tmp, 'chairs', 'chair-purge'), { recursive: true })
+      const overCap = Array.from({ length: 60 }, (_, i) => ({
+        handle: `stale-handle-${i}`,
+        succession: `stale-succession-${i}`,
+        at: new Date(0).toISOString()
+      }))
+      await writeFile(retiredPath, JSON.stringify(overCap, null, 2))
+      void holdSealRequest(deps, hostId, meta, undefined)
+
+      await acceptSuccession(deps, {
+        successionId: meta.id,
+        callerPaneKey: SUCCESSOR_PANE,
+        callerTerminalHandle: SUCCESSOR_HANDLE,
+        callerSessionId: 'sess-purge',
+        hostId
+      })
+
+      const retired = JSON.parse(await readFile(retiredPath, 'utf8'))
+      // 60 seeded + 1 appended by accept = 61, purged down to the 50-entry cap.
+      expect(retired.length).toBe(50)
+      expect(retired.at(-1)).toMatchObject({ handle: HANDLE_A, succession: meta.id })
     })
 
     it('chair review fix #3: takeover failure after the incumbent is closed aborts the record and leaves the successor pane open', async () => {
