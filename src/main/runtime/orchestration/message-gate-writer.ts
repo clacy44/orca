@@ -22,7 +22,6 @@ import {
 } from '../../../shared/message-text'
 import { ORCHESTRATION_LEGACY_RUN_ID } from '../../../shared/orchestration-rpc-contract'
 import { getAgentByPaneKey } from './derived-agent-rows'
-import { getAgentByName } from './agent-directory'
 import { retiredHandleChair } from './chair-succession-retired-index'
 import type { MessageDeliveryContract, MessagePriority, MessageRow, MessageType } from './types'
 
@@ -273,19 +272,32 @@ export function insertGatedMessage(
     })
   }
 
-  // [S10-22a Wave 2 contract, D-R215 §Protocol step 6 A3] A `to` matching a retired handle of any
-  // chair is rewritten to `agent:<that chair's agent id>` before insertion — the successor holds
-  // the same agent id (dead-pane takeover), so this is a lookup by chair NAME, resolved to its
-  // CURRENT agent id at insert time (never a stale id cached alongside the retired handle).
-  // [DEVIATION, see RETURN] host is `senderHostId` (default 'local') — slice 1 is single-host
-  // local chairs (D-R215's own residual (3)); there is no per-recipient host on this call.
-  const retiredChair = retiredHandleChair(params.to)
-  const toHandle = retiredChair
-    ? (() => {
-        const agent = getAgentByName(db, senderHostId, retiredChair)
-        return agent ? `agent:${agent.id}` : params.to
-      })()
-    : params.to
+  // [S10-22a Wave 2 contract, D-R215 §Protocol step 6 A3; G1-10z B7 repair] The retired-handle ->
+  // agent:<id> rewrite now happens in the RPC layer's address-resolution block (orchestration.ts,
+  // beside A1/F-5b), for send/reply/peer-question, BEFORE the C4 attested-sender checks and the
+  // wake — this choke ran too late (post-attestation, post-wake-key-selection) to do it safely.
+  // What's left here is a refuse-if-unattested BACKSTOP: any caller reaching this choke with a
+  // `to` that STILL names a retired handle got here through a path that skipped address
+  // resolution (unattested/legacy) — refuse rather than silently rewrite (a silent rewrite here
+  // is exactly the bypass this repair closes), one more layer than trusting every call site.
+  if (retiredHandleChair(params.to) !== undefined && !params.senderPaneKey) {
+    const refusalId = writeGateRefusal(db, {
+      actorAgentId: senderAgentId,
+      actorPaneKey: params.senderPaneKey ?? null,
+      actorHostId: null,
+      verb,
+      ruleIds: ['retired_handle_unattested'],
+      acknowledged: false,
+      subject: sanitizedSubject,
+      body: sanitizedBody
+    })
+    return {
+      outcome: 'refused',
+      verdict: { tier: 'hard', ruleIds: ['retired_handle_unattested'] },
+      refusalId
+    }
+  }
+  const toHandle = params.to
 
   const id = params.id ?? generateMessageId()
   db.prepare(

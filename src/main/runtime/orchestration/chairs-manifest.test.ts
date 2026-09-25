@@ -109,4 +109,28 @@ describe('parseChairsManifest', () => {
       }).ok
     ).toBe(false)
   })
+
+  // [G1-10z L2 repair] launchArgs is typed into an interactive shell — \n/\r alone left every
+  // other C0 control, DEL and every C1 control unrefused.
+  it('refuses launchArgs elements carrying C0 (non-tab), DEL, or C1 control characters', () => {
+    const controlChars = ['\x00', '\x03', '\x1b', '\x7f', '\x80', '\x9f']
+    for (const ch of controlChars) {
+      expect(
+        parseChairsManifest({
+          version: 1,
+          chairs: [baseEntry({ launchArgs: ['ok', `bad${ch}arg`] })]
+        }).ok,
+        `expected refusal for control char 0x${ch.charCodeAt(0).toString(16)}`
+      ).toBe(false)
+    }
+  })
+
+  it('accepts a launchArgs element containing a tab (a legitimate argv-element separator)', () => {
+    expect(
+      parseChairsManifest({
+        version: 1,
+        chairs: [baseEntry({ launchArgs: ['ok', 'has\ttab'] })]
+      }).ok
+    ).toBe(true)
+  })
 })

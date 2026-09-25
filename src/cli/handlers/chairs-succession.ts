@@ -227,21 +227,31 @@ export const CHAIRS_SUCCESSION_HANDLERS: Record<string, CommandHandler> = {
       // Why unused beyond parsing: see readHookStdinAudit's comment — nothing here forwards
       // into the RPC call, which never leaves this file with more than `hook: true`.
       await readHookStdinAudit()
-    }
-    // Why no `successionId` param: the CLI surface (`orca chairs resume-context
-    // [--json|--markdown|--hook]`) names no id flag — the runtime resolves the record from the
-    // caller's own pane, in hook mode and otherwise alike.
-    const response = await client.call<ResumeContextResult>('orchestration.chairs.resumeContext', {
-      hook: hook ? true : undefined
-    })
-    if (hook) {
-      if (response.result.ok) {
-        console.log(response.result.text)
+      // [G1-10z B1 repair] `succession_none` (no record for this pane) resolves to `{ok: false}`
+      // and is handled below — but an RPC REFUSAL (no_pane_identity, no_registered_identity, a
+      // transport error, anything else) THROWS, and previously nothing here caught it: an
+      // uncaught throw exits this process non-zero, which breaks Claude Code's SessionStart hook
+      // contract (a non-zero hook can block/annotate the whole session boot) — a hook must never
+      // fail loudly for a condition the caller (Claude Code, not the chair) cannot act on.
+      try {
+        const response = await client.call<ResumeContextResult>(
+          'orchestration.chairs.resumeContext',
+          { hook: true }
+        )
+        if (response.result.ok) {
+          console.log(response.result.text)
+        }
+      } catch {
+        // Swallowed deliberately — see comment above. Nothing printed, exit 0 either way.
       }
-      // Why nothing printed, exit 0 either way: `succession_none` means no record for this
-      // pane — a SessionStart hook must never fail or spam Claude Code's session boot.
       return
     }
+    // Why no `successionId` param: the CLI surface (`orca chairs resume-context
+    // [--json|--markdown]`) names no id flag — the runtime resolves the record from the
+    // caller's own pane.
+    const response = await client.call<ResumeContextResult>('orchestration.chairs.resumeContext', {
+      hook: undefined
+    })
     if (json) {
       console.log(JSON.stringify(response.result, null, 2))
       return

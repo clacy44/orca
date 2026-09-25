@@ -123,6 +123,25 @@ function validateSuccession(raw: unknown, index: number): string | null {
   return null
 }
 
+// [G1-10z L2 repair] launchArgs is typed into an interactive shell (local-pty-shell-ready.ts) —
+// \n/\r alone (the pre-repair check) left every OTHER C0 control (e.g. code 3 = SIGINT, code 27
+// = ESC for a terminal-escape injection), DEL (code 127) and every C1 control (128-159)
+// unrefused. C0 (minus tab, code 9 — a legitimate argv-element separator a shell tokenizer may
+// reintroduce) + DEL + C1. A char-code scan, not a regex literal, so the control-character ranges
+// below never trip a "control characters in a regex" lint rule this dispatch cannot disable.
+function hasForbiddenLaunchArgControlChar(value: string): boolean {
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i)
+    const isC0NonTab = code <= 0x1f && code !== 0x09
+    const isDel = code === 0x7f
+    const isC1 = code >= 0x80 && code <= 0x9f
+    if (isC0NonTab || isDel || isC1) {
+      return true
+    }
+  }
+  return false
+}
+
 function validateLaunchArgs(raw: unknown, index: number): string | null {
   if (!Array.isArray(raw)) {
     return `chairs[${index}].launchArgs must be an array of strings`
@@ -132,8 +151,8 @@ function validateLaunchArgs(raw: unknown, index: number): string | null {
     if (typeof element !== 'string') {
       return `chairs[${index}].launchArgs[${i}] must be a string`
     }
-    if (element.includes('\n') || element.includes('\r')) {
-      return `chairs[${index}].launchArgs[${i}] must not contain a newline`
+    if (hasForbiddenLaunchArgControlChar(element)) {
+      return `chairs[${index}].launchArgs[${i}] must not contain a C0/C1 control character or DEL`
     }
   }
   return null

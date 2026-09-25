@@ -187,8 +187,7 @@ import {
   type RestoreSweepSummary
 } from './startup/restore-registered-agent-panes'
 import { acquireRestoreSweepLock, releaseRestoreSweepLock } from './runtime/restore-sweep-lock'
-import { scanSuccessionsAtStartup } from './runtime/orchestration/chair-succession-startup-scan'
-import { loadRetiredHandlesIndexSync } from './runtime/orchestration/chair-succession-retired-index'
+import { runChairSuccessionStartupHook } from './startup/chair-succession-startup-hook'
 import { resolveResumeTranscript } from './startup/resolve-resume-transcript'
 import { createWslCliReconciliationStartupBarrier } from './startup/wsl-cli-reconciliation-startup-barrier'
 import { getDevInstanceIdentity } from './startup/dev-instance-identity'
@@ -1126,6 +1125,7 @@ function logRestoreSweepDeferrals(summary: RestoreSweepSummary): void {
 }
 
 async function runStartupRestoreSweep(runtimeService: OrcaRuntimeService): Promise<void> {
+  await runChairSuccessionStartupHook(runtimeService)
   try {
     // [S10-21a C7k, Ruling 34 Addendum 28, item 10] The desktop path captures the self-resume
     // watermark right after acquiring the sweep lock; the serve path never did. `onLockAcquired`
@@ -1148,23 +1148,13 @@ async function runStartupRestoreSweep(runtimeService: OrcaRuntimeService): Promi
 // [S10-21a C7b, D-R110 B2] The desktop path's own lock spans opening the window and awaiting
 // the startup barriers (see the call site) — this runs the sweep's BODY only, no acquire/release.
 async function runStartupRestoreSweepBody(runtimeService: OrcaRuntimeService): Promise<void> {
+  await runChairSuccessionStartupHook(runtimeService)
   try {
     const summary = await runRestoreSweepBody(buildRestoreSweepDeps(runtimeService))
     logStartupMilestone('restore-sweep-done', summary)
     logRestoreSweepDeferrals(summary)
   } catch (error) {
     console.error('[restore-sweep] HARNESS: the startup restore sweep threw:', error)
-  }
-  // [S10-22a Wave 2 contract, "Startup scan (A10)"] Thin call site beside the ordinary pane
-  // restore sweep above — never launches anything (see chair-succession-startup-scan.ts). The
-  // retired-handle mail-rewrite index (Mail A3) is loaded from the same `<ORCA_HOME>/chairs/`
-  // tree in the same place.
-  try {
-    const orcaHome = join(os.homedir(), '.orca')
-    loadRetiredHandlesIndexSync(orcaHome)
-    await scanSuccessionsAtStartup({ runtime: runtimeService, orcaHome })
-  } catch (error) {
-    console.error('[chair-succession] HARNESS: the startup succession scan threw:', error)
   }
 }
 

@@ -390,6 +390,33 @@ describe('chairs-succession handlers', () => {
       expect(process.exitCode).toBe(0)
     })
 
+    // [G1-10z B1 repair] Before this fix, an RPC refusal (no_pane_identity,
+    // no_registered_identity, a transport error, etc.) inside the `--hook` branch was never
+    // caught — the handler rejected, which a SessionStart hook must never do (a non-zero hook
+    // can block/annotate Claude Code's whole session boot).
+    it('--hook swallows an RPC refusal (e.g. no_registered_identity), prints nothing, resolves, and exits 0', async () => {
+      const stdin = mockStdin([])
+      const call = vi
+        .fn()
+        .mockRejectedValue(new RuntimeClientError('no_registered_identity', 'nope'))
+
+      try {
+        await expect(
+          CHAIRS_SUCCESSION_HANDLERS['chairs resume-context']({
+            flags: new Map<string, string | boolean>([['hook', true]]),
+            client: { call },
+            cwd: '/tmp',
+            json: false
+          } as never)
+        ).resolves.toBeUndefined()
+      } finally {
+        stdin.restore()
+      }
+
+      expect(logSpy).not.toHaveBeenCalled()
+      expect(process.exitCode).toBe(0)
+    })
+
     it('rejects passing more than one of --json/--markdown/--hook', async () => {
       const call = vi.fn()
 

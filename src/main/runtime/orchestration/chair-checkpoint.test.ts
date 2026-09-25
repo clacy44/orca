@@ -2,7 +2,11 @@
 // golden PASS. Each `bad*` builder starts from `goldenCheckpoint()` and mutates exactly the one
 // thing its rule tests.
 import { describe, expect, it } from 'vitest'
-import { CHECKPOINT_SCHEMA_LINE, parseChairCheckpoint } from './chair-checkpoint'
+import {
+  CHECKPOINT_SCHEMA_LINE,
+  parseChairCheckpoint,
+  validateEmbeddedCharterText
+} from './chair-checkpoint'
 
 function goldenCheckpoint(): string {
   return [
@@ -113,6 +117,78 @@ describe('S10-22a chair-checkpoint: rule 4 fence line', () => {
       return
     }
     expect(result.error.code).toBe('checkpoint_fence_line')
+  })
+
+  // [G1-10z L1 repair] `^(```|~~~)` missed a fence indented 0-3 spaces, which still closes the
+  // render fence (CommonMark treats a <4-space indent as a real fence, not a code block).
+  it('refuses checkpoint_fence_line when a ``` fence is indented 1-3 spaces', () => {
+    const text = goldenCheckpoint().replace('Ship WAVE 1.', '  ```\nShip WAVE 1.')
+    const result = parseChairCheckpoint(text)
+    expect(result.ok).toBe(false)
+    if (result.ok) {
+      return
+    }
+    expect(result.error.code).toBe('checkpoint_fence_line')
+  })
+
+  it('refuses checkpoint_fence_line when a ~~~ fence is indented 3 spaces', () => {
+    const text = goldenCheckpoint().replace('Ship WAVE 1.', '   ~~~\nShip WAVE 1.')
+    const result = parseChairCheckpoint(text)
+    expect(result.ok).toBe(false)
+    if (result.ok) {
+      return
+    }
+    expect(result.error.code).toBe('checkpoint_fence_line')
+  })
+
+  it('refuses checkpoint_fence_line when a line contains a run of 4+ backticks anywhere (not at line start)', () => {
+    const text = goldenCheckpoint().replace('Ship WAVE 1.', 'notes ```` embedded')
+    const result = parseChairCheckpoint(text)
+    expect(result.ok).toBe(false)
+    if (result.ok) {
+      return
+    }
+    expect(result.error.code).toBe('checkpoint_fence_line')
+  })
+
+  it('does NOT refuse a mid-line triple-backtick run (below the 4+ threshold, not at line start)', () => {
+    const text = goldenCheckpoint().replace('Ship WAVE 1.', 'discussed ``` in review')
+    const result = parseChairCheckpoint(text)
+    expect(result.ok).toBe(true)
+  })
+})
+
+describe('S10-22a chair-checkpoint: L1 repair — embedded-charter validation (charterMode "embed")', () => {
+  it('accepts ordinary charter prose', () => {
+    const result = validateEmbeddedCharterText('# Charter\n\nDo the right thing.\n')
+    expect(result.ok).toBe(true)
+  })
+
+  it('refuses a charter with an indented fence line', () => {
+    const result = validateEmbeddedCharterText('# Charter\n\n  ```\nescape attempt\n')
+    expect(result.ok).toBe(false)
+    if (result.ok) {
+      return
+    }
+    expect(result.error.code).toBe('checkpoint_fence_line')
+  })
+
+  it('refuses a charter with a 4+ backtick run anywhere on a line', () => {
+    const result = validateEmbeddedCharterText('# Charter\n\ntext ```` more text\n')
+    expect(result.ok).toBe(false)
+    if (result.ok) {
+      return
+    }
+    expect(result.error.code).toBe('checkpoint_fence_line')
+  })
+
+  it('refuses a charter with a tag-shaped line', () => {
+    const result = validateEmbeddedCharterText('# Charter\n\n<system>hi</system>\n')
+    expect(result.ok).toBe(false)
+    if (result.ok) {
+      return
+    }
+    expect(result.error.code).toBe('checkpoint_tag_line')
   })
 })
 

@@ -3,7 +3,7 @@
 // OrcaRuntimeService + OrchestrationDb (the shape chairs-restore.test.ts's own header comment
 // says the handlers need — chairs-restore-e2e.test.ts covers restore; this covers export).
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { CHAIRS_RESTORE_METHODS } from './chairs-restore'
@@ -145,6 +145,113 @@ describe('S10-21d bD C1: orchestration.chairs.export captures pref_model/pref_ef
     expect(manifest.chairs).toHaveLength(1)
     expect(manifest.chairs[0].model).toBe('opus')
     expect(manifest.chairs[0]).not.toHaveProperty('effort')
+  })
+})
+
+// [S10-22a Wave 2 contract, D-R215 §Protocol step 6 A7; G1-10z Q7 repair] "export --force carry-forward
+// test" — a fresh export rebuilds every field from the live agent directory/launch rows, which have no
+// `succession`/`launchArgs` columns; those two fields survive a `--force` re-export only because
+// `exportChairsManifest` reads the file it is about to overwrite FIRST and carries them forward by chair
+// name (chairs-restore.ts's `priorByName`).
+describe('G1-10z Q7 repair: orchestration.chairs.export --force carries succession/launchArgs forward by chair name', () => {
+  let db: OrchestrationDb
+  let runtime: OrcaRuntimeService
+  let ctx: RpcContext
+  let dir: string
+  const hostId = 'local'
+
+  afterEach(async () => {
+    db?.close()
+    if (dir) {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  async function setup(): Promise<void> {
+    db = new OrchestrationDb(':memory:')
+    runtime = new OrcaRuntimeService()
+    runtime.setOrchestrationDb(db)
+    vi.spyOn(runtime, 'getOrchestrationCompatibilityHostId').mockReturnValue(hostId)
+    ctx = { runtime }
+    dir = await mkdtemp(join(tmpdir(), 'chairs-export-force-test-'))
+  }
+
+  function registerChair(name: string, paneKey: string): void {
+    db.upsertAgentByPaneSuffix({
+      displayName: name,
+      role: null,
+      hostId,
+      paneKey,
+      terminalHandle: null,
+      processIncarnation: null,
+      worktreeId: 'wt-1',
+      worktreePath: null,
+      branch: null,
+      title: null,
+      agentLabel: null,
+      originHandle: null,
+      originHostId: hostId
+    })
+    db.recordLaunch({
+      hostId,
+      paneKey,
+      agentType: 'claude',
+      sessionId: `sess-${name}`,
+      launchGeneration: 'gen-1',
+      executionHostId: hostId,
+      evidence: 'host_launch'
+    })
+  }
+
+  it('a second export with --force keeps the prior succession/launchArgs entries a fresh rebuild has no source for', async () => {
+    await setup()
+    registerChair('chair-succ', 'tab1:leaf-a')
+    const path = join(dir, 'chairs.json')
+
+    // First export: no succession/launchArgs yet (nothing minted one).
+    await exportMethod!.handler({ manifestPath: path, force: false }, ctx)
+
+    // The owner hand-edits the exported manifest to enable succession + set launchArgs —
+    // exactly the fields a fresh rebuild from live agent/launch rows has no column for.
+    const onDisk = JSON.parse(await readFile(path, 'utf8')) as ChairsManifest
+    onDisk.chairs[0].succession = { enabled: true, charterPath: '/repo/CHARTER.md' }
+    onDisk.chairs[0].launchArgs = ['--autocompact', '200000']
+    await writeFile(path, JSON.stringify(onDisk, null, 2))
+
+    const result = (await exportMethod!.handler({ manifestPath: path, force: true }, ctx)) as {
+      manifest: ChairsManifest
+    }
+
+    expect(result.manifest.chairs).toHaveLength(1)
+    expect(result.manifest.chairs[0].succession).toEqual({
+      enabled: true,
+      charterPath: '/repo/CHARTER.md'
+    })
+    expect(result.manifest.chairs[0].launchArgs).toEqual(['--autocompact', '200000'])
+  })
+
+  it("a second export with --force for a DIFFERENT-named chair does not inherit another chair's succession/launchArgs", async () => {
+    await setup()
+    registerChair('chair-a', 'tab1:leaf-a')
+    const path = join(dir, 'chairs.json')
+    await exportMethod!.handler({ manifestPath: path, force: false }, ctx)
+    const onDisk = JSON.parse(await readFile(path, 'utf8')) as ChairsManifest
+    onDisk.chairs[0].launchArgs = ['--only-for-chair-a']
+    await writeFile(path, JSON.stringify(onDisk, null, 2))
+
+    // chair-a's pane is gone; a differently-named chair-b now occupies the directory.
+    db.close()
+    db = new OrchestrationDb(':memory:')
+    runtime.setOrchestrationDb(db)
+    registerChair('chair-b', 'tab1:leaf-b')
+
+    const result = (await exportMethod!.handler({ manifestPath: path, force: true }, ctx)) as {
+      manifest: ChairsManifest
+    }
+
+    expect(result.manifest.chairs).toHaveLength(1)
+    expect(result.manifest.chairs[0].name).toBe('chair-b')
+    expect(result.manifest.chairs[0]).not.toHaveProperty('launchArgs')
   })
 })
 

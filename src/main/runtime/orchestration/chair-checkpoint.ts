@@ -33,10 +33,25 @@ export type ChairCheckpointResult =
   | { ok: true; sections: CheckpointSections; sha256: string; bytes: number }
   | { ok: false; error: ChairCheckpointError }
 
+export type EmbeddedCharterValidationResult =
+  | { ok: true }
+  | { ok: false; error: ChairCheckpointError }
+
 const PER_SECTION_CAP_BYTES = 8 * 1024
 const TOTAL_CAP_BYTES = 32 * 1024
 
-const FENCE_LINE_RE = /^(```|~~~)/
+// [G1-10z L1 repair] `^(```|~~~)` missed a fence indented 0-3 spaces — Markdown itself still
+// treats an indented (<4 spaces) fence delimiter as a real fence, and the render this checkpoint
+// is embedded in wraps the whole document in a 3-backtick (or matching) fence, so an indented
+// fence line inside the checkpoint still closes it early. `\s*` covers any leading whitespace,
+// not just up to 3 spaces — 4+ spaces of indent makes it a code block in CommonMark, never a
+// fence, but refusing it too is strictly safer and costs nothing real checkpoints need.
+const FENCE_LINE_RE = /^\s*(```|~~~)/
+// A run of 4+ backticks ANYWHERE in a line (not just at line start) still closes this
+// checkpoint's own render fence, which uses backticks — `~~~` fences are unaffected by a
+// backtick run, so only backticks are checked here; the FENCE_LINE_RE above already catches an
+// indented ~~~ line-start fence.
+const BACKTICK_RUN_RE = /`{4,}/
 const TAG_LINE_RE = /^\s*<[A-Za-z!?/]/
 const OWNER_CLAIM_RE = /\bowner\b/i
 const OWNER_CLAIM_VERB_RE = /\b(approved|ratified|authorized|authorised)\b/i
@@ -65,19 +80,35 @@ function fail(
   return { ok: false, error: line === undefined ? { code, reason } : { code, reason, line } }
 }
 
-/** Rules 4 and 5: no fence-delimiter line and no tag-shaped line anywhere in the document — the
- * checkpoint is embedded inside a fence when rendered, and must never smuggle a system tag. */
+/** Rules 4 and 5: no fence-delimiter line (at any indent) and no tag-shaped line anywhere in the
+ * document, and no run of 4+ backticks anywhere on a line — the checkpoint is embedded inside a
+ * fence when rendered, and must never smuggle a system tag or close that fence early. */
 function findLineShapeViolation(lines: string[]): ChairCheckpointResult | null {
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i]
     if (FENCE_LINE_RE.test(line)) {
-      return fail('checkpoint_fence_line', 'a line begins with ``` or ~~~', i + 1)
+      return fail('checkpoint_fence_line', 'a line begins with ``` or ~~~ (any indent)', i + 1)
+    }
+    if (BACKTICK_RUN_RE.test(line)) {
+      return fail('checkpoint_fence_line', 'a line contains a run of 4 or more backticks', i + 1)
     }
     if (TAG_LINE_RE.test(line)) {
       return fail('checkpoint_tag_line', 'a line is shaped like a tag', i + 1)
     }
   }
   return null
+}
+
+/** [G1-10z L1 repair] The embedded charter (charterMode === 'embed') is rendered into the SAME
+ * fenced resume context the checkpoint is, so it must be refused by the same fence/backtick-run
+ * rules — before this repair, only the checkpoint was ever checked; an embedded charter with a
+ * closing fence or a 4+ backtick run could break out of the render exactly the same way. Not the
+ * full `parseChairCheckpoint` contract (no schema line, no `## ` sections, no secret/claim
+ * scan) — a charter is prose, not a checkpoint. */
+export function validateEmbeddedCharterText(text: string): EmbeddedCharterValidationResult {
+  const lines = text.split('\n')
+  const violation = findLineShapeViolation(lines)
+  return violation && !violation.ok ? violation : { ok: true }
 }
 
 type HeadingIndex = { key: keyof CheckpointSections; lineIndex: number }
