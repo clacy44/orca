@@ -331,6 +331,28 @@ describe('hardenSecurePath', () => {
     expect(getPowerShellCalls().map(getPowerShellTarget)).not.toContain(targetPath)
   })
 
+  // G1 repair (item 6, F7 coverage gap): F7's own unit test (secure-path-windows-read-throttle.test.ts)
+  // only calls markWindowsFileHardened directly, so removing the seeding call from
+  // writeSecureFile itself left 26/26 green. Exercise the real integration: after a write, the
+  // very next read must spawn NOTHING (this fails red if that seeding call is deleted).
+  it('F7: the read immediately after a write spawns no PowerShell for the file (seeded by the write)', () => {
+    Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' })
+    const userDataPath = mkdtempSync(join(tmpdir(), 'orca-secure-file-'))
+    tempDirs.push(userDataPath)
+    const targetPath = join(userDataPath, 'secret.json')
+
+    writeSecureFile(targetPath, 'contents')
+    const powerShellCallsAfterWrite = getPowerShellCalls().length + getSyncPowerShellCalls().length
+
+    hardenExistingSecureFile(targetPath)
+
+    // No new call (async or sync) targeting the file: the write-path seed already marked it
+    // hardened, so the read path's hardenWindowsFileOnce must be a pure cache hit.
+    expect(getPowerShellCalls().length + getSyncPowerShellCalls().length).toBe(
+      powerShellCallsAfterWrite
+    )
+  })
+
   // Nit #1 (review): the synchronous file path must cache as hardened ONLY on confirmed
   // success, so a failed ACL apply is retried on the next write instead of being silently
   // trusted.

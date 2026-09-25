@@ -2966,11 +2966,13 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         // B3: one FRESH scan at this decision's resolve edge — isTerminalRunningAgent above can
         // fall back to a cached foreground read (orca-runtime.ts getForegroundProcess), so a pane
         // whose agent already exited to a bare shell must be re-proven here, not per poll.
-        const stillAgent = await runtime.isPeerPaneForegroundAgentLive(to)
-        if (!stillAgent) {
+        // S10-20 three-valued rule: 'not_agent' is a proof and refuses; 'unknown' (no confirm
+        // support, e.g. SSH, or a wrapper mid-resolve) keeps isTerminalRunningAgent's verdict above.
+        const freshConfirmation = await runtime.confirmDispatchInjectForegroundIsAgent(to)
+        if (freshConfirmation === 'not_agent') {
           throw new Error(
-            `Cannot dispatch --inject to terminal ${to}: the foreground process is no longer a ` +
-              'recognized agent (a fresh scan found a bare shell or unconfirmed state). ' +
+            `Cannot dispatch --inject to terminal ${to}: a fresh scan found the foreground ` +
+              'process is no longer a recognized agent (it exited to a bare shell). ' +
               'Dispatch without --inject and send the prompt manually.'
           )
         }

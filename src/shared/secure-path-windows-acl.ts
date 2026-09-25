@@ -23,9 +23,25 @@ function assertValidDirectoryFlag(flag: string): void {
   }
 }
 
+// G1 repair (item 5): directories always take the rebuild branch (never verify-first) and
+// Set-Acl propagates recursively to the whole tree, so they need more time than a single file.
+const WINDOWS_RESTRICT_ACL_FILE_TIMEOUT_MS = 5000
+const WINDOWS_RESTRICT_ACL_DIRECTORY_TIMEOUT_MS = 20000
+
+function windowsRestrictAclTimeoutMs(isDirectory: boolean): number {
+  return isDirectory
+    ? WINDOWS_RESTRICT_ACL_DIRECTORY_TIMEOUT_MS
+    : WINDOWS_RESTRICT_ACL_FILE_TIMEOUT_MS
+}
+
+// G1 repair (item 4): PowerShell's single-quoted-string grammar also treats the Unicode
+// "smart quote" single-quote variants (U+2018-U+201B) as terminators (about_Quoting_Rules) —
+// only U+0027 was doubled before, so a userData path containing one of them broke the literal.
+const POWERSHELL_SINGLE_QUOTE_LIKE = /['‘’‚‛]/g
+
 /** Escapes a value for embedding inside a PowerShell single-quoted string literal. */
 function escapePowerShellSingleQuotedLiteral(value: string): string {
-  return value.replace(/'/g, "''")
+  return value.replace(POWERSHELL_SINGLE_QUOTE_LIKE, '$&$&')
 }
 
 function buildWindowsRestrictAclArgs(
@@ -72,7 +88,7 @@ export function bestEffortRestrictWindowsPath(
       args,
       {
         windowsHide: true,
-        timeout: 5000
+        timeout: windowsRestrictAclTimeoutMs(isDirectory)
       },
       (error) => {
         // Why: ignore errors — hardening is best-effort; PowerShell ACL APIs may be unavailable or locked down.
@@ -95,7 +111,7 @@ export function restrictWindowsPathSync(targetPath: string, isDirectory: boolean
       {
         stdio: ['ignore', 'ignore', 'ignore'],
         windowsHide: true,
-        timeout: 5000
+        timeout: windowsRestrictAclTimeoutMs(isDirectory)
       }
     )
     return true
@@ -169,7 +185,10 @@ try {
 } catch {
   $alreadyRestricted = $false
 }
-if (-not $alreadyRestricted) {
+// G1 repair (item 5): verify-first only skips the rebuild for FILES. A directory's first
+// propagation can be interrupted by the spawn timeout, and once its root already verifies no
+// later run would ever re-propagate to the rest of the tree — directories always rebuild.
+if ($isDirectory -or -not $alreadyRestricted) {
   $acl.SetAccessRuleProtection($true, $false)
   foreach ($rule in @($acl.Access)) {
     [void]$acl.RemoveAccessRuleSpecific($rule)

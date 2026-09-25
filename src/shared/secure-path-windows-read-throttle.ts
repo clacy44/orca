@@ -23,7 +23,19 @@ const DEFAULT_BOUNDS: SecurePathHardeningCacheBounds = {
 }
 
 type WindowsFileIdentity = { dev: number; ino: number; birthtimeMs: number }
-type WindowsHardenedFileEntry = WindowsFileIdentity & { hardenedAt: number; succeeded: boolean }
+type WindowsHardenedFileEntry = WindowsFileIdentity & {
+  hardenedAt: number
+  succeeded: boolean
+  // G1 repair (F6 backoff): consecutive failures/timeouts double the retry floor (30s, 60s,
+  // 120s, ...) up to the 10-minute success floor, instead of hammering a path that can never
+  // harden (Constrained Language Mode/WDAC, FAT/exFAT, some UNC paths) at a flat 30s.
+  consecutiveFailures: number
+}
+
+function retryFloorForConsecutiveFailures(consecutiveFailures: number): number {
+  const doubled = SECURE_PATH_REHARDEN_RETRY_FLOOR_MS * 2 ** Math.max(0, consecutiveFailures - 1)
+  return Math.min(doubled, SECURE_PATH_REHARDEN_FLOOR_MS)
+}
 
 let hardenedWindowsFilesThisProcess = new SecurePathHardeningCache<WindowsHardenedFileEntry>(
   DEFAULT_BOUNDS
@@ -58,7 +70,7 @@ export function hardenWindowsFileOnce(targetPath: string): boolean {
   if (identityUnchanged) {
     const floor = cached!.succeeded
       ? SECURE_PATH_REHARDEN_FLOOR_MS
-      : SECURE_PATH_REHARDEN_RETRY_FLOOR_MS
+      : retryFloorForConsecutiveFailures(cached!.consecutiveFailures)
     if (Date.now() - cached!.hardenedAt < floor) {
       return true
     }
@@ -68,7 +80,8 @@ export function hardenWindowsFileOnce(targetPath: string): boolean {
   }
   pendingWindowsFileHardenings.add(targetPath)
   const startIdentity = currentIdentity
-  void bestEffortRestrictWindowsPath(targetPath, false).then((succeeded) => {
+  const priorConsecutiveFailures = identityUnchanged ? cached!.consecutiveFailures : 0
+  function onHardened(succeeded: boolean): void {
     pendingWindowsFileHardenings.delete(targetPath)
     // Why: only the identity present at spawn was actually hardened. If the path still
     // holds that identity at completion, cache it; otherwise the file was replaced
@@ -78,12 +91,17 @@ export function hardenWindowsFileOnce(targetPath: string): boolean {
       hardenedWindowsFilesThisProcess.set(targetPath, {
         ...finishedIdentity,
         hardenedAt: Date.now(),
-        succeeded
+        succeeded,
+        consecutiveFailures: succeeded ? 0 : priorConsecutiveFailures + 1
       })
     } else {
       hardenedWindowsFilesThisProcess.delete(targetPath)
     }
-  })
+  }
+  // G1 repair: `.then(onOk, onErr)` — bestEffortRestrictWindowsPath never rejects today, but a
+  // lone `.then(onOk)` would leave the path stuck in `pendingWindowsFileHardenings` forever
+  // (never retried) if it ever did; a rejection must clear the in-flight marker too.
+  void bestEffortRestrictWindowsPath(targetPath, false).then(onHardened, () => onHardened(false))
   return true
 }
 
@@ -97,7 +115,8 @@ export function markWindowsFileHardened(targetPath: string): void {
   hardenedWindowsFilesThisProcess.set(targetPath, {
     ...identity,
     hardenedAt: Date.now(),
-    succeeded: true
+    succeeded: true,
+    consecutiveFailures: 0
   })
 }
 

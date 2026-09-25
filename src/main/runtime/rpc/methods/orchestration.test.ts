@@ -2329,10 +2329,14 @@ describe('orchestration RPC methods', () => {
             } as never)
           : null
       )
-      // B3 REPAIR default: the --inject gate takes one fresh confirmForegroundProcess scan at
-      // its resolve edge (rpc/methods/orchestration.ts) on top of isTerminalRunningAgent. Tests
-      // exercising the happy path stub it live here; the refusal test below overrides it false.
-      vi.spyOn(runtime, 'isPeerPaneForegroundAgentLive').mockResolvedValue(true)
+      // B3 REPAIR default: the --inject gate takes one fresh confirm scan at its resolve edge
+      // (rpc/methods/orchestration.ts, confirmDispatchInjectForegroundIsAgent) on top of
+      // isTerminalRunningAgent. Tests exercising the happy path stub it live here; the refusal
+      // test below overrides it to 'not_agent'. G1 repair: THIS suite stubs the handle
+      // resolution the helper depends on (getLivePtyForHandle/getLiveLeafForHandle both need a
+      // real graph, which these mock-heavy fixtures don't have) — the real-runtime, unstubbed
+      // behavior of the helper itself is covered by orchestration-dispatch-inject-live-gate.test.ts.
+      vi.spyOn(runtime, 'confirmDispatchInjectForegroundIsAgent').mockResolvedValue('agent')
     }
 
     it('dispatches a task to a terminal', async () => {
@@ -2525,7 +2529,7 @@ describe('orchestration RPC methods', () => {
       provideInjectIdentity()
       const task = db.createTask({ spec: 'work' })
       vi.spyOn(runtime, 'isTerminalRunningAgent').mockResolvedValue(true)
-      vi.spyOn(runtime, 'isPeerPaneForegroundAgentLive').mockResolvedValue(false)
+      vi.spyOn(runtime, 'confirmDispatchInjectForegroundIsAgent').mockResolvedValue('not_agent')
       const agentPrompt = vi.spyOn(runtime, 'sendTerminalAgentPrompt')
 
       await expect(

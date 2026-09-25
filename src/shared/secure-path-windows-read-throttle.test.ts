@@ -106,6 +106,50 @@ describe('secure-path-windows-read-throttle (B2b/c, F6, F7 REPAIR)', () => {
     expect(bestEffortRestrictWindowsPathMock).toHaveBeenCalledTimes(1) // success floor still holds
   })
 
+  // G1 repair (F6 backoff): a path that can never harden (Constrained Language Mode/WDAC,
+  // FAT/exFAT, some UNC paths) must not be hammered at a flat 30s — consecutive failures
+  // double the retry floor (30s, 60s, ...) up to the 10-minute success floor.
+  it('F6: consecutive failures double the retry floor', async () => {
+    bestEffortRestrictWindowsPathMock.mockResolvedValueOnce(false)
+    hardenWindowsFileOnce(TARGET_PATH)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(bestEffortRestrictWindowsPathMock).toHaveBeenCalledTimes(1) // failure #1, floor 30s
+
+    await vi.advanceTimersByTimeAsync(SECURE_PATH_REHARDEN_RETRY_FLOOR_MS + 1)
+    bestEffortRestrictWindowsPathMock.mockResolvedValueOnce(false)
+    hardenWindowsFileOnce(TARGET_PATH)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(bestEffortRestrictWindowsPathMock).toHaveBeenCalledTimes(2) // failure #2, floor doubles to 60s
+
+    // Past the OLD 30s floor but under the doubled 60s floor: must NOT retry yet.
+    await vi.advanceTimersByTimeAsync(SECURE_PATH_REHARDEN_RETRY_FLOOR_MS + 1)
+    hardenWindowsFileOnce(TARGET_PATH)
+    expect(bestEffortRestrictWindowsPathMock).toHaveBeenCalledTimes(2)
+
+    // Past the doubled 60s floor: retries.
+    await vi.advanceTimersByTimeAsync(SECURE_PATH_REHARDEN_RETRY_FLOOR_MS)
+    bestEffortRestrictWindowsPathMock.mockResolvedValueOnce(false)
+    hardenWindowsFileOnce(TARGET_PATH)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(bestEffortRestrictWindowsPathMock).toHaveBeenCalledTimes(3)
+  })
+
+  // G1 repair (nit 7): `.finally`-only (or a lone `.then(onOk)`) leaves the path stuck
+  // "pending" forever if bestEffortRestrictWindowsPath ever rejects — the in-flight marker is
+  // never cleared, so every later read silently no-ops instead of retrying.
+  it('G1 repair: a rejected hardening still clears the in-flight marker, so a later read retries', async () => {
+    bestEffortRestrictWindowsPathMock.mockRejectedValueOnce(new Error('spawn threw synchronously'))
+    hardenWindowsFileOnce(TARGET_PATH)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(bestEffortRestrictWindowsPathMock).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(SECURE_PATH_REHARDEN_RETRY_FLOOR_MS + 1)
+    bestEffortRestrictWindowsPathMock.mockResolvedValueOnce(true)
+    hardenWindowsFileOnce(TARGET_PATH)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(bestEffortRestrictWindowsPathMock).toHaveBeenCalledTimes(2)
+  })
+
   it('B1 REPAIR: a file replaced (new ino) during an in-flight hardening gets hardened by its next read (2 spawns)', async () => {
     let resolveFirstHardening: ((succeeded: boolean) => void) | undefined
     bestEffortRestrictWindowsPathMock.mockImplementationOnce(
@@ -120,9 +164,9 @@ describe('secure-path-windows-read-throttle (B2b/c, F6, F7 REPAIR)', () => {
 
     // The path is replaced (new inode) while the first hardening is still in flight — the
     // script actually ran against the OLD file, so the identity present at completion must
-    // not be cached as hardened.
+    // not be cached as hardened. G1 repair: ino-only (NTFS tunneling keeps CreationTime on a
+    // rename-over, so a completion check that only compares birthtime would miss this).
     fileState.ino = 43
-    fileState.birthtimeMs = 200
     resolveFirstHardening!(true)
     await vi.advanceTimersByTimeAsync(0)
 

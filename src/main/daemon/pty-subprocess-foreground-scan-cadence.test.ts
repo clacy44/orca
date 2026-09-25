@@ -11,8 +11,8 @@
 // bootstrap window (below, and pty-subprocess-cached-agent-refresh-cadence.test.ts)
 // to cut whole-table CIM scans. The replacement invariant that must hold under
 // that relaxation is B2(e): an agent exit is still detected within ~5s of its
-// last output — see 'detects an exited cached Windows agent within ~5s of its
-// last output' below.
+// last output — see 'retires a cached agent within ~5s of its last output once
+// the pane falls back to the bare shell' in pty-subprocess-cached-agent-exit-detection.test.ts.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'

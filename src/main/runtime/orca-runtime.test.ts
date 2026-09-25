@@ -9136,6 +9136,132 @@ describe('OrcaRuntimeService', () => {
     }
   })
 
+  // G1 repair: a confirm() that returns null (no confirm support, e.g. SSH/degraded providers,
+  // or the local provider's own "cannot confirm") is not proof of absence and must resolve —
+  // reading null as "not an agent" would time out every such pane on this arm.
+  it('G1 repair: resolves tui-idle when the fresh confirm returns null, with exactly one confirm call', async () => {
+    vi.useFakeTimers()
+    try {
+      const confirmForegroundProcess = vi.fn(async () => null)
+      const runtime = createRuntime()
+      runtime.setPtyController({
+        write: () => true,
+        kill: () => true,
+        getForegroundProcess: async () => 'claude',
+        confirmForegroundProcess
+      })
+      syncSinglePty(runtime)
+      runtime.onPtyData('pty-1', 'agent output, no title\r\n', Date.now())
+
+      const [terminal] = (await runtime.listTerminals()).terminals
+      const wait = runtime.waitForTerminal(terminal.handle, {
+        condition: 'tui-idle',
+        timeoutMs: 6_000
+      })
+
+      await vi.advanceTimersByTimeAsync(5_500)
+
+      await expect(wait).resolves.toMatchObject({
+        handle: terminal.handle,
+        condition: 'tui-idle'
+      })
+      expect(confirmForegroundProcess).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // G1 repair: quietMs is stale by the time the confirm await settles (2-6s on Windows) —
+  // output arriving during that await must still be able to defer the resolve.
+  it('G1 repair: output arriving during the confirm await defers the resolve', async () => {
+    vi.useFakeTimers()
+    try {
+      let resolveConfirm: ((value: string | null) => void) | undefined
+      const confirmForegroundProcess = vi.fn(
+        () =>
+          new Promise<string | null>((resolve) => {
+            resolveConfirm = resolve
+          })
+      )
+      const runtime = createRuntime()
+      runtime.setPtyController({
+        write: () => true,
+        kill: () => true,
+        getForegroundProcess: async () => 'claude',
+        confirmForegroundProcess
+      })
+      syncSinglePty(runtime)
+      runtime.onPtyData('pty-1', 'agent output, no title\r\n', Date.now())
+
+      const [terminal] = (await runtime.listTerminals()).terminals
+      const wait = runtime.waitForTerminal(terminal.handle, {
+        condition: 'tui-idle',
+        timeoutMs: 6_000
+      })
+      wait.catch(() => {})
+
+      await vi.advanceTimersByTimeAsync(3_500)
+      await vi.waitFor(() => expect(confirmForegroundProcess).toHaveBeenCalledTimes(1))
+
+      // Fresh output lands while the confirm is still in flight.
+      runtime.onPtyData('pty-1', 'more agent output\r\n', Date.now())
+      resolveConfirm?.('claude')
+      await vi.advanceTimersByTimeAsync(0)
+
+      await expect(Promise.race([wait, Promise.resolve('still-pending')])).resolves.toBe(
+        'still-pending'
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // G1 repair: same staleness as above, but for the launch-prompt fence — a fence armed
+  // while the confirm is in flight must still be able to hold the waiter.
+  it('G1 repair: a fence arriving during the confirm await defers the resolve', async () => {
+    vi.useFakeTimers()
+    try {
+      let resolveConfirm: ((value: string | null) => void) | undefined
+      const confirmForegroundProcess = vi.fn(
+        () =>
+          new Promise<string | null>((resolve) => {
+            resolveConfirm = resolve
+          })
+      )
+      const runtime = createRuntime()
+      runtime.setPtyController({
+        write: () => true,
+        kill: () => true,
+        getForegroundProcess: async () => 'claude',
+        confirmForegroundProcess
+      })
+      syncSinglePty(runtime)
+      setPtyLaunchAgent(runtime, 'pty-1', 'claude')
+      runtime.onPtyData('pty-1', 'agent output, no title\r\n', Date.now())
+
+      const [terminal] = (await runtime.listTerminals()).terminals
+      const wait = runtime.waitForTerminal(terminal.handle, {
+        condition: 'tui-idle',
+        timeoutMs: 6_000
+      })
+      wait.catch(() => {})
+
+      await vi.advanceTimersByTimeAsync(3_500)
+      await vi.waitFor(() => expect(confirmForegroundProcess).toHaveBeenCalledTimes(1))
+
+      // The launch-prompt fence arms while the confirm is still in flight.
+      runtime.noteTerminalSpawnCommand('pty-1', 'claude')
+      resolveConfirm?.('claude')
+      await vi.advanceTimersByTimeAsync(0)
+
+      await expect(Promise.race([wait, Promise.resolve('still-pending')])).resolves.toBe(
+        'still-pending'
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('ignores the bare cursor-agent native title so synthesized spinner state survives', async () => {
     const ptyId = `${TEST_REPO_ID}::/tmp/worktree-a@@pty-bg`
     const runtime = createRuntime()

@@ -35896,6 +35896,31 @@ export class OrcaRuntimeService {
     return 'not_agent'
   }
 
+  // S10-23a G1 repair: the --inject gate's resolve edge. isPeerPaneForegroundAgentLive
+  // (:4619) is the W-3 beforeWrite check and returns false for every renderer leaf handle
+  // (it only resolves a `pty:` tab-id record) — dispatch handles are overwhelmingly renderer
+  // leaves, so that check refused every live agent. This resolves the ptyId for either handle
+  // kind and runs confirmDeliveryForegroundIsAgent's three-valued rule instead: 'not_agent' is
+  // the only verdict that refuses; 'unknown' (no confirm support, e.g. SSH) is not a refusal.
+  async confirmDispatchInjectForegroundIsAgent(
+    handle: string
+  ): Promise<'agent' | 'not_agent' | 'unknown'> {
+    let ptyId: string | null | undefined
+    try {
+      ptyId =
+        this.getLivePtyForHandle(handle)?.pty.ptyId ?? this.getLiveLeafForHandle(handle).leaf.ptyId
+    } catch {
+      // Neither a live pty nor a live leaf resolved (e.g. getLiveLeafForHandle throwing
+      // terminal_handle_stale) is not proof of absence — same three-valued rule as below.
+      return 'unknown'
+    }
+    if (!ptyId) {
+      // No ptyId to confirm against (e.g. a not-yet-spawned leaf) is not proof of absence.
+      return 'unknown'
+    }
+    return this.confirmDeliveryForegroundIsAgent(ptyId)
+  }
+
   private async isRecognizedForegroundAgentProcess(
     ptyId: string,
     foregroundProcess: string,
@@ -37794,12 +37819,25 @@ export class OrcaRuntimeService {
               const confirmed = this.ptyController.confirmForegroundProcess
                 ? await this.ptyController.confirmForegroundProcess(leaf.ptyId)
                 : fg
-              if (confirmed && !isShellProcess(confirmed)) {
-                if (waiter.pollInterval) {
-                  clearInterval(waiter.pollInterval)
-                  waiter.pollInterval = null
+              // G1 repair: null means "cannot prove it's a shell" (no confirm support, e.g.
+              // SSH/degraded providers) and must resolve, not hold forever. Premises computed
+              // before this await are stale during it (2-6s on Windows) — output or a fence
+              // arriving meanwhile must still be able to defer the resolve.
+              if (confirmed === null || !isShellProcess(confirmed)) {
+                const freshFenceHolds = this.launchPromptFenceHolds(
+                  leaf.ptyId ? this.ptysById.get(leaf.ptyId) : null
+                )
+                const freshQuietMs = leaf.lastOutputAt ? Date.now() - leaf.lastOutputAt : 0
+                if (!freshFenceHolds && freshQuietMs >= TUI_IDLE_QUIESCENCE_MS) {
+                  if (waiter.pollInterval) {
+                    clearInterval(waiter.pollInterval)
+                    waiter.pollInterval = null
+                  }
+                  this.resolveWaiter(
+                    waiter,
+                    buildTerminalWaitResult(waiter.handle, 'tui-idle', leaf)
+                  )
                 }
-                this.resolveWaiter(waiter, buildTerminalWaitResult(waiter.handle, 'tui-idle', leaf))
               }
             }
           }
@@ -37878,15 +37916,23 @@ export class OrcaRuntimeService {
               const confirmed = this.ptyController.confirmForegroundProcess
                 ? await this.ptyController.confirmForegroundProcess(pty.ptyId)
                 : fg
-              if (confirmed && !isShellProcess(confirmed)) {
-                if (waiter.pollInterval) {
-                  clearInterval(waiter.pollInterval)
-                  waiter.pollInterval = null
+              // G1 repair: null means "cannot prove it's a shell" (no confirm support, e.g.
+              // SSH/degraded providers) and must resolve, not hold forever. Premises computed
+              // before this await are stale during it (2-6s on Windows) — output or a fence
+              // arriving meanwhile must still be able to defer the resolve.
+              if (confirmed === null || !isShellProcess(confirmed)) {
+                const freshFenceHolds = this.launchPromptFenceHolds(pty)
+                const freshQuietMs = pty.lastOutputAt ? Date.now() - pty.lastOutputAt : 0
+                if (!freshFenceHolds && freshQuietMs >= TUI_IDLE_QUIESCENCE_MS) {
+                  if (waiter.pollInterval) {
+                    clearInterval(waiter.pollInterval)
+                    waiter.pollInterval = null
+                  }
+                  this.resolveWaiter(
+                    waiter,
+                    buildPtyTerminalWaitResult(waiter.handle, 'tui-idle', pty)
+                  )
                 }
-                this.resolveWaiter(
-                  waiter,
-                  buildPtyTerminalWaitResult(waiter.handle, 'tui-idle', pty)
-                )
               }
             }
           }
