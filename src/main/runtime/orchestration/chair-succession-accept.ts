@@ -162,27 +162,57 @@ export async function acceptSuccession(
   try {
     await purgeSuccessionsForChair(storeDepsFor(deps), chair)
   } catch (err) {
-    deps.db.writeAgentAudit({
-      agentId: registration.agent.id,
-      actorPaneKey: params.callerPaneKey,
-      actorHostId: params.hostId,
-      verb: 'succession_confirm',
-      outcome: 'purge_failed',
-      reasonCode:
-        `succession=${params.successionId} ${err instanceof Error ? err.message : String(err)}`.slice(
-          0,
-          200
-        )
-    })
+    // G1 attempt-3 repair F5: the audit write itself is best-effort here too — a throwing audit
+    // must not turn a benign purge failure into a rejected accept after the takeover.
+    try {
+      deps.db.writeAgentAudit({
+        agentId: registration.agent.id,
+        actorPaneKey: params.callerPaneKey,
+        actorHostId: params.hostId,
+        verb: 'succession_confirm',
+        outcome: 'purge_failed',
+        reasonCode:
+          `succession=${params.successionId} ${err instanceof Error ? err.message : String(err)}`.slice(
+            0,
+            200
+          )
+      })
+    } catch {
+      // best-effort — see above.
+    }
     warnings.push('purgeFailed')
   }
 
   // D-R219 (chair ruling, G1 repair M3): the "served" set is gone — accept ALWAYS returns the
   // resume context, regardless of whether the SessionStart hook already served it.
-  const resumeContextText = await readFile(
-    join(deps.orcaHome, 'chairs', chair, 'successions', params.successionId, 'resume-context.md'),
-    'utf8'
-  )
+  // G1 attempt-3 repair F5: guarded — the identity has already moved (N7); an I/O fault reading
+  // resume-context.md (missing/unreadable) must not reject accept after the takeover. Fold it
+  // into warnings and return without `resumeContext` instead (already optional on AcceptResult).
+  let resumeContextText: string | undefined
+  try {
+    resumeContextText = await readFile(
+      join(deps.orcaHome, 'chairs', chair, 'successions', params.successionId, 'resume-context.md'),
+      'utf8'
+    )
+  } catch (err) {
+    try {
+      deps.db.writeAgentAudit({
+        agentId: registration.agent.id,
+        actorPaneKey: params.callerPaneKey,
+        actorHostId: params.hostId,
+        verb: 'succession_confirm',
+        outcome: 'resume_context_read_failed',
+        reasonCode:
+          `succession=${params.successionId} ${err instanceof Error ? err.message : String(err)}`.slice(
+            0,
+            200
+          )
+      })
+    } catch {
+      // best-effort — see above.
+    }
+    warnings.push('resumeContextReadFailed')
+  }
 
   // S10-22a residual R238: read-only accessors (same pair chair-succession-execute.ts's seal path
   // uses) against the successor's OWN mailbox/run, taken after the takeover above — anything
@@ -210,7 +240,7 @@ export async function acceptSuccession(
     agentId: registration.agent.id,
     runId: runId ?? '',
     generation: runId ? (deps.db.getRun(runId)?.consumer_generation ?? 0) : 0,
-    resumeContext: resumeContextText,
+    ...(resumeContextText !== undefined ? { resumeContext: resumeContextText } : {}),
     obligations,
     ...(warnings.length > 0 ? { warnings } : {}),
     ...(manifestWriteFailed ? { manifestWriteFailed: true } : {})

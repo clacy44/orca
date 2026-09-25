@@ -12,7 +12,7 @@
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { OrcaRuntimeService } from '../orca-runtime'
-import type { OrchestrationDb } from './db'
+import { isEquivalentPaneKey, type OrchestrationDb } from './db'
 import {
   chairLockKey,
   read,
@@ -24,6 +24,7 @@ import {
 import { appendRetiredHandle } from './chair-succession-retired-handles'
 import { refreshRetiredHandlesIndexSync } from './chair-succession-retired-index'
 import { writeManifestLastSessionId } from './chair-succession-manifest-session-write'
+import { readManifestEntry } from './chair-succession-manifest-entry'
 import type { SuccessionMeta, SuccessionState } from './chair-succession-types'
 import { purgeSuccessionsForChair } from './chair-succession-purge'
 
@@ -35,7 +36,12 @@ export type SuccessionStartupScanRuntime = Pick<
   'closeTerminal' | 'cancelMessageWaiters'
 >
 
-export type SuccessionStartupScanDb = Pick<OrchestrationDb, 'getAgentByName' | 'bindRun'>
+// G1 attempt-3 repair F3: `getRun` (to check the Run is still on the incumbent's pane before
+// rebinding it) and `writeAgentAudit` (every skip/failure below is audited, not silent).
+export type SuccessionStartupScanDb = Pick<
+  OrchestrationDb,
+  'getAgentByName' | 'bindRun' | 'getRun' | 'writeAgentAudit'
+>
 
 export type SuccessionStartupScanDeps = {
   runtime: SuccessionStartupScanRuntime
@@ -100,21 +106,52 @@ async function confirmAlreadyTakenOver(
     }
   })
 
+  // G1 attempt-3 repair F3: best-effort audit for every skip/failure below — a startup confirm
+  // must still never throw past this scan (a crash-recovery path can't itself crash on a stale
+  // Run or a bad manifest), so the audit write is itself guarded.
+  const audit = (outcome: string, reasonCode: string): void => {
+    try {
+      deps.db.writeAgentAudit({
+        agentId: null,
+        actorPaneKey: meta.successor.paneKey ?? meta.incumbent.paneKey,
+        actorHostId: hostId,
+        verb: 'succession_startup_confirm',
+        outcome,
+        reasonCode: `succession=${meta.id} ${reasonCode}`.slice(0, 200)
+      })
+    } catch {
+      // best-effort — see above.
+    }
+  }
+
   // Rebind the Run to the successor pane — without this, the Run stays bound to the dead
-  // incumbent (N10). The successor's own agent row is the chair by construction (the caller's
-  // `successorIsChair` check), so it carries the coordinator handle/pane key to bind to.
+  // incumbent (N10). G1 attempt-3 repair F3: only when the Run is STILL on the incumbent's pane
+  // (the ordinary stranded-record case), or already on the successor's (idempotent replay) — a
+  // Run the chair itself has since moved on from (a later objective, a later restore) must never
+  // be silently unbound and rebound to a pane that stopped being current possibly hours ago.
   const runId = meta.runId
   if (runId) {
-    const chairAgent = deps.db.getAgentByName(hostId, meta.chair)
-    const coordinatorHandle = chairAgent?.terminal_handle ?? meta.successor.terminalHandle
-    const coordinatorPaneKey = chairAgent?.pane_key ?? meta.successor.paneKey
-    if (coordinatorHandle && coordinatorPaneKey) {
-      try {
-        deps.db.bindRun({ runId, coordinatorHandle, coordinatorPaneKey })
-        deps.runtime.cancelMessageWaiters(`run:${runId}`)
-      } catch {
-        // best-effort — a startup confirm must never throw for a stale/adopted Run.
+    const run = deps.db.getRun(runId)
+    const currentPane = run?.coordinator_pane_key ?? null
+    const successorPaneKey = meta.successor.paneKey
+    const stillMovable =
+      currentPane !== null &&
+      (isEquivalentPaneKey(currentPane, meta.incumbent.paneKey) ||
+        (successorPaneKey !== undefined && isEquivalentPaneKey(currentPane, successorPaneKey)))
+    if (stillMovable) {
+      const chairAgent = deps.db.getAgentByName(hostId, meta.chair)
+      const coordinatorHandle = chairAgent?.terminal_handle ?? meta.successor.terminalHandle
+      const coordinatorPaneKey = chairAgent?.pane_key ?? meta.successor.paneKey
+      if (coordinatorHandle && coordinatorPaneKey) {
+        try {
+          deps.db.bindRun({ runId, coordinatorHandle, coordinatorPaneKey })
+          deps.runtime.cancelMessageWaiters(`run:${runId}`)
+        } catch (err) {
+          audit('run_bind_failed', err instanceof Error ? err.message : String(err))
+        }
       }
+    } else {
+      audit('run_bind_skipped_moved', `run=${runId} pane=${currentPane ?? 'unbound'}`)
     }
   }
 
@@ -125,18 +162,45 @@ async function confirmAlreadyTakenOver(
       at: new Date().toISOString()
     })
     refreshRetiredHandlesIndexSync(deps.orcaHome)
-  } catch {
-    // best-effort — see above.
+  } catch (err) {
+    audit('retired_handle_append_failed', err instanceof Error ? err.message : String(err))
   }
 
-  await writeManifestLastSessionId(
-    deps.manifestPath,
-    hostId,
-    meta.chair,
-    meta.successor.sessionId ?? null
-  ).catch(() => {
-    // best-effort — see above.
-  })
+  // G1 attempt-3 repair F3/F8: write the manifest ONLY while `lastSessionId` (falling back to
+  // `conversationId`) still holds the exact pre-succession value seal recorded — otherwise a
+  // normal accept, or a later restore, has already moved the manifest on and this stranded
+  // record's belated resolution must not regress it. Absent `preSuccessionSessionId` (a
+  // pre-repair meta.json) falls back to the old always-write shape.
+  let currentManifestSessionId: string | null | undefined
+  try {
+    const entry = await readManifestEntry(deps.manifestPath, meta.chair)
+    currentManifestSessionId = entry.lastSessionId ?? entry.conversationId ?? null
+  } catch (err) {
+    audit('manifest_read_failed', err instanceof Error ? err.message : String(err))
+  }
+  const guardSatisfied =
+    meta.preSuccessionSessionId === undefined ||
+    currentManifestSessionId === undefined ||
+    currentManifestSessionId === meta.preSuccessionSessionId
+  if (guardSatisfied) {
+    const result = await writeManifestLastSessionId(
+      deps.manifestPath,
+      hostId,
+      meta.chair,
+      meta.successor.sessionId ?? null
+    ).catch((err: unknown) => ({
+      ok: false as const,
+      reason: err instanceof Error ? err.message : String(err)
+    }))
+    if (!result.ok) {
+      audit('manifest_write_failed', result.reason)
+    }
+  } else {
+    audit(
+      'manifest_write_skipped_moved',
+      `expected=${meta.preSuccessionSessionId ?? 'null'} current=${currentManifestSessionId}`
+    )
+  }
 
   // [G1-10z Q8 repair] "after every confirm" — this scan's own confirm path is one such site;
   // the RPC accept path's confirm (chair-succession-accept.ts) is the other.

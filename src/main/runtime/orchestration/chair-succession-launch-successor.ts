@@ -12,7 +12,7 @@ import {
 import type { SuccessionMeta } from './chair-succession-types'
 import type { ManifestEntryWithSuccession } from './chair-succession-manifest-entry'
 import type { ChairSuccessionDeps } from './chair-succession-execute'
-import { setHoldSuccessor, settleHold } from './chair-succession-hold'
+import { getHoldRecord, setHoldSuccessor, settleHold } from './chair-succession-hold'
 
 function storeDepsFor(deps: ChairSuccessionDeps): ChairSuccessionStoreDeps {
   return { orcaHome: deps.orcaHome }
@@ -41,6 +41,14 @@ export async function launchSuccessor(
   // rather than leaving it orphaned (N1 REPAIR item 2).
   let createdTerminalHandle: string | undefined
   try {
+    // G1 attempt-3 repair F10 (probe p1b): a signal already aborted when the hold registers can
+    // settle the hold (its async abort tail) before this async function reaches its first spawn
+    // call — spawning a pane just to close it again a moment later is pure waste. Best-effort
+    // only (a race with the abort tail landing slightly later is still covered by the re-read
+    // under the chair lock below, same as always) — never a substitute for that check.
+    if (!getHoldRecord(meta.id)) {
+      return
+    }
     const incumbentLaunch = deps.db.newestLaunchForPane(hostId, meta.incumbent.paneKey)
     const model = entry.model ?? incumbentLaunch?.pref_model ?? undefined
     const effort = entry.effort ?? incumbentLaunch?.pref_effort ?? undefined

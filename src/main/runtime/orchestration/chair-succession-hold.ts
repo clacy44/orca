@@ -118,19 +118,27 @@ export async function holdSealRequest(
         .catch(
           // G1 repair Q8: a rejected abort tail (I/O error etc.) must still settle the hold and
           // clear the map entry, never leak it — audited so the failure is visible, not silent.
+          // G1 attempt-3 repair (Q8 residual): the audit write ITSELF is guarded too — before
+          // this, a throwing audit made this `.catch` handler itself throw, so the `.then` below
+          // (the only place that settles/clears the hold) never ran, leaking the hold entry and
+          // leaving the incumbent's `succeed` call unresolved for the rest of the process.
           (err): HoldOutcome => {
-            deps.db.writeAgentAudit({
-              agentId: null,
-              actorPaneKey: meta.incumbent.paneKey,
-              actorHostId: hostId,
-              verb: 'succession_abort',
-              outcome: 'error',
-              reasonCode:
-                `succession=${meta.id} abort_tail_threw:${err instanceof Error ? err.message : String(err)}`.slice(
-                  0,
-                  200
-                )
-            })
+            try {
+              deps.db.writeAgentAudit({
+                agentId: null,
+                actorPaneKey: meta.incumbent.paneKey,
+                actorHostId: hostId,
+                verb: 'succession_abort',
+                outcome: 'error',
+                reasonCode:
+                  `succession=${meta.id} abort_tail_threw:${err instanceof Error ? err.message : String(err)}`.slice(
+                    0,
+                    200
+                  )
+              })
+            } catch {
+              // best-effort — see above; never leak the hold over an audit failure.
+            }
             return { ok: false, code: 'succession_aborted', successionId: meta.id, reason }
           }
         )

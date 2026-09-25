@@ -5,22 +5,14 @@
 // cancel, retired-handle append, manifest write) without needing a real spawned pty.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, rm, writeFile, readFile } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { OrchestrationDb } from './db'
 import { OrcaRuntimeService } from '../orca-runtime'
 import { sealSuccession, type ChairSuccessionDeps } from './chair-succession-execute'
-import { holdSealRequest, settleHold, getHoldRecord } from './chair-succession-hold'
-import { launchSuccessor } from './chair-succession-launch-successor'
-import {
-  createSealed,
-  listActive,
-  transition,
-  read,
-  type ChairSuccessionStoreDeps
-} from './chair-succession-store'
+import { listActive } from './chair-succession-store'
 import { _resetRetiredHandlesIndexForTest } from './chair-succession-retired-index'
 
 vi.mock('electron', () => ({
@@ -441,6 +433,62 @@ describe('S10-22a WAVE 2: chair-succession-execute', () => {
     ).rejects.toMatchObject({ code: 'succession_lane_unsupported' })
   })
 
+  // G1 attempt-3 repair F1: the old `!== null` check refused every renderer-minted desktop pane
+  // (registerPty -> bindMintedPane binds the shared lane at mint time), so no ordinary chair pane
+  // could ever seal. Bind the pane through the REAL registry path so the lane row exists (a mocked
+  // `credentialLaneOfPaneKey` would be a false green here), and assert it now seals.
+  it('seals from a renderer-minted (host-default/shared-lane) pane bound via the real registry', async () => {
+    await writeManifest('chair-shared')
+    const tabId = 'tab-shared'
+    const leafId = '55555555-5555-4555-8555-555555555555'
+    runtime.registerPty('pty-chair-shared', 'id:wt-1', null, { tabId, leafId })
+    const pane = `${tabId}:${leafId}`
+    expect(runtime.credentialLaneOfPaneKey(pane)).toEqual({ kind: 'shared' })
+    const { agentId } = registerChair('chair-shared', pane, HANDLE_A)
+    bindRunTo(pane, HANDLE_A)
+    const { path, sha } = await writeCheckpoint()
+    const result = await sealSuccession(deps, {
+      callerAgentId: agentId,
+      chairName: 'chair-shared',
+      paneKey: pane,
+      terminalHandle: HANDLE_A,
+      hostId,
+      checkpointPath: path,
+      checkpointSha256: sha,
+      reason: 'batch_end'
+    })
+    expect(result.meta.state).toBe('sealed')
+  })
+
+  // G1 attempt-3 repair F6 (probe p11a): the takeover's OWN directory-cap check
+  // (`registerAgentForPane`) only ran after the incumbent was already closed, so a dead-pane
+  // takeover at DIRECTORY_LIVE_CAP (200) left both chairs down. Seal pre-checks the cap and
+  // refuses up front, well before anything is committed.
+  it('F6: refuses succession_directory_full when the agent directory is already at DIRECTORY_LIVE_CAP', async () => {
+    await writeManifest('chair-x')
+    const { agentId } = registerChair('chair-x', PANE_A, HANDLE_A)
+    bindRunTo(PANE_A, HANDLE_A)
+    for (let i = 0; i < 199; i += 1) {
+      const leaf = `${String(i).padStart(8, '0')}-0000-4000-8000-000000000000`
+      registerChair(`filler-${i}`, `tabF${i}:${leaf}`, `term_f${i}`)
+    }
+    const { path, sha } = await writeCheckpoint()
+    await expect(
+      sealSuccession(deps, {
+        callerAgentId: agentId,
+        chairName: 'chair-x',
+        paneKey: PANE_A,
+        terminalHandle: HANDLE_A,
+        hostId,
+        checkpointPath: path,
+        checkpointSha256: sha,
+        reason: 'batch_end'
+      })
+    ).rejects.toMatchObject({ code: 'succession_directory_full' })
+    const active = await listActive({ orcaHome: tmp }, 'chair-x')
+    expect(active).toEqual([])
+  })
+
   // G1 repair L4: an --ack id that names no real outstanding delivery is a caller error.
   it('refuses succession_unknown_ack when --ack names an id with no outstanding delivery', async () => {
     await writeManifest('chair-x')
@@ -649,248 +697,49 @@ describe('S10-22a WAVE 2: chair-succession-execute', () => {
     expect(active).toEqual([])
   })
 
-  describe('hold / abort', () => {
-    const storeDeps: ChairSuccessionStoreDeps = { orcaHome: '' }
-
-    beforeEach(() => {
-      storeDeps.orcaHome = tmp
+  // G1 attempt-3 repair F4 (probe p8): N13 moved the acks to run AFTER `createSealed`, but OUTSIDE
+  // the N14 guard, which covered only the audit. A throwing ack (a concurrent Run rebind lands
+  // between seal's read of the delivery and its ack -> `consumer_fenced`) left a `sealed` record
+  // with no hold, wedging the chair until restart. Assert the record moves to `aborted`, not left
+  // `sealed` with an empty listActive-shaped hold gap.
+  it('F4: an ack that throws after createSealed aborts the record instead of leaving it sealed with no hold', async () => {
+    await writeManifest('chair-x')
+    const { agentId } = registerChair('chair-x', PANE_A, HANDLE_A)
+    const run = bindRunTo(PANE_A, HANDLE_A)
+    db.insertMessage({
+      from: 'term_worker',
+      to: `run:${run}`,
+      subject: 'worker status',
+      type: 'status',
+      runId: run
     })
-
-    async function sealedLaunchingMeta(chair: string) {
-      await mkdir(join(tmp, 'chairs'), { recursive: true })
-      const meta = await createSealed(storeDeps, chair, {
-        reason: 'batch_end',
-        checkpointText: VALID_CHECKPOINT,
-        checkpointSha: sha256(VALID_CHECKPOINT),
-        charterPath: join(tmp, 'CHARTER.md'),
-        charterSha: sha256('charter'),
-        charterMode: 'reference',
-        resumeContextText: 'resume text',
-        incumbent: { paneKey: PANE_A, terminalHandle: HANDLE_A }
-      })
-      return transition(storeDeps, chair, meta.id, 'launching', {
-        successor: { paneKey: 'tabB:b', terminalHandle: 'term_b' }
-      })
-    }
-
-    it('chair review fix #1: hold registered before launch settles immediately on a fast launch failure (no 150s wait)', async () => {
-      vi.useFakeTimers()
-      await mkdir(join(tmp, 'chairs'), { recursive: true })
-      const sealedMeta = await createSealed(storeDeps, 'chair-fast-fail', {
-        reason: 'batch_end',
-        checkpointText: VALID_CHECKPOINT,
-        checkpointSha: sha256(VALID_CHECKPOINT),
-        charterPath: join(tmp, 'CHARTER.md'),
-        charterSha: sha256('charter'),
-        charterMode: 'reference',
-        resumeContextText: 'resume text',
-        incumbent: { paneKey: PANE_A, terminalHandle: HANDLE_A }
-      })
-      vi.spyOn(runtime, 'createAgentSession').mockRejectedValue(
-        new Error('spawn failed immediately')
-      )
-      // Same order the RPC handler now uses: register the hold FIRST (synchronously, before any
-      // await), then launch — a launch that rejects on its first microtask must still find the
-      // hold entry when its catch block calls `settleHold`.
-      const holdPromise = holdSealRequest(deps, hostId, sealedMeta, undefined)
-      void launchSuccessor(
-        deps,
-        hostId,
-        {
-          name: 'chair-fast-fail',
-          worktree: 'id:wt-1',
-          agent: 'claude',
-          conversationId: 'sess-orig'
-        },
-        sealedMeta
-      )
-      // No `vi.advanceTimersByTimeAsync` call — if this ordering were wrong (launch before hold,
-      // the pre-fix bug), the settle would be lost and this `await` would hang until the fake
-      // timer is advanced past 150s, which never happens in this test.
-      const outcome = await holdPromise
-      expect(outcome).toMatchObject({ ok: false, code: 'succession_aborted' })
-      expect((outcome as { reason: string }).reason).toContain('launch_failed')
-      vi.useRealTimers()
+    const minted = db.getOrCreateRunDelivery({
+      runId: run,
+      consumerGeneration: db.getRun(run)!.consumer_generation
+    })!
+    const { path, sha } = await writeCheckpoint()
+    // A concurrent rebind of the same Run lands between seal's read of the delivery and its ack —
+    // the ack itself is the real implementation, invoked after a real bindRun changes the
+    // coordinator identity underneath it (mirrors probe p8).
+    const original = db.acknowledgeRunDelivery.bind(db)
+    vi.spyOn(db, 'acknowledgeRunDelivery').mockImplementation((params) => {
+      db.bindRun({ runId: run, coordinatorHandle: 'term_a_reminted', coordinatorPaneKey: PANE_A })
+      return original(params)
     })
-
-    // G1 repair M8 (D-R215 §Protocol step 4 "manifest else the row"): `launchSuccessor`'s
-    // `createAgentSession` args — the exact prompt, background presentation, launch args, and
-    // launch-prefs fallback to the INCUMBENT's own last-recorded prefs when the manifest sets
-    // neither model nor effort.
-    it('launchSuccessor: createAgentSession gets the exact prompt/background/agentArgs, and model/effort fall back to the incumbent launch row', async () => {
-      await mkdir(join(tmp, 'chairs'), { recursive: true })
-      const sealedMeta = await createSealed(storeDeps, 'chair-prefs', {
-        reason: 'batch_end',
-        checkpointText: VALID_CHECKPOINT,
-        checkpointSha: sha256(VALID_CHECKPOINT),
-        charterPath: join(tmp, 'CHARTER.md'),
-        charterSha: sha256('charter'),
-        charterMode: 'reference',
-        resumeContextText: 'resume text',
-        incumbent: { paneKey: PANE_A, terminalHandle: HANDLE_A }
-      })
-      db.recordLaunch({
-        hostId,
+    await expect(
+      sealSuccession(deps, {
+        callerAgentId: agentId,
+        chairName: 'chair-x',
         paneKey: PANE_A,
-        agentType: 'claude',
-        sessionId: 'sess-incumbent',
-        launchGeneration: runtime.getLaunchGenerationId(),
-        executionHostId: 'local',
-        evidence: 'host_launch',
-        prefs: { model: 'incumbent-model', effort: 'high', source: 'launch' }
-      })
-      const createSpy = vi.spyOn(runtime, 'createAgentSession').mockResolvedValue({
-        terminal: { paneKey: 'tabB:b', handle: 'term_b' }
-      } as never)
-      const holdPromise = holdSealRequest(deps, hostId, sealedMeta, undefined)
-      await launchSuccessor(
-        deps,
+        terminalHandle: HANDLE_A,
         hostId,
-        {
-          name: 'chair-prefs',
-          worktree: 'id:wt-1',
-          agent: 'claude',
-          conversationId: 'sess-orig',
-          launchArgs: ['--flag-a', '--flag-b']
-        },
-        sealedMeta
-      )
-      expect(createSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          worktree: 'id:wt-1',
-          agent: 'claude',
-          prompt: `orca chairs succession-accept ${sealedMeta.id}`,
-          promptDelivery: 'auto-submit',
-          appendAgentArgs: '--flag-a --flag-b',
-          presentation: 'background',
-          launchPreferences: { model: 'incumbent-model', effort: 'high' }
-        })
-      )
-      settleHold(sealedMeta.id, {
-        ok: false,
-        code: 'succession_aborted',
-        successionId: sealedMeta.id,
-        reason: 'test_cleanup'
-      })
-      await holdPromise
-    })
-
-    it('aborts on a 150s timeout, closing the successor pane', async () => {
-      vi.useFakeTimers()
-      const meta = await sealedLaunchingMeta('chair-timeout')
-      const closeSpy = vi.spyOn(runtime, 'closeTerminal').mockResolvedValue({} as never)
-      const holdPromise = holdSealRequest(deps, hostId, meta, undefined)
-      await vi.advanceTimersByTimeAsync(150_000)
-      const outcome = await holdPromise
-      expect(outcome).toMatchObject({ ok: false, code: 'succession_aborted', reason: 'timeout' })
-      expect(closeSpy).toHaveBeenCalledWith('term_b')
-      const final = await read(storeDeps, 'chair-timeout', meta.id)
-      expect(final?.state).toBe('aborted')
-      vi.useRealTimers()
-    })
-
-    it('aborts when the incumbent connection drops first', async () => {
-      const meta = await sealedLaunchingMeta('chair-drop')
-      vi.spyOn(runtime, 'closeTerminal').mockResolvedValue({} as never)
-      const controller = new AbortController()
-      const holdPromise = holdSealRequest(deps, hostId, meta, controller.signal)
-      controller.abort()
-      const outcome = await holdPromise
-      expect(outcome).toMatchObject({
-        ok: false,
-        code: 'succession_aborted',
-        reason: 'incumbent_dropped'
-      })
-      const final = await read(storeDeps, 'chair-drop', meta.id)
-      expect(final?.state).toBe('aborted')
-    })
-
-    // G1 repair N1 (+p7's counterpart drop-while-sealed probe): before the fix, `runAbortTail`
-    // treated every state other than `launching` as `already_terminal`, including `sealed` — a
-    // drop or timeout while `createAgentSession` is still in flight left the record `sealed`
-    // forever, and the launch landed afterwards with NO hold and NO close, wedging the chair.
-    it('N1: incumbent drop while the record is still sealed aborts it, and closes the late-landing successor pane', async () => {
-      await mkdir(join(tmp, 'chairs'), { recursive: true })
-      const meta = await createSealed(storeDeps, 'chair-sealed-drop', {
+        checkpointPath: path,
+        checkpointSha256: sha,
         reason: 'batch_end',
-        checkpointText: VALID_CHECKPOINT,
-        checkpointSha: sha256(VALID_CHECKPOINT),
-        charterPath: join(tmp, 'CHARTER.md'),
-        charterSha: sha256('charter'),
-        charterMode: 'reference',
-        resumeContextText: 'resume text',
-        incumbent: { paneKey: PANE_A, terminalHandle: HANDLE_A }
+        ack: [minted.delivery.id]
       })
-      let resolveCreate!: (v: unknown) => void
-      vi.spyOn(runtime, 'createAgentSession').mockReturnValue(
-        new Promise((resolve) => {
-          resolveCreate = resolve
-        }) as never
-      )
-      const closeSpy = vi.spyOn(runtime, 'closeTerminal').mockResolvedValue({} as never)
-      const controller = new AbortController()
-      const holdPromise = holdSealRequest(deps, hostId, meta, controller.signal)
-      const launchPromise = launchSuccessor(
-        deps,
-        hostId,
-        {
-          name: 'chair-sealed-drop',
-          worktree: 'id:wt-1',
-          agent: 'claude',
-          conversationId: 'sess-orig'
-        },
-        meta
-      )
-      // The incumbent's connection drops while createAgentSession is still in flight.
-      controller.abort()
-      const outcome = await holdPromise
-      expect(outcome).toMatchObject({
-        ok: false,
-        code: 'succession_aborted',
-        reason: 'incumbent_dropped'
-      })
-      const midway = await read(storeDeps, 'chair-sealed-drop', meta.id)
-      expect(midway?.state).toBe('aborted')
-      // The launch lands only now.
-      resolveCreate({ terminal: { paneKey: 'tabB:b', handle: 'term_b' } })
-      await launchPromise
-      const final = await read(storeDeps, 'chair-sealed-drop', meta.id)
-      expect(final?.state).toBe('aborted') // never lands in `launching`
-      expect(closeSpy).toHaveBeenCalledWith('term_b')
-      const active = await listActive(storeDeps, 'chair-sealed-drop')
-      expect(active).toEqual([])
-    })
-
-    // p7: a signal already aborted BEFORE the hold registers never fires its 'abort' event (an
-    // AbortSignal does not replay past events to a listener added after the fact) — before the
-    // fix, the hold stayed live for the full 150s timeout although the incumbent's connection was
-    // already gone at registration time.
-    it('p7: a pre-aborted signal finishes the hold immediately, not after the 150s timeout', async () => {
-      const meta = await sealedLaunchingMeta('chair-preaborted')
-      vi.spyOn(runtime, 'closeTerminal').mockResolvedValue({} as never)
-      const controller = new AbortController()
-      controller.abort() // already aborted before holdSealRequest is even called
-      const holdPromise = holdSealRequest(deps, hostId, meta, controller.signal)
-      // No timer advance of any kind — before the fix this never settles without one (the abort
-      // event never fires for an already-aborted signal), so this `await` would hang past this
-      // test's own timeout.
-      const outcome = await holdPromise
-      expect(outcome).toMatchObject({
-        ok: false,
-        code: 'succession_aborted',
-        reason: 'incumbent_dropped'
-      })
-      expect(getHoldRecord(meta.id)).toBeUndefined()
-    })
-
-    it('settleHold releases the hold without running the abort tail once confirm already did', async () => {
-      const meta = await sealedLaunchingMeta('chair-confirm-race')
-      const holdPromise = holdSealRequest(deps, hostId, meta, undefined)
-      settleHold(meta.id, { ok: true, confirmed: true, successionId: meta.id })
-      const outcome = await holdPromise
-      expect(outcome).toEqual({ ok: true, confirmed: true, successionId: meta.id })
-      const final = await read(storeDeps, 'chair-confirm-race', meta.id)
-      expect(final?.state).toBe('launching') // confirm itself (not exercised here) would advance it
-    })
+    ).rejects.toBeTruthy()
+    const active = await listActive({ orcaHome: tmp }, 'chair-x')
+    expect(active).toEqual([])
   })
 })

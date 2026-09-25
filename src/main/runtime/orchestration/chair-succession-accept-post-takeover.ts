@@ -40,19 +40,27 @@ export async function runPostTakeoverSteps(
   registeredAgentId: string
 ): Promise<PostTakeoverResult> {
   const warnings: string[] = []
+  // G1 attempt-3 repair F5: the identity has already moved by the time any of this runs (N7) — a
+  // DB fault that fails the step being audited (e.g. bindRun's SQLITE_BUSY) can fail this SAME
+  // audit write too, and an unguarded throw here would still reject accept after the takeover.
+  // Swallow it; the step's own `warnings.push` below is the caller-visible signal either way.
   const auditFailure = (outcome: string, err: unknown): void => {
-    deps.db.writeAgentAudit({
-      agentId: registeredAgentId,
-      actorPaneKey: params.callerPaneKey,
-      actorHostId: params.hostId,
-      verb: 'succession_confirm',
-      outcome,
-      reasonCode:
-        `succession=${params.successionId} ${err instanceof Error ? err.message : String(err)}`.slice(
-          0,
-          200
-        )
-    })
+    try {
+      deps.db.writeAgentAudit({
+        agentId: registeredAgentId,
+        actorPaneKey: params.callerPaneKey,
+        actorHostId: params.hostId,
+        verb: 'succession_confirm',
+        outcome,
+        reasonCode:
+          `succession=${params.successionId} ${err instanceof Error ? err.message : String(err)}`.slice(
+            0,
+            200
+          )
+      })
+    } catch {
+      // best-effort — see above.
+    }
   }
 
   const runId = hold.runId
@@ -86,14 +94,22 @@ export async function runPostTakeoverSteps(
   // hiccup must not strand a successfully-taken-over successor with neither ACCEPTED nor context.
   // Surfaced as a warning (not just an audit row) — silence here left the next reboot's
   // `chairs restore` resuming the pre-succession incumbent session.
+  // G1 attempt-3 repair F8: `writeManifestLastSessionId` now reports every no-write path (null
+  // session id, missing/unparseable manifest, absent chair entry) instead of returning silently —
+  // ANY `ok: false` sets the flag, not just a thrown I/O error.
   let manifestWriteFailed = false
   try {
-    await writeManifestLastSessionId(
+    const result = await writeManifestLastSessionId(
       deps.manifestPath,
       params.hostId,
       chair,
       params.callerSessionId
     )
+    if (!result.ok) {
+      auditFailure('manifest_write_failed', new Error(result.reason))
+      manifestWriteFailed = true
+      warnings.push('manifestWriteFailed')
+    }
   } catch (err) {
     auditFailure('manifest_write_failed', err)
     manifestWriteFailed = true

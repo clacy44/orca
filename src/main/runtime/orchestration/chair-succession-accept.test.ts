@@ -730,5 +730,99 @@ describe('S10-22a WAVE 2: chair-succession-accept', () => {
         await rm(manifestDir, { recursive: true, force: true })
       }
     })
+
+    // G1 attempt-3 repair F5 (probe p10 A): the failure-audit helper itself was unguarded — a DB
+    // fault that fails bindRun (e.g. SQLITE_BUSY) can fail the SAME audit write, and accept used
+    // to throw after the identity already moved (the chair row is on the successor pane). Assert
+    // it never throws past the takeover: the caller gets an ACCEPTED-shaped result with a warning.
+    it('F5: bindRun AND its failure audit both fail -> accept still resolves, never throws after the takeover', async () => {
+      await writeManifest('chair-x')
+      const { agentId } = registerChair('chair-x', PANE_A, HANDLE_A)
+      const runId = bindRunTo(PANE_A, HANDLE_A)
+      const meta = await sealedLaunching('chair-x', runId)
+      vi.spyOn(runtime, 'closeTerminal').mockResolvedValue({} as never)
+      vi.spyOn(runtime, 'waitForTerminal').mockResolvedValue({
+        handle: HANDLE_A,
+        condition: 'exit'
+      } as never)
+      vi.spyOn(db, 'bindRun').mockImplementation(() => {
+        throw new Error('SQLITE_BUSY: database is locked')
+      })
+      const realAudit = db.writeAgentAudit.bind(db)
+      vi.spyOn(db, 'writeAgentAudit').mockImplementation((row) => {
+        if (row.outcome === 'run_bind_failed') {
+          throw new Error('SQLITE_BUSY: database is locked')
+        }
+        return realAudit(row)
+      })
+      void holdSealRequest(deps, hostId, meta, undefined)
+      const result = await acceptSuccession(deps, {
+        successionId: meta.id,
+        callerPaneKey: SUCCESSOR_PANE,
+        callerTerminalHandle: SUCCESSOR_HANDLE,
+        callerSessionId: 'sess-succ',
+        hostId
+      })
+      expect(result.agentId).toBe(agentId)
+      expect(result.warnings).toContain('runBindFailed')
+      const row = db.getAgentByName(hostId, 'chair-x')
+      expect(row?.pane_key).toBe(SUCCESSOR_PANE)
+    })
+
+    // G1 attempt-3 repair F5 (probe p10 B): accept's final resume-context.md read ran unguarded
+    // AFTER `confirmed` — an I/O fault there used to reject accept although the takeover already
+    // committed. Assert it resolves instead, with a warning and no `resumeContext`.
+    it('F5: resume-context.md unreadable after confirm -> accept still resolves although confirmed', async () => {
+      await writeManifest('chair-x')
+      registerChair('chair-x', PANE_A, HANDLE_A)
+      const runId = bindRunTo(PANE_A, HANDLE_A)
+      const meta = await sealedLaunching('chair-x', runId)
+      vi.spyOn(runtime, 'closeTerminal').mockResolvedValue({} as never)
+      vi.spyOn(runtime, 'waitForTerminal').mockResolvedValue({
+        handle: HANDLE_A,
+        condition: 'exit'
+      } as never)
+      await rm(join(tmp, 'chairs', 'chair-x', 'successions', meta.id, 'resume-context.md'))
+      void holdSealRequest(deps, hostId, meta, undefined)
+      const result = await acceptSuccession(deps, {
+        successionId: meta.id,
+        callerPaneKey: SUCCESSOR_PANE,
+        callerTerminalHandle: SUCCESSOR_HANDLE,
+        callerSessionId: 'sess-succ',
+        hostId
+      })
+      expect(result.resumeContext).toBeUndefined()
+      expect(result.warnings).toContain('resumeContextReadFailed')
+      const finalMeta = await read({ orcaHome: tmp }, 'chair-x', meta.id)
+      expect(finalMeta?.state).toBe('confirmed')
+    })
+
+    // G1 attempt-3 repair F8 (probe p11b): `writeManifestLastSessionId` used to return silently
+    // for a null caller session id — ACCEPTED with no `manifestWriteFailed` flag and no warning,
+    // and restore then fell back to the manifest's `conversationId`. Assert the flag + warning are
+    // now set, and the manifest is left untouched (never written a literal null/undefined).
+    it('F8: a null caller session id sets manifestWriteFailed + a warning, manifest untouched', async () => {
+      await writeManifest('chair-x')
+      registerChair('chair-x', PANE_A, HANDLE_A)
+      const runId = bindRunTo(PANE_A, HANDLE_A)
+      const meta = await sealedLaunching('chair-x', runId)
+      vi.spyOn(runtime, 'closeTerminal').mockResolvedValue({} as never)
+      vi.spyOn(runtime, 'waitForTerminal').mockResolvedValue({
+        handle: HANDLE_A,
+        condition: 'exit'
+      } as never)
+      void holdSealRequest(deps, hostId, meta, undefined)
+      const result = await acceptSuccession(deps, {
+        successionId: meta.id,
+        callerPaneKey: SUCCESSOR_PANE,
+        callerTerminalHandle: SUCCESSOR_HANDLE,
+        callerSessionId: null,
+        hostId
+      })
+      expect(result.manifestWriteFailed).toBe(true)
+      expect(result.warnings).toContain('manifestWriteFailed')
+      const manifest = JSON.parse(await readFile(deps.manifestPath!, 'utf8'))
+      expect(manifest.chairs[0].lastSessionId).toBeUndefined()
+    })
   })
 })

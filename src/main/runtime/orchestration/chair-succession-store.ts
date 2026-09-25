@@ -62,6 +62,8 @@ export type CreateSealedInput = {
   id?: string
   /** G1 repair L3: the Run id seal is bound to. */
   runId?: string
+  /** G1 attempt-3 repair F3: see `SuccessionMeta.preSuccessionSessionId`. */
+  preSuccessionSessionId?: string | null
 }
 
 export type RetiredHandleEntry = {
@@ -206,7 +208,10 @@ export async function createSealed(
       incumbent: input.incumbent,
       successor: {},
       ...(input.ackedDeliveryIds !== undefined ? { ackedDeliveryIds: input.ackedDeliveryIds } : {}),
-      ...(input.runId !== undefined ? { runId: input.runId } : {})
+      ...(input.runId !== undefined ? { runId: input.runId } : {}),
+      ...(input.preSuccessionSessionId !== undefined
+        ? { preSuccessionSessionId: input.preSuccessionSessionId }
+        : {})
     }
     await writeAtomic(join(dir, 'meta.json'), JSON.stringify(meta, null, 2))
     return meta

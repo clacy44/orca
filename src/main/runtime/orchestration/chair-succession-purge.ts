@@ -1,10 +1,10 @@
-// [G1-10z Q8 repair; G1-10z attempt-2 N15 header fix] `<orcaHome>/chairs/<chair>/successions/
-// <id>/` was never deleted (confirmed or aborted, up to 32+48 KiB + an embedded charter each) and
-// `retired-handles.json` was append-only forever — unbounded on-disk growth over a chair's
-// lifetime. Run from the startup hook (chair-succession-startup-hook.ts) and, per the contract,
-// after every confirm — wired at both post-confirm call sites: `chair-succession-accept.ts`'s
-// confirm tail (:320) and this scan's own startup confirm (chair-succession-startup-scan.ts's
-// `confirmAlreadyTakenOver`).
+// [G1-10z Q8 repair; G1-10z attempt-2 N15 header fix; G1 attempt-3 repair F10 (stale line ref)]
+// `<orcaHome>/chairs/<chair>/successions/<id>/` was never deleted (confirmed or aborted, up to
+// 32+48 KiB + an embedded charter each) and `retired-handles.json` was append-only forever —
+// unbounded on-disk growth over a chair's lifetime. Run from the startup hook
+// (chair-succession-startup-hook.ts) and, per the contract, after every confirm — wired at both
+// post-confirm call sites: `chair-succession-accept.ts`'s confirm tail (:163) and this scan's own
+// startup confirm (chair-succession-startup-scan.ts's `confirmAlreadyTakenOver`).
 import { readdir, readFile, rm, writeFile, rename } from 'node:fs/promises'
 import { join } from 'node:path'
 import {

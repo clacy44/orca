@@ -164,4 +164,17 @@ describe('parseChairsManifest', () => {
       }).ok
     ).toBe(true)
   })
+
+  // G1 attempt-3 repair F7 (probe p9): the old check matched each ELEMENT exactly, but the launch
+  // joins every element with ' ' and re-tokenizes on whitespace before building the command — a
+  // joined short form, or a selector riding along inside one element via leading/embedded/tab
+  // whitespace, reached the built command unrefused. Validate the same way the launch tokenizes.
+  it.each([
+    ['joined short form -r<id>', ['-rdeadbeef-0000-4000-8000-000000000000']],
+    ['leading space before --continue', [' --continue']],
+    ['embedded space before --continue', ['--verbose --continue']],
+    ['leading tab before -c', ['\t-c']]
+  ])('refuses launchArgs %s', (_label, launchArgs) => {
+    expect(parseChairsManifest({ version: 1, chairs: [baseEntry({ launchArgs })] }).ok).toBe(false)
+  })
 })

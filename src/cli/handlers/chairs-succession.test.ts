@@ -297,12 +297,15 @@ describe('chairs-succession handlers', () => {
 
     // G1 repair N8: five refusals reachable after the wave-2 pass had no next-steps map entry —
     // the runtime sends none for any of them, so a caller previously saw a bare error code.
+    // G1 attempt-3 repair F10: charter_invalid and runtime_busy had no map entry either.
     it.each([
       'succession_incumbent_exit_timeout',
       'succession_run_moved',
       'succession_unknown_ack',
       'succession_lane_unsupported',
-      'resume_context_too_large'
+      'resume_context_too_large',
+      'charter_invalid',
+      'runtime_busy'
     ])('adds a next step for %s when the runtime sent none', async (code) => {
       const call = vi.fn().mockRejectedValue(new RuntimeClientError(code, 'refused'))
 
@@ -350,7 +353,11 @@ describe('chairs-succession handlers', () => {
 
       expect(logSpy).toHaveBeenCalledWith(
         'ACCEPTED succ_xyz chair=chair-a agent=agent_1 run=run_1 generation=3\n' +
-          'WARNINGS manifestWriteFailed'
+          'WARNINGS manifestWriteFailed\n' +
+          // G1 attempt-3 repair F10: the WARNINGS line now names the next step for a recognised
+          // warning, not just the bare identifier.
+          "  - manifestWriteFailed: chairs.json's lastSessionId was not updated; a reboot's " +
+          '`chairs restore` may resume the pre-succession session'
       )
     })
   })

@@ -25,6 +25,7 @@ import {
   type ManifestEntryWithSuccession
 } from './chair-succession-manifest-entry'
 import { buildResumeContextInput } from './chair-succession-resume-input'
+import { DIRECTORY_LIVE_CAP } from '../rpc/methods/agent-directory-rpc-view'
 
 export type ChairSuccessionDeps = {
   db: OrchestrationDb
@@ -76,10 +77,33 @@ export async function sealSuccession(
   // G1 repair M8 / D-R215 A9: slice 1 never launches onto a named lane — refuse to seal an
   // incumbent that is not itself on the host default lane (a named lane's launch would silently
   // land on the default lane instead, contradicting the rendered context).
-  if (deps.runtime.credentialLaneOfPaneKey(params.paneKey) !== null) {
+  // G1 attempt-3 repair F1: `credentialLaneOfPaneKey` returns `{ kind: 'shared' }` — not `null` —
+  // for every ordinary desktop pane (registerPty -> bindMintedPane binds the host-default lane at
+  // mint time), so the old `!== null` check refused every renderer-minted chair pane, not just
+  // named-lane ones. Refuse only an actual named (principal) lane; the shared lane and panes with
+  // no lane row (pre-S9, reattached, `null`) both seal.
+  const paneLane = deps.runtime.credentialLaneOfPaneKey(params.paneKey)
+  if (paneLane?.kind === 'principal') {
     refuse(
       'succession_lane_unsupported',
       'This pane is on a named credential lane; chair succession (slice 1) only supports the host default lane.'
+    )
+  }
+
+  // G1 attempt-3 repair F6: `registerAgentForPane`'s own directory-cap check (the takeover's
+  // last step) only runs AFTER the incumbent is already closed — a dead-pane takeover that hits
+  // DIRECTORY_LIVE_CAP leaves both chairs down. Pre-check here, at seal, well before anything is
+  // committed or anyone is closed — refuses the whole succession attempt up front instead.
+  const liveAgentCount = deps.db.listAgents({
+    hostId: params.hostId,
+    includeDerived: false,
+    includeQuarantined: true,
+    limit: DIRECTORY_LIVE_CAP
+  }).agents.length
+  if (liveAgentCount >= DIRECTORY_LIVE_CAP) {
+    refuse(
+      'succession_directory_full',
+      `The agent directory is at its cap (${DIRECTORY_LIVE_CAP}); a takeover cannot register a successor.`
     )
   }
 
@@ -236,7 +260,11 @@ export async function sealSuccession(
       resumeContextText: rendered.text,
       incumbent: { paneKey: params.paneKey, terminalHandle: params.terminalHandle },
       ackedDeliveryIds: [...ack],
-      runId: run.id
+      runId: run.id,
+      // G1 attempt-3 repair F3: the manifest session id AT SEAL TIME, so a stranded record the
+      // startup tail resolves at a later restart only overwrites the manifest if nothing else
+      // (a normal accept, or a restore) has moved it since.
+      preSuccessionSessionId: entry.lastSessionId ?? entry.conversationId ?? null
     })
   } catch (err) {
     // G1 repair M2: the in-lock re-check inside `createSealed` — nothing was acked or sealed
@@ -251,22 +279,23 @@ export async function sealSuccession(
     throw err
   }
 
-  if (agentDelivery && ack.has(agentDelivery.id)) {
-    deps.db.acknowledgeMailboxDelivery(agentDelivery.id, agentMailbox)
-  }
-  if (runDelivery && ack.has(runDelivery.id)) {
-    deps.db.acknowledgeRunDelivery({
-      runId: run.id,
-      consumerGeneration: run.consumer_generation,
-      deliveryId: runDelivery.id
-    })
-  }
-
-  // G1 repair N14: this write sits BETWEEN `createSealed` succeeding and the RPC caller
-  // registering the hold (rpc/methods/chairs-succession.ts) — unguarded, a DB failure here would
-  // reject this whole call while leaving a `sealed` record with no hold ever registered for it,
-  // wedging the chair until restart. Guard it and move the record to `aborted` on failure.
+  // G1 repair N14, widened by G1 attempt-3 repair F4: N13 moved the acks to run AFTER
+  // `createSealed` (Q3: an ack must never land under a seal attempt that didn't actually seal),
+  // but the guard below originally covered only the audit write — an ack that throws (e.g.
+  // `consumer_fenced` when the Run is rebound mid-seal) left a `sealed` record with no hold ever
+  // registered, wedging the chair until restart (every later `succeed` refused
+  // `succession_in_flight`). Cover the acks too: ANY throw here, ack or audit, aborts the record.
   try {
+    if (agentDelivery && ack.has(agentDelivery.id)) {
+      deps.db.acknowledgeMailboxDelivery(agentDelivery.id, agentMailbox)
+    }
+    if (runDelivery && ack.has(runDelivery.id)) {
+      deps.db.acknowledgeRunDelivery({
+        runId: run.id,
+        consumerGeneration: run.consumer_generation,
+        deliveryId: runDelivery.id
+      })
+    }
     deps.db.writeAgentAudit({
       agentId: params.callerAgentId,
       actorPaneKey: params.paneKey,
@@ -276,7 +305,7 @@ export async function sealSuccession(
       reasonCode: `succession=${meta.id} reason=${params.reason}`.slice(0, 200)
     })
   } catch (err) {
-    const reason = `audit_write_failed:${err instanceof Error ? err.message : String(err)}`.slice(
+    const reason = `ack_or_audit_failed:${err instanceof Error ? err.message : String(err)}`.slice(
       0,
       200
     )

@@ -3,6 +3,12 @@
 // every chair it names, and writes `lastSessionId` back — this module is the one place that
 // shape is parsed, so a malformed entry anywhere refuses the WHOLE file rather than acting on a
 // partial read (spec: "refuse the whole file on any malformed entry (never partial)").
+import {
+  isContinueSelectorToken,
+  isForkSessionRefusalToken,
+  isResumeSelectorToken,
+  isSessionIdRefusalToken
+} from '../../../shared/covered-launch-agents'
 export const CHAIRS_MANIFEST_EFFORTS = [
   'low',
   'medium',
@@ -142,26 +148,27 @@ function hasForbiddenLaunchArgControlChar(value: string): boolean {
   return false
 }
 
-// [G1-10z attempt-2 N11 repair] `launchArgs` is appended after the host's own resume/session
-// selectors (orca-runtime.ts appendAgentArgs) and reaches the shell unfiltered by spawn-time
-// admission's --session-id/--fork-session refusal (ipc/agent-launch-admission.ts:181-184),
-// which only inspects the tokens IT constructs, never a manifest's launchArgs. A manifest-
-// supplied `--resume`, `-r`, `--continue`, `-c`, `--session-id` or `--fork-session` (bare or
-// `=value` form) would let the manifest itself pick which prior session a chair launch resumes
-// — refused here, at parse time, before any of this ever reaches a shell.
-const FORBIDDEN_LAUNCH_ARG_SELECTORS = new Set([
-  '--resume',
-  '-r',
-  '--continue',
-  '-c',
-  '--session-id',
-  '--fork-session'
-])
-
-function isForbiddenLaunchArgSelector(element: string): boolean {
-  const eq = element.indexOf('=')
-  const bare = eq === -1 ? element : element.slice(0, eq)
-  return FORBIDDEN_LAUNCH_ARG_SELECTORS.has(bare)
+// [G1-10z attempt-2 N11 repair, widened by G1 attempt-3 repair F7] `launchArgs` is appended after
+// the host's own resume/session selectors (orca-runtime.ts appendAgentArgs) and reaches the shell
+// unfiltered by spawn-time admission's --session-id/--fork-session refusal
+// (ipc/agent-launch-admission.ts:181-184), which only inspects the tokens IT constructs, never a
+// manifest's launchArgs. The launch joins every element with `' '` and re-tokenizes the WHOLE
+// string on whitespace before building the command — an exact-element check (the pre-F7 shape)
+// let `-r<id>` (a joined short form, one element, not an exact `-r`/`--resume` match) and
+// ' --continue' / '--verbose --continue' / '\t-c' (one element that tokenizes into MORE than one
+// token once joined and re-split) straight through. Validate the SAME way the launch tokenizes:
+// join, split on whitespace, and classify every resulting token with the shared predicates
+// `agent-launch-admission.ts`'s spawn-time boundary check already uses (never a private
+// re-implementation to drift from it). An element with leading/trailing whitespace is refused
+// outright — that whitespace is exactly what smuggles an extra token past a naive per-element
+// check when the join happens.
+function isForbiddenLaunchArgSelectorToken(token: string): boolean {
+  return (
+    isResumeSelectorToken(token) ||
+    isContinueSelectorToken(token) ||
+    isSessionIdRefusalToken(token) ||
+    isForkSessionRefusalToken(token)
+  )
 }
 
 function validateLaunchArgs(raw: unknown, index: number): string | null {
@@ -176,8 +183,17 @@ function validateLaunchArgs(raw: unknown, index: number): string | null {
     if (hasForbiddenLaunchArgControlChar(element)) {
       return `chairs[${index}].launchArgs[${i}] must not contain a C0/C1 control character or DEL`
     }
-    if (isForbiddenLaunchArgSelector(element)) {
-      return `chairs[${index}].launchArgs[${i}] must not be a resume/session/fork selector (--resume, -r, --continue, -c, --session-id, --fork-session)`
+    if (element !== element.trim()) {
+      return `chairs[${index}].launchArgs[${i}] must not have leading or trailing whitespace`
+    }
+  }
+  const joinedTokens = raw
+    .join(' ')
+    .split(/\s+/)
+    .filter((t) => t.length > 0)
+  for (const token of joinedTokens) {
+    if (isForbiddenLaunchArgSelectorToken(token)) {
+      return `chairs[${index}].launchArgs must not tokenize to a resume/session/fork selector (--resume, -r, --continue, -c, --session-id, --fork-session); "${token}" does`
     }
   }
   return null

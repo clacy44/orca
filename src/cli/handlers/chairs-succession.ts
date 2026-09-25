@@ -5,6 +5,7 @@ import type { CommandHandler } from '../dispatch'
 import { getRepeatedStringFlag, getRequiredStringFlag } from '../flags'
 import { printResult } from '../format'
 import { RuntimeClientError } from '../runtime-client'
+import { SUCCESSION_NEXT_STEPS, WARNING_GUIDANCE } from './chairs-succession-next-steps'
 
 // Why this budget, not the `orchestration check --wait` mechanism itself: that mechanism
 // (src/cli/runtime/client.ts:26-33 LONG_POLL_CLIENT_GRACE_MS, :193-204
@@ -51,87 +52,6 @@ type ResumeContextResult =
   | { ok: true; text: string; served: boolean }
   | { ok: false; code: 'succession_none' }
 
-// Why this map, not raw RPC refusals: `format.ts`'s `formatCliError` already renders any
-// `nextSteps` the runtime attaches to `error.data` (src/cli/format.ts:87-90,134-138) — this map
-// only fills the gap for succession/checkpoint refusal codes where the runtime sends none, the
-// same pattern `computer-use-error-recovery.ts` uses for `computer` command codes (cited at
-// src/cli/format.ts:94).
-const SUCCESSION_NEXT_STEPS: Record<string, string[]> = {
-  succession_not_a_chair: [
-    'Run this from a chair pane; only a Run-bound chair may call `orca chairs succeed`.'
-  ],
-  succession_no_run: [
-    'Bind a Run first (`orca orchestration run-use --id <run>` or create one), then retry.'
-  ],
-  succession_legacy_run: [
-    'This Run predates succession support; finish it without succession, or migrate the Run before retrying.'
-  ],
-  succession_active_dispatch: [
-    'Wait for the outstanding dispatch to settle, or release it, before retrying `orca chairs succeed`.'
-  ],
-  succession_in_flight: [
-    'A succession for this chair is already sealed or launching; run `orca chairs resume-context` on the successor, or wait for it to resolve, before starting another.'
-  ],
-  succession_charter_missing: [
-    "Set the chair's manifest `succession.charterPath` to an existing charter file, then retry."
-  ],
-  succession_unacked_delivery: [
-    'Acknowledge the listed delivery ids (pass each with `--ack <id>`), then retry.'
-  ],
-  checkpoint_schema: [
-    "Make the checkpoint's first non-empty line read exactly `schema: orca.chair-checkpoint/1`."
-  ],
-  checkpoint_sections: [
-    'Fix the checkpoint to have exactly the eight required `## ` headings, in order, with exact titles.'
-  ],
-  checkpoint_empty_section: ['Fill in the empty section, or write the literal `none`, then retry.'],
-  checkpoint_fence_line: [
-    'Remove the code-fence delimiter (```` ``` ```` or `~~~`) from the checkpoint body.'
-  ],
-  checkpoint_tag_line: ['Remove the line that looks like a system tag from the checkpoint body.'],
-  checkpoint_too_large: [
-    'Shorten the checkpoint: each section must fit 8 KiB and the whole file 32 KiB.'
-  ],
-  checkpoint_secret_shape: ['Remove the credential-shaped text from the checkpoint, then retry.'],
-  checkpoint_unsupported_claim: [
-    'Cite the approving message id (`msg_` + 12 hex) for any claimed owner approval, or remove the claim.'
-  ],
-  succession_unknown: [
-    'Check the succession id; it may already have resolved or expired. Use the id your launch context named.'
-  ],
-  succession_wrong_pane: [
-    'Run `orca chairs succession-accept` from the successor pane the succession named, not this one.'
-  ],
-  succession_not_launching: [
-    'This succession is not awaiting acceptance (already confirmed or aborted); nothing to accept.'
-  ],
-  succession_expired: [
-    'The acceptance window passed and the succession was aborted; ask the incumbent chair to run `orca chairs succeed` again.'
-  ],
-  succession_takeover_failed: [
-    'Both panes may be down: run `orca chairs restore` twice, ten seconds apart, then retry from the restored chair.'
-  ],
-  // G1 repair round (attempt 2), N8: five refusals reachable after the wave-2 pass with no map
-  // entry — the runtime sent no `nextSteps` for any of them, so a caller saw a bare error code.
-  succession_incumbent_exit_timeout: [
-    'stand down: this pane is not the chair — do not send or receive chair traffic from it',
-    'ask the incumbent (or a human) to check whether the old pane is actually dead',
-    'once confirmed dead, a fresh `orca chairs succeed` from the incumbent (if reachable) or manual recovery can retry'
-  ],
-  succession_run_moved: [
-    'The incumbent no longer holds the Run this succession was sealed for; ask the incumbent to re-run `orca chairs succeed` against its CURRENT Run.'
-  ],
-  succession_unknown_ack: [
-    '--ack named an id with no outstanding delivery; drop it (or fix the typo) and retry.'
-  ],
-  succession_lane_unsupported: [
-    'Chair succession (slice 1) only supports the host default lane; move this pane off its named credential lane before retrying.'
-  ],
-  resume_context_too_large: [
-    'Shorten the checkpoint or the board state so the rendered resume context fits the size cap, then retry.'
-  ]
-}
-
 async function withSuccessionNextSteps<T>(promise: Promise<T>): Promise<T> {
   try {
     return await promise
@@ -166,6 +86,12 @@ function formatSuccessionAccept(result: SuccessionAcceptResult): string {
   // print what to check by hand rather than staying silent about it.
   if (result.warnings && result.warnings.length > 0) {
     lines.push(`WARNINGS ${result.warnings.join(',')}`)
+    for (const warning of result.warnings) {
+      const guidance = WARNING_GUIDANCE[warning]
+      if (guidance) {
+        lines.push(`  - ${warning}: ${guidance}`)
+      }
+    }
   }
   if (result.resumeContext) {
     lines.push('', result.resumeContext)

@@ -90,6 +90,13 @@ export type SuccessionMeta = {
    * `succession_run_moved` if the incumbent no longer holds it by accept time — optional so
    * pre-repair meta.json files without it still parse. */
   runId?: string
+  /** G1 attempt-3 repair F3: the manifest's `lastSessionId` (falling back to `conversationId`)
+   * AT SEAL TIME — the startup tail's confirm-resolution only overwrites the manifest while it
+   * still holds this exact value, so a session the successor (or a later restore) has already
+   * moved on from is never regressed by a stranded record resolved at the next restart. Optional
+   * so pre-repair meta.json files without it still parse (the startup tail then falls back to
+   * always writing, its pre-repair shape). */
+  preSuccessionSessionId?: string | null
 }
 
 /** Whether the resume context embeds the charter text or only references it (D-R215 amendment

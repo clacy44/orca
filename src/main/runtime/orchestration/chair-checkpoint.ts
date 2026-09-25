@@ -53,6 +53,11 @@ const FENCE_LINE_RE = /^\s*(```|~~~)/
 // indented ~~~ line-start fence.
 const BACKTICK_RUN_RE = /`{4,}/
 const TAG_LINE_RE = /^\s*<[A-Za-z!?/]/
+// G1 attempt-3 repair F9: the fence/tag rules above only ever saw what `.split('\n')` produced —
+// a tag line hidden behind a bare CR, U+2028 (LINE SEPARATOR), U+2029 (PARAGRAPH SEPARATOR), VT
+// or FF (every line ending CommonMark itself recognizes, besides `\n`/`\r\n`) passed both
+// validators unseen and landed verbatim in the rendered context. Split on all of them.
+const LINE_SPLIT_RE = /\r\n?|\n|\u2028|\u2029|\v|\f|\u0085/
 const OWNER_CLAIM_RE = /\bowner\b/i
 const OWNER_CLAIM_VERB_RE = /\b(approved|ratified|authorized|authorised)\b/i
 const MESSAGE_ID_RE = /\bmsg_[0-9a-f]{12}\b/
@@ -106,7 +111,7 @@ function findLineShapeViolation(lines: string[]): ChairCheckpointResult | null {
  * full `parseChairCheckpoint` contract (no schema line, no `## ` sections, no secret/claim
  * scan) — a charter is prose, not a checkpoint. */
 export function validateEmbeddedCharterText(text: string): EmbeddedCharterValidationResult {
-  const lines = text.split('\n')
+  const lines = text.split(LINE_SPLIT_RE)
   const violation = findLineShapeViolation(lines)
   return violation && !violation.ok ? violation : { ok: true }
 }
@@ -180,7 +185,7 @@ export function parseChairCheckpoint(text: string): ChairCheckpointResult {
     return fail('checkpoint_too_large', `total size ${bytes} bytes exceeds ${TOTAL_CAP_BYTES}`)
   }
 
-  const lines = text.split('\n')
+  const lines = text.split(LINE_SPLIT_RE)
 
   const firstNonEmptyIndex = lines.findIndex((line) => line.trim().length > 0)
   if (firstNonEmptyIndex === -1 || lines[firstNonEmptyIndex] !== CHECKPOINT_SCHEMA_LINE) {

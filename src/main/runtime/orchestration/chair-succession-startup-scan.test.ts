@@ -70,7 +70,9 @@ function fakeRuntime(overrides: {
 function dbFacade(): SuccessionStartupScanDb {
   return {
     getAgentByName: (hostId, name) => db.getAgentByName(hostId, name),
-    bindRun: (params) => db.bindRun(params)
+    bindRun: (params) => db.bindRun(params),
+    getRun: (id) => db.getRun(id),
+    writeAgentAudit: (row) => db.writeAgentAudit(row)
   }
 }
 
@@ -336,5 +338,94 @@ describe('scanSuccessionsAtStartup', () => {
         orcaHome: join(tempDir, 'never-created')
       })
     ).resolves.toBeUndefined()
+  })
+
+  // G1 attempt-3 repair F3 (probe p12): a record left `confirming` (e.g. accept's
+  // `confirmTransitionFailed` warning path) is only resolved at the NEXT restart. By then the
+  // Run has moved on (a fresh Run bound to the same successor pane displaces the seal-time Run,
+  // per `unbindOtherRunsForPane`) and the manifest has been updated by a later accept/restore.
+  // The old unconditional rebind/rewrite would unbind the CURRENT Run and regress the manifest to
+  // the pre-succession session. Assert both are left untouched, and the skip is audited.
+  it('F3: a confirming record resolved at the next restart does NOT rebind a moved Run or regress a newer manifest', async () => {
+    const chair = 'chair-stale-tail'
+    const manifestPath = join(tempDir, 'chairs.json')
+    writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 1,
+        chairs: [{ name: chair, worktree: '/repo', agent: 'claude', conversationId: 'sess-orig' }]
+      })
+    )
+    const run1 = db.createRun({
+      objective: 'old',
+      coordinatorHandle: 'handle-incumbent',
+      coordinatorPaneKey: 'pane-incumbent'
+    })
+    const meta = await createSealed(storeDeps, chair, {
+      ...sealedInput(),
+      runId: run1.id,
+      preSuccessionSessionId: 'sess-orig'
+    })
+    await transition(storeDeps, chair, meta.id, 'launching', {
+      successor: {
+        paneKey: 'pane-successor',
+        terminalHandle: 'handle-successor',
+        sessionId: 'sess-b'
+      }
+    })
+    await transition(storeDeps, chair, meta.id, 'confirming')
+    const registered = db.upsertAgentByPaneSuffix({
+      displayName: chair,
+      role: null,
+      hostId: 'local',
+      paneKey: 'pane-successor',
+      terminalHandle: 'handle-successor',
+      processIncarnation: null,
+      worktreeId: null,
+      worktreePath: null,
+      branch: null,
+      title: null,
+      agentLabel: null,
+      originHandle: 'handle-successor',
+      originHostId: 'local'
+    })
+    if (registered.outcome === 'name_taken') {
+      throw new Error('fixture setup failed')
+    }
+    // accept's takeover bound run1 to the successor pane before its `confirmed` transition failed.
+    db.bindRun({
+      runId: run1.id,
+      coordinatorHandle: 'handle-successor',
+      coordinatorPaneKey: 'pane-successor'
+    })
+    // hours later: the chair finished run1's objective and bound a NEW Run to the same pane —
+    // unbindOtherRunsForPane displaces run1 (its coordinator_pane_key goes back to null) — and a
+    // later restore/accept moved the manifest on.
+    const run2 = db.createRun({
+      objective: 'new',
+      coordinatorHandle: 'handle-successor',
+      coordinatorPaneKey: 'pane-successor'
+    })
+    const manifestBefore = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+      chairs: { lastSessionId?: string }[]
+    }
+    manifestBefore.chairs[0].lastSessionId = 'sess-newer'
+    writeFileSync(manifestPath, JSON.stringify(manifestBefore))
+
+    const runtime = fakeRuntime({ live: new Set(['pane-successor']) })
+    await scanSuccessionsAtStartup({ runtime, db: dbFacade(), orcaHome: tempDir, manifestPath })
+
+    const after = await read(storeDeps, chair, meta.id)
+    expect(after?.state).toBe('confirmed')
+    // run2 — the CURRENT Run for that pane — must still be bound there, not displaced.
+    const boundRun2 = db.getRun(run2.id)
+    expect(boundRun2?.coordinator_pane_key).toBe('pane-successor')
+    const run1After = db.getRun(run1.id)
+    expect(run1After?.coordinator_pane_key).toBeNull()
+    // The manifest must NOT be regressed to the pre-succession/seal-time session.
+    const manifestAfter = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+      chairs: { lastSessionId?: string }[]
+    }
+    expect(manifestAfter.chairs[0].lastSessionId).toBe('sess-newer')
   })
 })

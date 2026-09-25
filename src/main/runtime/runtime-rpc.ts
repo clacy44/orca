@@ -541,8 +541,13 @@ function longPollClassOf(request: RpcRequest): LongPollClass | null {
   // N9: successionAccept's worst case (a chair-lock wait up to 30s, plus a bounded 10s exit
   // wait, plus a manifest-lock wait up to 30s behind a restore) can exceed the 30s socket idle
   // bound the same way `succeed` above can — same classification, same reason.
+  // G1 attempt-3 repair F2: classifying it 'wait' put it behind the same 12-slot sub-cap as every
+  // `terminal.wait`/`check --wait`/`orchestration.wait`/`workerStart` on the host, so a normal
+  // fleet's parked waits could starve the one successionAccept call the incumbent's hold is
+  // waiting on, timing the hold out. It still keeps the keepalive/abort wiring 'wait' gives it —
+  // classify it 'pact' so it takes the reserved headroom instead of competing for it.
   if (request.method === 'orchestration.chairs.successionAccept') {
-    return 'wait'
+    return 'pact'
   }
   return null
 }
