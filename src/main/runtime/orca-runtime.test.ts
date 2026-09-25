@@ -9262,6 +9262,53 @@ describe('OrcaRuntimeService', () => {
     }
   })
 
+  // G1 round-3 non-blocking 4: output recurring faster than the confirm latency (2-6s on
+  // Windows) previously deferred the resolve forever, because every quiet tick paid for its
+  // own fresh forced scan. A positive confirm is now trusted for ~10s so a later quiet tick can
+  // resolve without repeating the scan.
+  it('G1 repair (non-blocking 4): periodic output every 4.5s with a 3s confirm still resolves, not times out', async () => {
+    vi.useFakeTimers()
+    try {
+      const confirmForegroundProcess = vi.fn(
+        () =>
+          new Promise<string | null>((resolve) => {
+            setTimeout(() => resolve('claude'), 3_000)
+          })
+      )
+      const runtime = createRuntime()
+      runtime.setPtyController({
+        write: () => true,
+        kill: () => true,
+        getForegroundProcess: async () => 'claude',
+        confirmForegroundProcess
+      })
+      syncSinglePty(runtime)
+      runtime.onPtyData('pty-1', 'agent output, no title\r\n', Date.now())
+
+      const [terminal] = (await runtime.listTerminals()).terminals
+      const wait = runtime.waitForTerminal(terminal.handle, {
+        condition: 'tui-idle',
+        timeoutMs: 20_000
+      })
+
+      const start = Date.now()
+      while (Date.now() - start < 20_000) {
+        await vi.advanceTimersByTimeAsync(500)
+        if ((Date.now() - start) % 4_500 === 0) {
+          runtime.onPtyData('pty-1', 'status tick\r\n', Date.now())
+        }
+      }
+      await vi.advanceTimersByTimeAsync(600)
+
+      await expect(wait).resolves.toMatchObject({
+        handle: terminal.handle,
+        condition: 'tui-idle'
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('ignores the bare cursor-agent native title so synthesized spinner state survives', async () => {
     const ptyId = `${TEST_REPO_ID}::/tmp/worktree-a@@pty-bg`
     const runtime = createRuntime()
@@ -17044,6 +17091,126 @@ describe('OrcaRuntimeService', () => {
       handle,
       condition: 'tui-idle',
       status: 'running'
+    })
+  })
+
+  // G1 round-3 item 4: the leaf-edge foreground-fallback tests above (~9142, ~9176, ~9221) only
+  // exercise startTuiIdleFallbackPoll. startPtyTuiIdleFallbackPoll runs the same fresh-confirm
+  // logic on a runtime-owned pty: handle (createTerminal, not syncWindowGraph) and had no
+  // failing test of its own (G1 attempt-3 blocking 3).
+  describe('G1 repair (pty: handle foreground-fallback edge)', () => {
+    it('resolves tui-idle when the fresh confirm returns null, with exactly one confirm call', async () => {
+      vi.useFakeTimers()
+      try {
+        const confirmForegroundProcess = vi.fn(async () => null)
+        const runtime = new OrcaRuntimeService(store)
+        runtime.setPtyController({
+          spawn: vi.fn().mockResolvedValue({ id: 'pty-bg' }),
+          write: () => true,
+          kill: () => true,
+          getForegroundProcess: async () => 'claude',
+          confirmForegroundProcess
+        })
+        const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+          restoreProvenance: { kind: 'none' },
+          credentialLane: { kind: 'shared' }
+        })
+        runtime.onPtyData('pty-bg', 'agent output, no title\r\n', Date.now())
+
+        const wait = runtime.waitForTerminal(handle, { condition: 'tui-idle', timeoutMs: 6_000 })
+
+        await vi.advanceTimersByTimeAsync(5_500)
+
+        await expect(wait).resolves.toMatchObject({ handle, condition: 'tui-idle' })
+        expect(confirmForegroundProcess).toHaveBeenCalledTimes(1)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('defers the resolve when output arrives during the confirm await', async () => {
+      vi.useFakeTimers()
+      try {
+        let resolveConfirm: ((value: string | null) => void) | undefined
+        const confirmForegroundProcess = vi.fn(
+          () =>
+            new Promise<string | null>((resolve) => {
+              resolveConfirm = resolve
+            })
+        )
+        const runtime = new OrcaRuntimeService(store)
+        runtime.setPtyController({
+          spawn: vi.fn().mockResolvedValue({ id: 'pty-bg' }),
+          write: () => true,
+          kill: () => true,
+          getForegroundProcess: async () => 'claude',
+          confirmForegroundProcess
+        })
+        const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+          restoreProvenance: { kind: 'none' },
+          credentialLane: { kind: 'shared' }
+        })
+        runtime.onPtyData('pty-bg', 'agent output, no title\r\n', Date.now())
+
+        const wait = runtime.waitForTerminal(handle, { condition: 'tui-idle', timeoutMs: 6_000 })
+        wait.catch(() => {})
+
+        await vi.advanceTimersByTimeAsync(3_500)
+        await vi.waitFor(() => expect(confirmForegroundProcess).toHaveBeenCalledTimes(1))
+
+        runtime.onPtyData('pty-bg', 'more agent output\r\n', Date.now())
+        resolveConfirm?.('claude')
+        await vi.advanceTimersByTimeAsync(0)
+
+        await expect(Promise.race([wait, Promise.resolve('still-pending')])).resolves.toBe(
+          'still-pending'
+        )
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('defers the resolve when a launch-prompt fence arrives during the confirm await', async () => {
+      vi.useFakeTimers()
+      try {
+        let resolveConfirm: ((value: string | null) => void) | undefined
+        const confirmForegroundProcess = vi.fn(
+          () =>
+            new Promise<string | null>((resolve) => {
+              resolveConfirm = resolve
+            })
+        )
+        const runtime = new OrcaRuntimeService(store)
+        runtime.setPtyController({
+          spawn: vi.fn().mockResolvedValue({ id: 'pty-bg' }),
+          write: () => true,
+          kill: () => true,
+          getForegroundProcess: async () => 'claude',
+          confirmForegroundProcess
+        })
+        const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+          restoreProvenance: { kind: 'none' },
+          credentialLane: { kind: 'shared' }
+        })
+        setPtyLaunchAgent(runtime, 'pty-bg', 'claude')
+        runtime.onPtyData('pty-bg', 'agent output, no title\r\n', Date.now())
+
+        const wait = runtime.waitForTerminal(handle, { condition: 'tui-idle', timeoutMs: 6_000 })
+        wait.catch(() => {})
+
+        await vi.advanceTimersByTimeAsync(3_500)
+        await vi.waitFor(() => expect(confirmForegroundProcess).toHaveBeenCalledTimes(1))
+
+        runtime.noteTerminalSpawnCommand('pty-bg', 'claude')
+        resolveConfirm?.('claude')
+        await vi.advanceTimersByTimeAsync(0)
+
+        await expect(Promise.race([wait, Promise.resolve('still-pending')])).resolves.toBe(
+          'still-pending'
+        )
+      } finally {
+        vi.useRealTimers()
+      }
     })
   })
 

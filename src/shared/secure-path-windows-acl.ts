@@ -104,6 +104,9 @@ export function restrictWindowsPathSync(targetPath: string, isDirectory: boolean
     return false
   }
   // Why: file must not be published until its ACL is actually restricted, so block and report real success (read path stays async, #4901).
+  // G1 repair (non-blocking 5): the 20s directory timeout is for the async launcher's recursive
+  // propagation on a stormed main thread; sync callers (lane/artifact directories) are small and
+  // must not block their caller past 5s.
   try {
     execFileSync(
       getWindowsSystemToolPath('WindowsPowerShell\\v1.0\\powershell.exe'),
@@ -111,7 +114,7 @@ export function restrictWindowsPathSync(targetPath: string, isDirectory: boolean
       {
         stdio: ['ignore', 'ignore', 'ignore'],
         windowsHide: true,
-        timeout: windowsRestrictAclTimeoutMs(isDirectory)
+        timeout: WINDOWS_RESTRICT_ACL_FILE_TIMEOUT_MS
       }
     )
     return true
@@ -127,6 +130,9 @@ export function restrictWindowsPathSync(targetPath: string, isDirectory: boolean
 // F4: Confirm-AclRestricted also requires the current user's own SID to carry FullControl (not
 // just "no unexpected entries" — an empty protected DACL used to pass) and, for directories,
 // requires CI|OI inheritance without InheritOnly, so the check actually matches the rebuild.
+// G1 repair (item 5): verify-first only skips the rebuild for FILES. A directory's first
+// propagation can be interrupted by the spawn timeout, and once its root already verifies no
+// later run would ever re-propagate to the rest of the tree — directories always rebuild.
 function buildWindowsRestrictAclScript(
   targetPath: string,
   currentUserSid: string,
@@ -185,9 +191,6 @@ try {
 } catch {
   $alreadyRestricted = $false
 }
-// G1 repair (item 5): verify-first only skips the rebuild for FILES. A directory's first
-// propagation can be interrupted by the spawn timeout, and once its root already verifies no
-// later run would ever re-propagate to the rest of the tree — directories always rebuild.
 if ($isDirectory -or -not $alreadyRestricted) {
   $acl.SetAccessRuleProtection($true, $false)
   foreach ($rule in @($acl.Access)) {
@@ -249,4 +252,14 @@ function parseCsvLine(line: string): string[] {
 
 export function resetSecureFileWindowsUserSidForTests(): void {
   cachedWindowsUserSid = undefined
+}
+
+/** Test-only: exposes the raw PowerShell script text (parser/decision-table tests need the
+ *  literal script, not a mocked child_process capture of it). */
+export function buildWindowsRestrictAclScriptForTests(
+  targetPath: string,
+  currentUserSid: string,
+  isDirectory: boolean
+): string {
+  return buildWindowsRestrictAclScript(targetPath, currentUserSid, isDirectory ? '1' : '0')
 }

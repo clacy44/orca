@@ -189,4 +189,79 @@ describe('secure-path-windows-read-throttle (B2b/c, F6, F7 REPAIR)', () => {
     await vi.advanceTimersByTimeAsync(0)
     expect(bestEffortRestrictWindowsPathMock).not.toHaveBeenCalled()
   })
+
+  // G1 round-3 non-blocking 6 (mutant kills, G1 attempt-3 blocking coverage note): the three
+  // survivors from the doubling test above (M-bk1 cap removed, M-bk2 no reset on success, M-bk3
+  // no reset on identity change) need their own assertion.
+  async function driveFailures(count: number): Promise<void> {
+    for (let index = 0; index < count; index += 1) {
+      bestEffortRestrictWindowsPathMock.mockResolvedValueOnce(false)
+      hardenWindowsFileOnce(TARGET_PATH)
+      await vi.advanceTimersByTimeAsync(0)
+      // Advance well past whatever floor is currently in effect (capped at the 10-minute floor)
+      // so the next call always spawns.
+      await vi.advanceTimersByTimeAsync(SECURE_PATH_REHARDEN_FLOOR_MS + 1)
+    }
+  }
+
+  it('M-bk1: the doubled retry floor caps at the 10-minute success floor', async () => {
+    // 6 consecutive failures: 30s*2^5 = 960s uncapped, must cap at 600s.
+    await driveFailures(6)
+    const callsBeforeFinalFailure = bestEffortRestrictWindowsPathMock.mock.calls.length
+    bestEffortRestrictWindowsPathMock.mockResolvedValueOnce(false)
+    hardenWindowsFileOnce(TARGET_PATH)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(bestEffortRestrictWindowsPathMock.mock.calls.length).toBe(callsBeforeFinalFailure + 1)
+
+    await vi.advanceTimersByTimeAsync(SECURE_PATH_REHARDEN_FLOOR_MS - 1)
+    hardenWindowsFileOnce(TARGET_PATH)
+    expect(bestEffortRestrictWindowsPathMock.mock.calls.length).toBe(callsBeforeFinalFailure + 1) // still under the capped 600s floor
+
+    await vi.advanceTimersByTimeAsync(2)
+    bestEffortRestrictWindowsPathMock.mockResolvedValueOnce(true)
+    hardenWindowsFileOnce(TARGET_PATH)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(bestEffortRestrictWindowsPathMock.mock.calls.length).toBe(callsBeforeFinalFailure + 2) // capped floor elapsed
+  })
+
+  it('M-bk2: a success resets the failure streak, so the next failure gets the base 30s floor', async () => {
+    await driveFailures(2) // consecutiveFailures=2, next floor would be 120s if not reset
+
+    bestEffortRestrictWindowsPathMock.mockResolvedValueOnce(true)
+    hardenWindowsFileOnce(TARGET_PATH)
+    await vi.advanceTimersByTimeAsync(0)
+
+    await vi.advanceTimersByTimeAsync(SECURE_PATH_REHARDEN_FLOOR_MS + 1)
+    bestEffortRestrictWindowsPathMock.mockResolvedValueOnce(false)
+    hardenWindowsFileOnce(TARGET_PATH) // failure #1 of a fresh streak
+    const callsAfterFreshFailure = bestEffortRestrictWindowsPathMock.mock.calls.length
+    await vi.advanceTimersByTimeAsync(0)
+
+    // Past the base 30s floor: must retry (proves the streak reset, not stuck at a longer floor).
+    await vi.advanceTimersByTimeAsync(SECURE_PATH_REHARDEN_RETRY_FLOOR_MS + 1)
+    hardenWindowsFileOnce(TARGET_PATH)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(bestEffortRestrictWindowsPathMock.mock.calls.length).toBe(callsAfterFreshFailure + 1)
+  })
+
+  it('M-bk3: a replaced identity resets the failure streak, so its first failure gets the base 30s floor', async () => {
+    bestEffortRestrictWindowsPathMock.mockResolvedValueOnce(false)
+    hardenWindowsFileOnce(TARGET_PATH)
+    await vi.advanceTimersByTimeAsync(0) // identity A, consecutiveFailures=1
+
+    // The file is replaced with a new identity before the next read.
+    fileState.ino = 9999
+    bestEffortRestrictWindowsPathMock.mockResolvedValueOnce(false)
+    hardenWindowsFileOnce(TARGET_PATH) // identity B, first failure of its own streak
+    const callsAfterReplacementFailure = bestEffortRestrictWindowsPathMock.mock.calls.length
+    await vi.advanceTimersByTimeAsync(0)
+
+    // Past the base 30s floor: must retry (proves identity B's streak did not inherit A's count).
+    await vi.advanceTimersByTimeAsync(SECURE_PATH_REHARDEN_RETRY_FLOOR_MS + 1)
+    hardenWindowsFileOnce(TARGET_PATH)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(bestEffortRestrictWindowsPathMock.mock.calls.length).toBe(
+      callsAfterReplacementFailure + 1
+    )
+  })
 })
