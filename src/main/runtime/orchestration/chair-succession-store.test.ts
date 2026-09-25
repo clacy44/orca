@@ -84,10 +84,12 @@ describe('S10-22a chair-succession-store: atomic write leaves no tmp', () => {
 })
 
 describe('S10-22a chair-succession-store: legal and illegal transitions', () => {
-  it('sealed -> launching -> confirmed succeeds', async () => {
+  it('sealed -> launching -> confirming -> confirmed succeeds', async () => {
     const meta = await createSealed(deps, 'chair-a', sealedInput())
     const launching = await transition(deps, 'chair-a', meta.id, 'launching')
     expect(launching.state).toBe('launching')
+    const confirming = await transition(deps, 'chair-a', meta.id, 'confirming')
+    expect(confirming.state).toBe('confirming')
     const confirmed = await transition(deps, 'chair-a', meta.id, 'confirmed')
     expect(confirmed.state).toBe('confirmed')
   })
@@ -108,16 +110,38 @@ describe('S10-22a chair-succession-store: legal and illegal transitions', () => 
     expect(aborted.state).toBe('aborted')
   })
 
-  it('sealed -> confirmed throws succession_bad_transition (skips launching)', async () => {
+  // G1 repair B3: `confirming` exists exactly so a takeover failure (accept.ts, AFTER closing
+  // the incumbent) can still land on a terminal state, without `launching` (which would let a
+  // late abort-tail race close the successor pane too).
+  it('confirming -> aborted succeeds (accept.ts takeover-failure path)', async () => {
     const meta = await createSealed(deps, 'chair-a', sealedInput())
-    await expect(transition(deps, 'chair-a', meta.id, 'confirmed')).rejects.toBeInstanceOf(
+    await transition(deps, 'chair-a', meta.id, 'launching')
+    await transition(deps, 'chair-a', meta.id, 'confirming')
+    const aborted = await transition(deps, 'chair-a', meta.id, 'aborted', {
+      abortReason: 'takeover_failed_after_close:name_taken'
+    })
+    expect(aborted.state).toBe('aborted')
+  })
+
+  it('sealed -> confirming throws succession_bad_transition (skips launching)', async () => {
+    const meta = await createSealed(deps, 'chair-a', sealedInput())
+    await expect(transition(deps, 'chair-a', meta.id, 'confirming')).rejects.toBeInstanceOf(
       SuccessionBadTransitionError
     )
+  })
+
+  it('launching -> confirmed throws succession_bad_transition (skips confirming)', async () => {
+    const meta = await createSealed(deps, 'chair-a', sealedInput())
+    await transition(deps, 'chair-a', meta.id, 'launching')
+    await expect(transition(deps, 'chair-a', meta.id, 'confirmed')).rejects.toMatchObject({
+      code: 'succession_bad_transition'
+    })
   })
 
   it('confirmed -> anything throws succession_bad_transition (terminal state)', async () => {
     const meta = await createSealed(deps, 'chair-a', sealedInput())
     await transition(deps, 'chair-a', meta.id, 'launching')
+    await transition(deps, 'chair-a', meta.id, 'confirming')
     await transition(deps, 'chair-a', meta.id, 'confirmed')
     await expect(transition(deps, 'chair-a', meta.id, 'aborted')).rejects.toMatchObject({
       code: 'succession_bad_transition'
@@ -140,21 +164,22 @@ describe('S10-22a chair-succession-store: legal and illegal transitions', () => 
 })
 
 describe('S10-22a chair-succession-store: lock contention between two createSealed calls', () => {
-  it('serializes two concurrent createSealed calls for the same chair (FIFO, not rejection)', async () => {
-    const order: string[] = []
-    const first = createSealed(deps, 'chair-lock', sealedInput()).then((meta) => {
-      order.push('first')
-      return meta
+  // G1 repair M2: two concurrent `succeed` calls for the SAME chair must never both launch a
+  // successor. Before the fix, the second call raced the first's unlocked `listActive` read and
+  // could win, creating two live successions for one chair. `withPaneLock`'s FIFO ordering means
+  // the second call's in-lock re-check runs only after the first's full write completes, so it
+  // deterministically sees the first's id, not a corrupted or partial read.
+  it('the second concurrent createSealed call for the same chair is refused in-flight, never both created', async () => {
+    const first = createSealed(deps, 'chair-lock', sealedInput())
+    const second = createSealed(deps, 'chair-lock', sealedInput())
+    const firstMeta = await first
+    await expect(second).rejects.toMatchObject({
+      code: 'succession_in_flight',
+      successionId: firstMeta.id,
+      state: 'sealed'
     })
-    const second = createSealed(deps, 'chair-lock', sealedInput()).then((meta) => {
-      order.push('second')
-      return meta
-    })
-    const [firstMeta, secondMeta] = await Promise.all([first, second])
-    expect(order).toEqual(['first', 'second'])
-    expect(firstMeta.id).not.toBe(secondMeta.id)
     const active = await listActive(deps, 'chair-lock')
-    expect(active.map((m) => m.id).sort()).toEqual([firstMeta.id, secondMeta.id].sort())
+    expect(active.map((m) => m.id)).toEqual([firstMeta.id])
   })
 })
 
@@ -196,17 +221,19 @@ describe('S10-22a chair-succession-store: retired-handles append', () => {
 })
 
 describe('S10-22a chair-succession-store: listActive', () => {
-  it('lists only sealed/launching successions, excluding confirmed and aborted', async () => {
-    const sealedMeta = await createSealed(deps, 'chair-a', sealedInput())
-    const launchingMeta = await createSealed(deps, 'chair-a', sealedInput())
-    await transition(deps, 'chair-a', launchingMeta.id, 'launching')
+  // M2 makes "sealed AND launching simultaneously for one chair" impossible in practice (only one
+  // succession may be in flight per chair at a time) — this exercises that history (confirmed,
+  // then aborted) never leaks into `listActive`, only the current sealed record does.
+  it('excludes confirmed and aborted history, listing only the current sealed/launching record', async () => {
     const confirmedMeta = await createSealed(deps, 'chair-a', sealedInput())
     await transition(deps, 'chair-a', confirmedMeta.id, 'launching')
+    await transition(deps, 'chair-a', confirmedMeta.id, 'confirming')
     await transition(deps, 'chair-a', confirmedMeta.id, 'confirmed')
     const abortedMeta = await createSealed(deps, 'chair-a', sealedInput())
     await transition(deps, 'chair-a', abortedMeta.id, 'aborted')
+    const currentMeta = await createSealed(deps, 'chair-a', sealedInput())
 
     const active = await listActive(deps, 'chair-a')
-    expect(active.map((m) => m.id).sort()).toEqual([sealedMeta.id, launchingMeta.id].sort())
+    expect(active.map((m) => m.id)).toEqual([currentMeta.id])
   })
 })

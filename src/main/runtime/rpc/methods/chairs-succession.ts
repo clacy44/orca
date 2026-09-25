@@ -1,7 +1,11 @@
 // S10-22a WAVE 2 (b1-slice1-succession.md §"Wave 2 contract"): the RPC surface —
-// `orchestration.chairs.succeed` / `successionAccept` / `resumeContext`. Every call carries the
-// same attestation evidence the CLI already attaches to orchestration calls (`resolveCallerAgent`,
-// orchestration-caller-identity.ts:42 — no new plumbing, per the contract's own instruction).
+// `orchestration.chairs.succeed` / `successionAccept` / `resumeContext`. `succeed` (the
+// incumbent, already a registered agent) still uses `resolveCallerAgent`. `successionAccept` and
+// `resumeContext` do NOT — G1 repair B1: a freshly `createAgentSession`-spawned pane has no
+// `agents` row yet (rows are minted only by `register`/derived upkeep), so `resolveCallerAgent`
+// would throw `no_registered_identity` for the exact pane the whole protocol depends on being
+// able to call these methods. Both attest by PANE ALONE, the same
+// `verifyOrchestrationCompatibilityCaller` primitive `orchestration.agents.register` itself uses.
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { z } from 'zod'
@@ -9,7 +13,7 @@ import { defineMethod, type RpcMethod } from '../core'
 import { OptionalString, OptionalBoolean } from '../schemas'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import { hostIdFor } from './agent-directory-rpc-view'
-import { resolveCallerAgent } from './orchestration-caller-identity'
+import { resolveCallerAgent, NO_PANE_IDENTITY_NEXT_STEPS } from './orchestration-caller-identity'
 import { assertLocalCaller } from './chairs-restore'
 import {
   sealSuccession,
@@ -20,9 +24,20 @@ import { acceptSuccession } from '../../orchestration/chair-succession-accept'
 import {
   findSuccessionById,
   findSuccessionForSuccessorPane,
-  readResumeContextText,
-  markResumeContextServed
+  readResumeContextText
 } from '../../orchestration/chair-succession-resume-context'
+
+// G1 repair B5: enforced at the RPC boundary, before `successionId` ever reaches a path.join —
+// a successful match is also exactly `generateSuccessionId()`'s own output shape
+// (chair-succession-store.ts), so nothing legitimate is ever refused.
+const SUCCESSION_ID_RE = /^succ_[0-9a-f]{12}$/
+
+function requireSuccessionId(id: string | undefined): string {
+  if (!id || !SUCCESSION_ID_RE.test(id)) {
+    throw new OrchestrationError('invalid_argument', '--id must look like succ_<12 hex chars>.')
+  }
+  return id
+}
 
 function defaultOrcaHome(): string {
   return join(homedir(), '.orca')
@@ -105,22 +120,31 @@ export const CHAIRS_SUCCESSION_METHODS: RpcMethod[] = [
     handler: async (params, ctx) => {
       assertLocalCaller(ctx)
       const { runtime, orchestrationCompatibilityEvidence } = ctx
-      if (!params.successionId) {
-        throw new OrchestrationError('invalid_argument', '--id is required.')
+      const successionId = requireSuccessionId(params.successionId)
+      // G1 repair B1: pane-only attestation — the successor pane has no `agents` row yet.
+      const authority = runtime.verifyOrchestrationCompatibilityCaller(
+        orchestrationCompatibilityEvidence,
+        { currentRuntimeLaunchSufficient: true }
+      )
+      if (!authority) {
+        throw new OrchestrationError(
+          'no_pane_identity',
+          'This command must run inside a live, attested Orca terminal.',
+          { nextSteps: NO_PANE_IDENTITY_NEXT_STEPS }
+        )
       }
       const db = runtime.getOrchestrationDb()
-      const caller = resolveCallerAgent(db, runtime, orchestrationCompatibilityEvidence)
       const deps = depsFor(runtime)
       const hostId = hostIdFor(runtime)
       // The pane's own launch row already carries the host-minted session id `createAgentSession`
       // recorded when it spawned this pane — that IS the "arrives from the new pane with its
       // host-minted session id" proof (D-R215 §Protocol step 5): the caller is attested ON this
       // pane, so the pane's recorded session id is unforgeable by a different process.
-      const callerSessionId = db.newestLaunchForPane(hostId, caller.pane_key)?.session_id ?? null
+      const callerSessionId = db.newestLaunchForPane(hostId, authority.paneKey)?.session_id ?? null
       return acceptSuccession(deps, {
-        successionId: params.successionId,
-        callerPaneKey: caller.pane_key,
-        callerTerminalHandle: caller.terminal_handle ?? '',
+        successionId,
+        callerPaneKey: authority.paneKey,
+        callerTerminalHandle: authority.terminalHandle,
         callerSessionId,
         hostId
       })
@@ -132,21 +156,41 @@ export const CHAIRS_SUCCESSION_METHODS: RpcMethod[] = [
     handler: async (params, ctx) => {
       assertLocalCaller(ctx)
       const { runtime, orchestrationCompatibilityEvidence } = ctx
+      // G1 repair B1: pane-only attestation, same reasoning as successionAccept above — the
+      // SessionStart hook fires before `register` has ever run for this pane.
+      const authority = runtime.verifyOrchestrationCompatibilityCaller(
+        orchestrationCompatibilityEvidence,
+        { currentRuntimeLaunchSufficient: true }
+      )
+      if (!authority) {
+        throw new OrchestrationError(
+          'no_pane_identity',
+          'This command must run inside a live, attested Orca terminal.',
+          { nextSteps: NO_PANE_IDENTITY_NEXT_STEPS }
+        )
+      }
       const db = runtime.getOrchestrationDb()
-      const caller = resolveCallerAgent(db, runtime, orchestrationCompatibilityEvidence)
       const deps = depsFor(runtime)
-      const meta = params.successionId
-        ? await findSuccessionById(deps, params.successionId)
-        : await findSuccessionForSuccessorPane(deps, caller.pane_key)
-      if (!meta) {
+      // G1 repair M3 (D-R219): hook mode ALWAYS resolves by the caller's own pane, regardless of
+      // any `successionId` param; by-id lookup is served ONLY to that record's own successor
+      // pane — never to an arbitrary registered pane (the lane's own test previously asserted
+      // the opposite, the bug this closes).
+      const meta = params.hook
+        ? await findSuccessionForSuccessorPane(deps, authority.paneKey)
+        : params.successionId
+          ? await findSuccessionById(deps, requireSuccessionId(params.successionId))
+          : await findSuccessionForSuccessorPane(deps, authority.paneKey)
+      if (
+        !meta ||
+        (!params.hook && params.successionId && meta.successor.paneKey !== authority.paneKey)
+      ) {
         return { ok: false, code: 'succession_none' }
       }
       const text = await readResumeContextText(deps, meta)
       if (params.hook) {
-        markResumeContextServed(meta.id)
         db.writeAgentAudit({
-          agentId: caller.id,
-          actorPaneKey: caller.pane_key,
+          agentId: db.getAgentByPaneKey(hostIdFor(runtime), authority.paneKey)?.id ?? null,
+          actorPaneKey: authority.paneKey,
           actorHostId: hostIdFor(runtime),
           verb: 'succession_resume_context',
           outcome: 'served',

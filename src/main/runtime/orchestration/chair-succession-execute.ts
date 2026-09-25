@@ -12,9 +12,9 @@ import { parseChairCheckpoint } from './chair-checkpoint'
 import { renderResumeContext } from './chair-resume-context'
 import {
   createSealed,
-  transition,
+  generateSuccessionId,
   listActive,
-  writeResumeContext,
+  SuccessionInFlightError,
   type ChairSuccessionStoreDeps
 } from './chair-succession-store'
 import type { CharterMode, SuccessionMeta, SuccessionReason } from './chair-succession-types'
@@ -77,6 +77,16 @@ export async function sealSuccession(
   const run = boundRuns.find((r) => r.legacy === 0)
   if (!run) {
     refuse('succession_legacy_run', 'This pane is bound to a legacy Run.')
+  }
+
+  // G1 repair M8 / D-R215 A9: slice 1 never launches onto a named lane — refuse to seal an
+  // incumbent that is not itself on the host default lane (a named lane's launch would silently
+  // land on the default lane instead, contradicting the rendered context).
+  if (deps.runtime.credentialLaneOfPaneKey(params.paneKey) !== null) {
+    refuse(
+      'succession_lane_unsupported',
+      'This pane is on a named credential lane; chair succession (slice 1) only supports the host default lane.'
+    )
   }
 
   const activeDispatch = deps.db.getActiveDispatchForIdentity(params.terminalHandle, params.paneKey)
@@ -151,6 +161,17 @@ export async function sealSuccession(
   const agentMailbox = `agent:${params.callerAgentId}`
   const agentDelivery = deps.db.getOutstandingMailboxDelivery(agentMailbox)
   const runDelivery = deps.db.getOutstandingRunDelivery(run.id)
+  // G1 repair L4: an id in --ack that names no real outstanding delivery is a caller error, not a
+  // silent no-op — refuse before the unacked check so a typo'd id cannot masquerade as coverage.
+  const knownDeliveryIds = new Set(
+    [agentDelivery?.id, runDelivery?.id].filter((id): id is string => id !== undefined)
+  )
+  const unknownAck = [...ack].filter((id) => !knownDeliveryIds.has(id))
+  if (unknownAck.length > 0) {
+    refuse('succession_unknown_ack', '--ack named an id with no outstanding delivery.', {
+      ids: unknownAck
+    })
+  }
   const unacked = [agentDelivery?.id, runDelivery?.id].filter(
     (id): id is string => id !== undefined && !ack.has(id)
   )
@@ -159,37 +180,16 @@ export async function sealSuccession(
       ids: unacked
     })
   }
-  if (agentDelivery && ack.has(agentDelivery.id)) {
-    deps.db.acknowledgeMailboxDelivery(agentDelivery.id, agentMailbox)
-  }
-  if (runDelivery && ack.has(runDelivery.id)) {
-    deps.db.acknowledgeRunDelivery({
-      runId: run.id,
-      consumerGeneration: run.consumer_generation,
-      deliveryId: runDelivery.id
-    })
-  }
 
-  // Sealed with a placeholder resume-context text (the header line needs the id, minted only by
-  // `createSealed` itself) — overwritten below with the real render before this function returns,
-  // so no caller ever observes the placeholder.
-  const meta = await createSealed(storeDepsFor(deps), params.chairName, {
-    reason: params.reason,
-    checkpointText,
-    checkpointSha: actualSha,
-    charterPath: succ.charterPath,
-    charterSha,
-    charterMode,
-    ...(charterMode === 'embed' ? { charterText } : {}),
-    resumeContextText: '',
-    incumbent: { paneKey: params.paneKey, terminalHandle: params.terminalHandle },
-    ackedDeliveryIds: [...ack]
-  })
-
+  // G1 repair M1: the size-checked render happens BEFORE any mutation (the ack acknowledgements
+  // below, `createSealed`'s disk write) — a `resume_context_too_large` refusal must never leave
+  // an acked-but-unsealed delivery or a sealed directory behind. The id is minted here (not left
+  // to `createSealed`) so the render uses the REAL id and is never redone.
+  const successionId = generateSuccessionId()
   const input = await buildResumeContextInput(
     { db: deps.db, runtime: deps.runtime, storeDeps: storeDepsFor(deps) },
     {
-      successionId: meta.id,
+      successionId,
       hostId: params.hostId,
       chairName: params.chairName,
       agentId: params.callerAgentId,
@@ -209,14 +209,48 @@ export async function sealSuccession(
   )
   const rendered = renderResumeContext(input)
   if (!rendered.ok) {
-    await transition(storeDepsFor(deps), params.chairName, meta.id, 'aborted', {
-      abortReason: rendered.error.code
-    })
     refuse(rendered.error.code, rendered.error.reason)
   }
-  // Chair review fix #5: atomic (writeAtomic, same primitive `createSealed`'s own placeholder
-  // write already used), never a bare `writeFile`.
-  await writeResumeContext(storeDepsFor(deps), params.chairName, meta.id, rendered.text)
+
+  if (agentDelivery && ack.has(agentDelivery.id)) {
+    deps.db.acknowledgeMailboxDelivery(agentDelivery.id, agentMailbox)
+  }
+  if (runDelivery && ack.has(runDelivery.id)) {
+    deps.db.acknowledgeRunDelivery({
+      runId: run.id,
+      consumerGeneration: run.consumer_generation,
+      deliveryId: runDelivery.id
+    })
+  }
+
+  let meta: SuccessionMeta
+  try {
+    meta = await createSealed(storeDepsFor(deps), params.chairName, {
+      id: successionId,
+      reason: params.reason,
+      checkpointText,
+      checkpointSha: actualSha,
+      charterPath: succ.charterPath,
+      charterSha,
+      charterMode,
+      ...(charterMode === 'embed' ? { charterText } : {}),
+      resumeContextText: rendered.text,
+      incumbent: { paneKey: params.paneKey, terminalHandle: params.terminalHandle },
+      ackedDeliveryIds: [...ack],
+      runId: run.id
+    })
+  } catch (err) {
+    // G1 repair M2: the in-lock re-check inside `createSealed` — the ack mutations above already
+    // ran, but nothing was sealed/launched under the stale id, and the ORIGINAL in-flight record
+    // (surfaced here) is untouched, so retrying `--ack` against IT is safe.
+    if (err instanceof SuccessionInFlightError) {
+      refuse('succession_in_flight', `A succession is already ${err.state} for this chair.`, {
+        successionId: err.successionId,
+        state: err.state
+      })
+    }
+    throw err
+  }
 
   deps.db.writeAgentAudit({
     agentId: params.callerAgentId,

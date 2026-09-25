@@ -531,6 +531,13 @@ function longPollClassOf(request: RpcRequest): LongPollClass | null {
   if (request.method === 'orchestration.workerStart') {
     return 'wait'
   }
+  // G1 repair B2: `orchestration.chairs.succeed` parks the incumbent's RPC open for up to 150 s
+  // (chair-succession-hold.ts's SEAL_HOLD_TIMEOUT_MS), the identical shape as `orchestration.ask`
+  // — without this, the 30s socket idle timer tears the connection down mid-hold and its `signal`
+  // (the only thing that lets the successor's abort/timeout path release promptly) is never wired.
+  if (request.method === 'orchestration.chairs.succeed') {
+    return 'wait'
+  }
   return null
 }
 

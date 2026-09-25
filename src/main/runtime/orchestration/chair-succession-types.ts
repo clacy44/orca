@@ -43,9 +43,12 @@ export const CHECKPOINT_SECTION_TITLES: Record<keyof CheckpointSections, string>
 }
 
 /** A succession record's lifecycle (D-R215 §Protocol steps 3/4/6/7). Transitions enforced by
- * `chair-succession-store.ts`'s `transition()`: sealed→launching→confirmed, and sealed/launching→
- * aborted; every other pair throws `succession_bad_transition`. */
-export type SuccessionState = 'sealed' | 'launching' | 'confirmed' | 'aborted'
+ * `chair-succession-store.ts`'s `transition()`: sealed→launching→confirming→confirmed, and
+ * sealed/launching/confirming→aborted; every other pair throws `succession_bad_transition`.
+ * B3 repair: `confirming` is entered under the per-chair lock BEFORE the incumbent's pane is
+ * closed, so `runAbortTail` (racing on the same lock) can tell "accept already committed to
+ * closing the incumbent" apart from "still parked" and never double-close. */
+export type SuccessionState = 'sealed' | 'launching' | 'confirming' | 'confirmed' | 'aborted'
 
 export type SuccessionReason = 'batch_end' | 'context'
 
@@ -83,6 +86,10 @@ export type SuccessionMeta = {
    * to `acceptSuccession`'s `obligations.ackedDeliveryIds` — additive, optional so existing
    * meta.json files without it still parse. */
   ackedDeliveryIds?: string[]
+  /** G1 repair L3: the Run id seal bound to, persisted so accept can refuse
+   * `succession_run_moved` if the incumbent no longer holds it by accept time — optional so
+   * pre-repair meta.json files without it still parse. */
+  runId?: string
 }
 
 /** Whether the resume context embeds the charter text or only references it (D-R215 amendment

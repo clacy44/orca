@@ -182,6 +182,15 @@ const STRUCTURED_RUNTIME_PASSTHROUGH_CODES: ReadonlySet<string> = new Set([
   'succession_expired',
   'succession_takeover_failed',
   'succession_none',
+  // G1 repair round (b2-g1-repairs.md; findings B5/L3/L4/M1/M8): typed refusals reachable only
+  // after the wave 2 contract's first pass, added additively.
+  'resume_context_too_large',
+  'succession_run_moved',
+  'succession_unknown_ack',
+  'succession_incumbent_exit_timeout',
+  // Judgment call (see RETURN): not in the brief's own 4-code pass-through list, but M8's seal-
+  // time lane refusal (A9) has no existing code that fits without misleading the caller.
+  'succession_lane_unsupported',
   // Not in the wave 2 contract's own refusal list, but the same checkpoint_* family (D-R212
   // "sha changed after hashing → checkpoint_changed") — flagged in RETURN as a judgment call.
   'checkpoint_changed',

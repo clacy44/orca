@@ -27,6 +27,10 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, chmod, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { withPaneLock } from '../../ipc/agent-launch-admission-lock'
+import {
+  SuccessionBadTransitionError,
+  SuccessionInFlightError
+} from './chair-succession-store-errors'
 import type {
   CharterMode,
   IncumbentHandle,
@@ -53,6 +57,11 @@ export type CreateSealedInput = {
   incumbent: IncumbentHandle
   /** S10-22a residual R238: the delivery ids acked at seal time, carried onto `meta.ackedDeliveryIds`. */
   ackedDeliveryIds?: string[]
+  /** G1 repair M1: pre-minted by the caller (before this write) so the size-checked render can
+   * use the REAL id and never needs a second write. Defaults to a fresh id when omitted. */
+  id?: string
+  /** G1 repair L3: the Run id seal is bound to. */
+  runId?: string
 }
 
 export type RetiredHandleEntry = {
@@ -61,17 +70,17 @@ export type RetiredHandleEntry = {
   at: string
 }
 
-export class SuccessionBadTransitionError extends Error {
-  readonly code = 'succession_bad_transition' as const
-  constructor(from: SuccessionState, to: SuccessionState) {
-    super(`succession_bad_transition: ${from} -> ${to} is not a legal transition`)
-    this.name = 'SuccessionBadTransitionError'
-  }
-}
+// Moved to chair-succession-store-errors.ts (line ratchet) — re-exported so existing importers
+// don't churn.
+export {
+  SuccessionBadTransitionError,
+  SuccessionInFlightError
+} from './chair-succession-store-errors'
 
 const LEGAL_TRANSITIONS: Record<SuccessionState, SuccessionState[]> = {
   sealed: ['launching', 'aborted'],
-  launching: ['confirmed', 'aborted'],
+  launching: ['confirming', 'aborted'],
+  confirming: ['confirmed', 'aborted'],
   confirmed: [],
   aborted: []
 }
@@ -80,11 +89,21 @@ function lockKey(chair: string): string {
   return `succession:${chair}`
 }
 
-function chairRoot(deps: ChairSuccessionStoreDeps, chair: string): string {
+/** G1 repair B3: the exact `withPaneLock` key `chair-succession-accept.ts` and
+ * `chair-succession-hold.ts`'s `runAbortTail` both take, so accept's confirming-transition and
+ * the abort tail's re-read-then-close are mutually exclusive with every `transition()` write
+ * below — never two lock instances racing on independent keys for the same chair. */
+export function chairLockKey(chair: string): string {
+  return lockKey(chair)
+}
+
+export { withPaneLock }
+
+export function chairRoot(deps: ChairSuccessionStoreDeps, chair: string): string {
   return join(deps.orcaHome, 'chairs', chair)
 }
 
-function successionsRoot(deps: ChairSuccessionStoreDeps, chair: string): string {
+export function successionsRoot(deps: ChairSuccessionStoreDeps, chair: string): string {
   return join(chairRoot(deps, chair), 'successions')
 }
 
@@ -92,14 +111,14 @@ function successionDir(deps: ChairSuccessionStoreDeps, chair: string, id: string
   return join(successionsRoot(deps, chair), id)
 }
 
-function retiredHandlesPath(deps: ChairSuccessionStoreDeps, chair: string): string {
+export function retiredHandlesPath(deps: ChairSuccessionStoreDeps, chair: string): string {
   return join(chairRoot(deps, chair), 'retired-handles.json')
 }
 
 /** Creates `dir` (and any missing parents) then forces its own mode to 0700 — `mkdir`'s
  * `recursive` option only reliably applies `mode` to the final path segment across Node
  * versions/umasks, so this `chmod`s explicitly rather than trusting that. */
-async function ensureDirMode0700(dir: string): Promise<void> {
+export async function ensureDirMode0700(dir: string): Promise<void> {
   await mkdir(dir, { recursive: true })
   await chmod(dir, 0o700)
 }
@@ -107,7 +126,7 @@ async function ensureDirMode0700(dir: string): Promise<void> {
 /** Atomic write: unique tmp name in the same directory, write, rename over the target, and clean
  * up the tmp file if anything before the rename throws — never leaves a partial target and never
  * leaves a stray tmp file behind on failure. */
-async function writeAtomic(target: string, contents: string): Promise<void> {
+export async function writeAtomic(target: string, contents: string): Promise<void> {
   const tmp = `${target}.${process.pid}.${randomUUID()}.tmp`
   try {
     await writeFile(tmp, contents, { encoding: 'utf8', mode: 0o600 })
@@ -150,7 +169,22 @@ export async function createSealed(
     throw new Error('createSealed: charterMode "embed" requires charterText')
   }
   return withPaneLock(lockKey(chair), async () => {
-    const id = generateSuccessionId()
+    // G1 repair M2: the SAME lock `transition()` uses — re-checks in-flight state here, not just
+    // `sealSuccession`'s earlier unlocked `listActive` read, so a second concurrent seal for this
+    // chair can never slip through the gap between that read and this write.
+    let existingIds: string[]
+    try {
+      existingIds = await readdir(successionsRoot(deps, chair))
+    } catch {
+      existingIds = []
+    }
+    for (const existingId of existingIds) {
+      const existing = await readMeta(deps, chair, existingId)
+      if (existing && (existing.state === 'sealed' || existing.state === 'launching')) {
+        throw new SuccessionInFlightError(existing.id, existing.state)
+      }
+    }
+    const id = input.id ?? generateSuccessionId()
     await ensureDirMode0700(chairRoot(deps, chair))
     await mkdir(successionsRoot(deps, chair), { recursive: true })
     const dir = successionDir(deps, chair, id)
@@ -182,7 +216,8 @@ export async function createSealed(
       charterSha: input.charterSha,
       incumbent: input.incumbent,
       successor: {},
-      ...(input.ackedDeliveryIds !== undefined ? { ackedDeliveryIds: input.ackedDeliveryIds } : {})
+      ...(input.ackedDeliveryIds !== undefined ? { ackedDeliveryIds: input.ackedDeliveryIds } : {}),
+      ...(input.runId !== undefined ? { runId: input.runId } : {})
     }
     await writeAtomic(join(dir, 'meta.json'), JSON.stringify(meta, null, 2))
     return meta
@@ -209,7 +244,38 @@ export type TransitionPatch = Partial<{
  * `updatedAt`. Throws `SuccessionBadTransitionError` (code `succession_bad_transition`) for any
  * pair not in `LEGAL_TRANSITIONS` — including a transition on a succession that does not exist,
  * which surfaces as the same error rather than a separate not-found shape (there is no `sealed`
- * state to transition FROM when the record is missing). */
+ * state to transition FROM when the record is missing). ASSUMES the caller already holds
+ * `chairLockKey(chair)` — calling this from OUTSIDE that lock races every other writer; the
+ * public, self-locking `transition()` below is what every caller outside this file and
+ * `chair-succession-accept.ts`/`chair-succession-hold.ts` (B3's confirming/abort-tail dance,
+ * which must read+write under ONE lock acquisition spanning more than this single write) should
+ * use. */
+export async function transitionLocked(
+  deps: ChairSuccessionStoreDeps,
+  chair: string,
+  id: string,
+  next: SuccessionState,
+  patch: TransitionPatch = {}
+): Promise<SuccessionMeta> {
+  const current = await readMeta(deps, chair, id)
+  const from = current?.state
+  const legal = from !== undefined && LEGAL_TRANSITIONS[from].includes(next)
+  if (!current || !legal) {
+    throw new SuccessionBadTransitionError((from ?? 'aborted') as SuccessionState, next)
+  }
+  const updated: SuccessionMeta = {
+    ...current,
+    ...patch,
+    state: next,
+    updatedAt: new Date().toISOString()
+  }
+  await writeAtomic(
+    join(successionDir(deps, chair, id), 'meta.json'),
+    JSON.stringify(updated, null, 2)
+  )
+  return updated
+}
+
 export async function transition(
   deps: ChairSuccessionStoreDeps,
   chair: string,
@@ -217,25 +283,7 @@ export async function transition(
   next: SuccessionState,
   patch: TransitionPatch = {}
 ): Promise<SuccessionMeta> {
-  return withPaneLock(lockKey(chair), async () => {
-    const current = await readMeta(deps, chair, id)
-    const from = current?.state
-    const legal = from !== undefined && LEGAL_TRANSITIONS[from].includes(next)
-    if (!current || !legal) {
-      throw new SuccessionBadTransitionError((from ?? 'aborted') as SuccessionState, next)
-    }
-    const updated: SuccessionMeta = {
-      ...current,
-      ...patch,
-      state: next,
-      updatedAt: new Date().toISOString()
-    }
-    await writeAtomic(
-      join(successionDir(deps, chair, id), 'meta.json'),
-      JSON.stringify(updated, null, 2)
-    )
-    return updated
-  })
+  return withPaneLock(lockKey(chair), () => transitionLocked(deps, chair, id, next, patch))
 }
 
 /** Read-only; no lock (a snapshot read racing a concurrent writer only ever sees a fully-written
@@ -248,65 +296,8 @@ export async function read(
   return readMeta(deps, chair, id)
 }
 
-/** All successions for `chair` currently in `sealed` or `launching` state. Read-only, no lock. */
-export async function listActive(
-  deps: ChairSuccessionStoreDeps,
-  chair: string
-): Promise<SuccessionMeta[]> {
-  let entries: string[]
-  try {
-    entries = await readdir(successionsRoot(deps, chair))
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return []
-    }
-    throw error
-  }
-  const active: SuccessionMeta[] = []
-  for (const id of entries) {
-    const meta = await readMeta(deps, chair, id)
-    if (meta && (meta.state === 'sealed' || meta.state === 'launching')) {
-      active.push(meta)
-    }
-  }
-  return active
-}
-
-/** WAVE 2 addition (additive only): read-only snapshot of `retired-handles.json`, append order. */
-export async function listRetiredHandles(
-  deps: ChairSuccessionStoreDeps,
-  chair: string
-): Promise<RetiredHandleEntry[]> {
-  try {
-    return JSON.parse(
-      await readFile(retiredHandlesPath(deps, chair), 'utf8')
-    ) as RetiredHandleEntry[]
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return []
-    }
-    throw error
-  }
-}
-
-/** Appends one entry to `retired-handles.json` (created on first append) under the per-chair
- * lock — append-only, never rewrites or drops a prior entry. */
-export async function appendRetiredHandle(
-  deps: ChairSuccessionStoreDeps,
-  chair: string,
-  entry: RetiredHandleEntry
-): Promise<void> {
-  return withPaneLock(lockKey(chair), async () => {
-    await ensureDirMode0700(chairRoot(deps, chair))
-    const path = retiredHandlesPath(deps, chair)
-    let existing: RetiredHandleEntry[] = []
-    try {
-      existing = JSON.parse(await readFile(path, 'utf8')) as RetiredHandleEntry[]
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        throw error
-      }
-    }
-    await writeAtomic(path, JSON.stringify([...existing, entry], null, 2))
-  })
-}
+// listActive moved to chair-succession-store-reads.ts, listRetiredHandles / appendRetiredHandle to
+// chair-succession-retired-handles.ts (kept this file under the line ratchet) — re-exported below
+// only so existing importers don't churn.
+export { listActive } from './chair-succession-store-reads'
+export { listRetiredHandles, appendRetiredHandle } from './chair-succession-retired-handles'

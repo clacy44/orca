@@ -8,10 +8,7 @@ import { createSealed, transition, type ChairSuccessionStoreDeps } from './chair
 import {
   findSuccessionForSuccessorPane,
   findSuccessionById,
-  readResumeContextText,
-  markResumeContextServed,
-  wasResumeContextServed,
-  _resetResumeContextServedForTest
+  readResumeContextText
 } from './chair-succession-resume-context'
 import type { ChairSuccessionDeps } from './chair-succession-execute'
 
@@ -25,7 +22,6 @@ describe('S10-22a WAVE 2: chair-succession-resume-context', () => {
     await mkdir(join(tmp, 'chairs'), { recursive: true })
     storeDeps = { orcaHome: tmp }
     deps = { db: undefined as never, runtime: undefined as never, orcaHome: tmp }
-    _resetResumeContextServedForTest()
   })
 
   afterEach(async () => {
@@ -78,9 +74,15 @@ describe('S10-22a WAVE 2: chair-succession-resume-context', () => {
     expect(await findSuccessionById(deps, 'succ_nope')).toBeNull()
   })
 
-  it('tracks whether the hook already served a succession, resettable between tests', () => {
-    expect(wasResumeContextServed('succ_abc')).toBe(false)
-    markResumeContextServed('succ_abc')
-    expect(wasResumeContextServed('succ_abc')).toBe(true)
+  // G1 repair M3 (D-R219): the "served" set is gone — accept ALWAYS returns the resume context
+  // now (chair-succession-accept.test.ts covers that directly); nothing left to track here.
+  it('hook mode also finds a confirming succession on the successor pane', async () => {
+    const meta = await seal('chair-confirming')
+    await transition(storeDeps, 'chair-confirming', meta.id, 'launching', {
+      successor: { paneKey: 'tabB:b', terminalHandle: 'term_b' }
+    })
+    await transition(storeDeps, 'chair-confirming', meta.id, 'confirming')
+    const found = await findSuccessionForSuccessorPane(deps, 'tabB:b')
+    expect(found?.id).toBe(meta.id)
   })
 })

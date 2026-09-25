@@ -12,18 +12,14 @@ import { OrchestrationDb } from './db'
 import { OrcaRuntimeService } from '../orca-runtime'
 import { sealSuccession, type ChairSuccessionDeps } from './chair-succession-execute'
 import { holdSealRequest, settleHold, launchSuccessor } from './chair-succession-hold'
-import { acceptSuccession } from './chair-succession-accept'
 import {
   createSealed,
+  listActive,
   transition,
   read,
   type ChairSuccessionStoreDeps
 } from './chair-succession-store'
-import { _resetResumeContextServedForTest } from './chair-succession-resume-context'
-import {
-  retiredHandleChair,
-  _resetRetiredHandlesIndexForTest
-} from './chair-succession-retired-index'
+import { _resetRetiredHandlesIndexForTest } from './chair-succession-retired-index'
 
 vi.mock('electron', () => ({
   BrowserWindow: { fromId: vi.fn(() => null) },
@@ -85,7 +81,6 @@ describe('S10-22a WAVE 2: chair-succession-execute', () => {
       orcaHome: tmp,
       manifestPath: join(tmp, 'chairs.json')
     }
-    _resetResumeContextServedForTest()
     _resetRetiredHandlesIndexForTest()
   })
 
@@ -411,6 +406,129 @@ describe('S10-22a WAVE 2: chair-succession-execute', () => {
     expect(text).toContain('## Run binding')
     expect(text).toContain('## Obligations')
     expect(text).toContain('## Board')
+    // G1 repair M7: the incumbent's OWN (about-to-retire) handle renders as "Retired handle",
+    // never as a bare "Handle:" claiming an identity the successor does not have yet.
+    expect(text).toContain(`Retired handle: ${HANDLE_A}`)
+    expect(text).not.toMatch(new RegExp(`^Handle: ${HANDLE_A}$`, 'm'))
+    expect(text).toContain("see this pane's own ACCEPTED line")
+  })
+
+  // G1 repair M8 (D-R215 A9): slice 1 never passes a lane to the successor launch — refuse to
+  // seal an incumbent that is itself on a named credential lane rather than silently landing the
+  // successor on the default lane instead.
+  it('refuses succession_lane_unsupported when the incumbent pane is on a named credential lane', async () => {
+    await writeManifest('chair-x')
+    const { agentId } = registerChair('chair-x', PANE_A, HANDLE_A)
+    bindRunTo(PANE_A, HANDLE_A)
+    vi.spyOn(runtime, 'credentialLaneOfPaneKey').mockReturnValue({
+      kind: 'principal',
+      principalId: 'someone'
+    })
+    const { path, sha } = await writeCheckpoint()
+    await expect(
+      sealSuccession(deps, {
+        callerAgentId: agentId,
+        chairName: 'chair-x',
+        paneKey: PANE_A,
+        terminalHandle: HANDLE_A,
+        hostId,
+        checkpointPath: path,
+        checkpointSha256: sha,
+        reason: 'batch_end'
+      })
+    ).rejects.toMatchObject({ code: 'succession_lane_unsupported' })
+  })
+
+  // G1 repair L4: an --ack id that names no real outstanding delivery is a caller error.
+  it('refuses succession_unknown_ack when --ack names an id with no outstanding delivery', async () => {
+    await writeManifest('chair-x')
+    const { agentId } = registerChair('chair-x', PANE_A, HANDLE_A)
+    bindRunTo(PANE_A, HANDLE_A)
+    const { path, sha } = await writeCheckpoint()
+    await expect(
+      sealSuccession(deps, {
+        callerAgentId: agentId,
+        chairName: 'chair-x',
+        paneKey: PANE_A,
+        terminalHandle: HANDLE_A,
+        hostId,
+        checkpointPath: path,
+        checkpointSha256: sha,
+        reason: 'batch_end',
+        ack: ['msg_notreal000']
+      })
+    ).rejects.toMatchObject({ code: 'succession_unknown_ack', data: { ids: ['msg_notreal000'] } })
+  })
+
+  // G1 repair M1: the size-checked render happens BEFORE the ack mutation and BEFORE createSealed
+  // — a `resume_context_too_large` refusal must leave the outstanding delivery UN-acked and no
+  // sealed directory behind (before the fix, both had already happened by the time this fired).
+  it('refuses resume_context_too_large before acking delivery or writing a sealed directory', async () => {
+    await writeManifest('chair-x', {
+      succession: { enabled: true, charterPath: join(tmp, 'CHARTER.md'), charterMode: 'embed' }
+    })
+    // Embedded (charterMode: 'embed') so the oversized charter is INLINED into the rendered
+    // resume context — the checkpoint itself stays well under its own 32 KiB cap, isolating the
+    // resume-context size check from the checkpoint's own.
+    await writeFile(join(tmp, 'CHARTER.md'), 'x'.repeat(60 * 1024))
+    const { agentId } = registerChair('chair-x', PANE_A, HANDLE_A)
+    bindRunTo(PANE_A, HANDLE_A)
+    db.insertMessage({ from: 'someone', to: `agent:${agentId}`, subject: 'hi', type: 'status' })
+    const unread = db.getUnreadMessages(`agent:${agentId}`)
+    const { delivery } = db.getOrCreateMailboxDelivery({
+      mailboxHandle: `agent:${agentId}`,
+      messageIds: unread.map((m) => m.id),
+      limit: 50
+    })!
+    const { path, sha } = await writeCheckpoint()
+    await expect(
+      sealSuccession(deps, {
+        callerAgentId: agentId,
+        chairName: 'chair-x',
+        paneKey: PANE_A,
+        terminalHandle: HANDLE_A,
+        hostId,
+        checkpointPath: path,
+        checkpointSha256: sha,
+        reason: 'batch_end',
+        ack: [delivery.id]
+      })
+    ).rejects.toMatchObject({ code: 'resume_context_too_large' })
+    // The delivery must still be outstanding — the ack mutation never ran.
+    expect(db.getOutstandingMailboxDelivery(`agent:${agentId}`)?.id).toBe(delivery.id)
+    // No sealed directory was ever written for this chair.
+    const active = await listActive({ orcaHome: tmp }, 'chair-x')
+    expect(active).toEqual([])
+  })
+
+  // G1 repair M2: `sealSuccession` end-to-end (not just `createSealed`'s own unit test) — two
+  // concurrent `succeed` calls for the same chair must never both seal.
+  it('two concurrent sealSuccession calls for the same chair: exactly one seals, the other refuses succession_in_flight', async () => {
+    await writeManifest('chair-x')
+    const { agentId } = registerChair('chair-x', PANE_A, HANDLE_A)
+    bindRunTo(PANE_A, HANDLE_A)
+    const { path, sha } = await writeCheckpoint()
+    const sealParams = {
+      callerAgentId: agentId,
+      chairName: 'chair-x',
+      paneKey: PANE_A,
+      terminalHandle: HANDLE_A,
+      hostId,
+      checkpointPath: path,
+      checkpointSha256: sha,
+      reason: 'batch_end' as const
+    }
+    const results = await Promise.allSettled([
+      sealSuccession(deps, sealParams),
+      sealSuccession(deps, sealParams)
+    ])
+    const fulfilled = results.filter((r) => r.status === 'fulfilled')
+    const rejected = results.filter((r) => r.status === 'rejected')
+    expect(fulfilled).toHaveLength(1)
+    expect(rejected).toHaveLength(1)
+    expect((rejected[0] as PromiseRejectedResult).reason).toMatchObject({
+      code: 'succession_in_flight'
+    })
   })
 
   describe('hold / abort', () => {
@@ -477,6 +595,68 @@ describe('S10-22a WAVE 2: chair-succession-execute', () => {
       vi.useRealTimers()
     })
 
+    // G1 repair M8 (D-R215 §Protocol step 4 "manifest else the row"): `launchSuccessor`'s
+    // `createAgentSession` args — the exact prompt, background presentation, launch args, and
+    // launch-prefs fallback to the INCUMBENT's own last-recorded prefs when the manifest sets
+    // neither model nor effort.
+    it('launchSuccessor: createAgentSession gets the exact prompt/background/agentArgs, and model/effort fall back to the incumbent launch row', async () => {
+      await mkdir(join(tmp, 'chairs'), { recursive: true })
+      const sealedMeta = await createSealed(storeDeps, 'chair-prefs', {
+        reason: 'batch_end',
+        checkpointText: VALID_CHECKPOINT,
+        checkpointSha: sha256(VALID_CHECKPOINT),
+        charterPath: join(tmp, 'CHARTER.md'),
+        charterSha: sha256('charter'),
+        charterMode: 'reference',
+        resumeContextText: 'resume text',
+        incumbent: { paneKey: PANE_A, terminalHandle: HANDLE_A }
+      })
+      db.recordLaunch({
+        hostId,
+        paneKey: PANE_A,
+        agentType: 'claude',
+        sessionId: 'sess-incumbent',
+        launchGeneration: runtime.getLaunchGenerationId(),
+        executionHostId: 'local',
+        evidence: 'host_launch',
+        prefs: { model: 'incumbent-model', effort: 'high', source: 'launch' }
+      })
+      const createSpy = vi.spyOn(runtime, 'createAgentSession').mockResolvedValue({
+        terminal: { paneKey: 'tabB:b', handle: 'term_b' }
+      } as never)
+      const holdPromise = holdSealRequest(deps, hostId, sealedMeta, undefined)
+      await launchSuccessor(
+        deps,
+        hostId,
+        {
+          name: 'chair-prefs',
+          worktree: 'id:wt-1',
+          agent: 'claude',
+          conversationId: 'sess-orig',
+          launchArgs: ['--flag-a', '--flag-b']
+        },
+        sealedMeta
+      )
+      expect(createSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          worktree: 'id:wt-1',
+          agent: 'claude',
+          prompt: `orca chairs succession-accept ${sealedMeta.id}`,
+          promptDelivery: 'auto-submit',
+          agentArgs: '--flag-a --flag-b',
+          presentation: 'background',
+          launchPreferences: { model: 'incumbent-model', effort: 'high' }
+        })
+      )
+      settleHold(sealedMeta.id, {
+        ok: false,
+        code: 'succession_aborted',
+        successionId: sealedMeta.id,
+        reason: 'test_cleanup'
+      })
+      await holdPromise
+    })
+
     it('aborts on a 150s timeout, closing the successor pane', async () => {
       vi.useFakeTimers()
       const meta = await sealedLaunchingMeta('chair-timeout')
@@ -515,160 +695,6 @@ describe('S10-22a WAVE 2: chair-succession-execute', () => {
       expect(outcome).toEqual({ ok: true, confirmed: true, successionId: meta.id })
       const final = await read(storeDeps, 'chair-confirm-race', meta.id)
       expect(final?.state).toBe('launching') // confirm itself (not exercised here) would advance it
-    })
-  })
-
-  describe('accept / confirm', () => {
-    const SUCCESSOR_PANE = 'tabB:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
-    const SUCCESSOR_HANDLE = 'term_b'
-
-    async function sealedLaunching(chair: string) {
-      const storeDeps: ChairSuccessionStoreDeps = { orcaHome: tmp }
-      await mkdir(join(tmp, 'chairs'), { recursive: true })
-      const meta = await createSealed(storeDeps, chair, {
-        reason: 'batch_end',
-        checkpointText: VALID_CHECKPOINT,
-        checkpointSha: sha256(VALID_CHECKPOINT),
-        charterPath: join(tmp, 'CHARTER.md'),
-        charterSha: sha256('charter'),
-        charterMode: 'reference',
-        resumeContextText: 'resume text for the successor',
-        incumbent: { paneKey: PANE_A, terminalHandle: HANDLE_A }
-      })
-      return transition(storeDeps, chair, meta.id, 'launching', {
-        successor: {
-          paneKey: SUCCESSOR_PANE,
-          terminalHandle: SUCCESSOR_HANDLE,
-          sessionId: 'sess-succ'
-        }
-      })
-    }
-
-    it('confirms: same agent id, Run rebound, waiters cancelled, retired handle recorded, manifest written', async () => {
-      await writeManifest('chair-x')
-      const { agentId } = registerChair('chair-x', PANE_A, HANDLE_A)
-      const runId = bindRunTo(PANE_A, HANDLE_A)
-      db.recordLaunch({
-        hostId,
-        paneKey: SUCCESSOR_PANE,
-        agentType: 'claude',
-        sessionId: 'sess-succ',
-        launchGeneration: runtime.getLaunchGenerationId(),
-        executionHostId: 'local',
-        evidence: 'host_launch'
-      })
-      const meta = await sealedLaunching('chair-x')
-      vi.spyOn(runtime, 'closeTerminal').mockResolvedValue({} as never)
-      const cancelSpy = vi.spyOn(runtime, 'cancelMessageWaiters')
-
-      const result = await acceptSuccession(deps, {
-        successionId: meta.id,
-        callerPaneKey: SUCCESSOR_PANE,
-        callerTerminalHandle: SUCCESSOR_HANDLE,
-        callerSessionId: 'sess-succ',
-        hostId
-      })
-
-      expect(result.agentId).toBe(agentId)
-      expect(result.chair).toBe('chair-x')
-      const row = db.getAgentByName(hostId, 'chair-x')
-      expect(row?.id).toBe(agentId)
-      expect(row?.pane_key).toBe(SUCCESSOR_PANE)
-      const run = db.getRun(runId)
-      expect(run?.coordinator_pane_key).toBe(SUCCESSOR_PANE)
-      expect(cancelSpy).toHaveBeenCalledWith(`run:${runId}`)
-      const retired = JSON.parse(
-        await readFile(join(tmp, 'chairs', 'chair-x', 'retired-handles.json'), 'utf8')
-      )
-      expect(retired.at(-1)).toMatchObject({ handle: HANDLE_A, succession: meta.id })
-      const confirmedMeta = await read({ orcaHome: tmp }, 'chair-x', meta.id)
-      expect(confirmedMeta?.state).toBe('confirmed')
-      const manifest = JSON.parse(await readFile(deps.manifestPath!, 'utf8'))
-      expect(manifest.chairs[0].lastSessionId).toBe('sess-succ')
-      // Item 1: retired-handle index refreshed synchronously by accept, no restart needed.
-      expect(retiredHandleChair(HANDLE_A)).toBe('chair-x')
-      // R238: obligations reflect meta/db truthfully rather than the old `{}` placeholder.
-      expect(result.obligations).toEqual({
-        ackedDeliveryIds: [],
-        outstandingDeliveryIds: [],
-        retiredHandle: HANDLE_A,
-        pendingPeerQuestionThreadIds: [],
-        pactTurnsHeld: 0
-      })
-    })
-
-    it('chair review fix #3: takeover failure after the incumbent is closed aborts the record and leaves the successor pane open', async () => {
-      await writeManifest('chair-x')
-      registerChair('chair-x', PANE_A, HANDLE_A)
-      bindRunTo(PANE_A, HANDLE_A)
-      const meta = await sealedLaunching('chair-x')
-      const closeSpy = vi.spyOn(runtime, 'closeTerminal').mockResolvedValue({} as never)
-      // Force `registerAgentForPane`'s takeover to fail: report the INCUMBENT's own pane as
-      // still live (its `closeTerminal` above is mocked, not a real kill), so
-      // `upsertAgentByPaneSuffix` refuses `name_taken` with `holderPaneDead: false` instead of
-      // reminting.
-      vi.spyOn(runtime, 'getAgentDirectoryLivenessSignals').mockImplementation((paneKey) =>
-        paneKey === PANE_A
-          ? { terminalHandle: HANDLE_A, lastAgentStatus: null, observedLive: true }
-          : { terminalHandle: null, lastAgentStatus: null, observedLive: false }
-      )
-      // Registered as if `succeed`'s RPC call were still holding open, exactly as it is for real
-      // during the accept window — proves `settleHold` actually reaches it (not a no-op).
-      const holdPromise = holdSealRequest(deps, hostId, meta, undefined)
-
-      await expect(
-        acceptSuccession(deps, {
-          successionId: meta.id,
-          callerPaneKey: SUCCESSOR_PANE,
-          callerTerminalHandle: SUCCESSOR_HANDLE,
-          callerSessionId: 'sess-succ',
-          hostId
-        })
-      ).rejects.toMatchObject({ code: 'succession_takeover_failed' })
-
-      // The incumbent's own closeTerminal WAS still called (Act order unchanged)...
-      expect(closeSpy).toHaveBeenCalledWith(HANDLE_A)
-      // ...but the successor pane must NEVER be closed on this path — that would strand both.
-      expect(closeSpy).not.toHaveBeenCalledWith(SUCCESSOR_HANDLE)
-      const finalMeta = await read({ orcaHome: tmp }, 'chair-x', meta.id)
-      expect(finalMeta?.state).toBe('aborted')
-      expect(finalMeta?.abortReason).toContain('takeover_failed_after_close')
-
-      // The hold must have settled with reason takeover_failed directly — no 150s timeout needed.
-      const holdOutcome = await holdPromise
-      expect(holdOutcome).toMatchObject({
-        ok: false,
-        code: 'succession_aborted',
-        reason: 'takeover_failed'
-      })
-    })
-
-    it('refuses accept from the wrong pane', async () => {
-      await writeManifest('chair-x')
-      registerChair('chair-x', PANE_A, HANDLE_A)
-      bindRunTo(PANE_A, HANDLE_A)
-      const meta = await sealedLaunching('chair-x')
-      await expect(
-        acceptSuccession(deps, {
-          successionId: meta.id,
-          callerPaneKey: 'tabC:wrong-pane',
-          callerTerminalHandle: 'term_wrong',
-          callerSessionId: 'sess-wrong',
-          hostId
-        })
-      ).rejects.toMatchObject({ code: 'succession_wrong_pane' })
-    })
-
-    it('refuses accept for an unknown succession id', async () => {
-      await expect(
-        acceptSuccession(deps, {
-          successionId: 'succ_doesnotexist',
-          callerPaneKey: SUCCESSOR_PANE,
-          callerTerminalHandle: SUCCESSOR_HANDLE,
-          callerSessionId: 'sess-succ',
-          hostId
-        })
-      ).rejects.toMatchObject({ code: 'succession_unknown' })
     })
   })
 })

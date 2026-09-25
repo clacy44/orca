@@ -9,7 +9,7 @@
 // public runtime accessor enumerates every worktree from this layer).
 import type { OrchestrationDb } from './db'
 import type { OrcaRuntimeService } from '../orca-runtime'
-import { listRetiredHandles, type ChairSuccessionStoreDeps } from './chair-succession-store'
+import type { ChairSuccessionStoreDeps } from './chair-succession-store'
 import type { CharterMode, ResumeContextInput } from './chair-succession-types'
 
 export type BuildResumeInputParams = {
@@ -36,7 +36,6 @@ export async function buildResumeContextInput(
   params: BuildResumeInputParams
 ): Promise<ResumeContextInput> {
   const chairAgentRow = deps.db.getAgentByName(params.hostId, params.chairName)
-  const retired = await listRetiredHandles(deps.storeDeps, params.chairName)
   const laneRow = deps.runtime.credentialLaneOfPaneKey(params.paneKey)
   const lane = laneRow ? (laneRow.kind === 'shared' ? 'shared' : laneRow.principalId) : 'default'
   const liveSeats = deps.db
@@ -59,19 +58,25 @@ export async function buildResumeContextInput(
       mode: params.charterMode,
       ...(params.charterMode === 'embed' ? { text: params.charterText ?? '' } : {})
     },
+    // G1 repair M7: `handle`/`generation` are accept-time-only facts (the successor's own handle
+    // does not exist yet at seal time; `generation` bumps when `bindRun` runs during accept) — a
+    // literal value here would misstate identity for the rendered lifetime of this file. Point at
+    // the pane's own ACCEPTED line instead of a stale snapshot.
     runBinding: {
       chair: params.chairName,
       agentId: params.agentId,
       runId: params.runId,
       generation: params.generation,
-      handle: params.terminalHandle,
+      handle: "set at accept — see this pane's own ACCEPTED line",
       lane,
       worktree: params.worktree
     },
     obligations: {
       ackedDeliveryIds: params.ackedDeliveryIds,
       outstandingDeliveryIds: [],
-      retiredHandle: retired.at(-1)?.handle ?? null,
+      // G1 repair M7: the RETIRING handle is the incumbent's own — a previous succession's last
+      // retired handle (the old `retired.at(-1)?.handle`) named the WRONG chair generation.
+      retiredHandle: params.terminalHandle,
       pendingPeerQuestionThreadIds: [],
       pactTurnsHeld: 0
     },
