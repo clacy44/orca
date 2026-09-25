@@ -23,9 +23,17 @@
 // rejection — different from the fallback's fail-fast shape; `chair-succession-store.test.ts`
 // documents this.
 import { randomBytes } from 'node:crypto'
-import { mkdir, readdir, readFile } from 'node:fs/promises'
+import { mkdir, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { withPaneLock } from '../../ipc/agent-launch-admission-lock'
+import {
+  chairLockKey,
+  chairRoot,
+  successionDir,
+  successionsRoot,
+  type ChairSuccessionStoreDeps
+} from './chair-succession-paths'
+import { readSuccessionMeta } from './chair-succession-meta-read'
 import { ensureDirMode0700, writeAtomic } from './chair-succession-store-atomic-write'
 import {
   SuccessionBadTransitionError,
@@ -40,9 +48,9 @@ import type {
   SuccessorHandle
 } from './chair-succession-types'
 
-export type ChairSuccessionStoreDeps = {
-  orcaHome: string
-}
+// ChairSuccessionStoreDeps moved to chair-succession-paths.ts (leaf, breaks the store<->
+// retired-handles import cycle) — re-exported below so existing importers don't churn.
+export type { ChairSuccessionStoreDeps } from './chair-succession-paths'
 
 export type CreateSealedInput = {
   reason: SuccessionReason
@@ -66,11 +74,9 @@ export type CreateSealedInput = {
   preSuccessionSessionId?: string | null
 }
 
-export type RetiredHandleEntry = {
-  handle: string
-  succession: string
-  at: string
-}
+// RetiredHandleEntry moved to chair-succession-paths.ts (leaf) — re-exported below so existing
+// importers don't churn.
+export type { RetiredHandleEntry } from './chair-succession-paths'
 
 // Moved to chair-succession-store-errors.ts (line ratchet) — re-exported so existing importers
 // don't churn.
@@ -87,55 +93,21 @@ const LEGAL_TRANSITIONS: Record<SuccessionState, SuccessionState[]> = {
   aborted: []
 }
 
-function lockKey(chair: string): string {
-  return `succession:${chair}`
-}
-
-/** G1 repair B3: the exact `withPaneLock` key `chair-succession-accept.ts` and
- * `chair-succession-hold.ts`'s `runAbortTail` both take, so accept's confirming-transition and
- * the abort tail's re-read-then-close are mutually exclusive with every `transition()` write
- * below — never two lock instances racing on independent keys for the same chair. */
-export function chairLockKey(chair: string): string {
-  return lockKey(chair)
-}
-
 export { withPaneLock }
 
-export function chairRoot(deps: ChairSuccessionStoreDeps, chair: string): string {
-  return join(deps.orcaHome, 'chairs', chair)
-}
-
-export function successionsRoot(deps: ChairSuccessionStoreDeps, chair: string): string {
-  return join(chairRoot(deps, chair), 'successions')
-}
-
-function successionDir(deps: ChairSuccessionStoreDeps, chair: string, id: string): string {
-  return join(successionsRoot(deps, chair), id)
-}
-
-export function retiredHandlesPath(deps: ChairSuccessionStoreDeps, chair: string): string {
-  return join(chairRoot(deps, chair), 'retired-handles.json')
-}
+// chairLockKey / chairRoot / successionsRoot / retiredHandlesPath moved to
+// chair-succession-paths.ts (leaf, breaks the store<->retired-handles import cycle) —
+// re-exported below so existing importers don't churn.
+export {
+  chairLockKey,
+  chairRoot,
+  retiredHandlesPath,
+  successionsRoot
+} from './chair-succession-paths'
 
 // ensureDirMode0700 / writeAtomic moved to chair-succession-store-atomic-write.ts (line ratchet)
 // — re-exported below so existing importers don't churn.
 export { ensureDirMode0700, writeAtomic } from './chair-succession-store-atomic-write'
-
-async function readMeta(
-  deps: ChairSuccessionStoreDeps,
-  chair: string,
-  id: string
-): Promise<SuccessionMeta | null> {
-  try {
-    const raw = await readFile(join(successionDir(deps, chair, id), 'meta.json'), 'utf8')
-    return JSON.parse(raw) as SuccessionMeta
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return null
-    }
-    throw error
-  }
-}
 
 export function generateSuccessionId(): string {
   return `succ_${randomBytes(6).toString('hex')}`
@@ -152,7 +124,7 @@ export async function createSealed(
   if (input.charterMode === 'embed' && input.charterText === undefined) {
     throw new Error('createSealed: charterMode "embed" requires charterText')
   }
-  return withPaneLock(lockKey(chair), async () => {
+  return withPaneLock(chairLockKey(chair), async () => {
     // G1 repair M2: the SAME lock `transition()` uses — re-checks in-flight state here, not just
     // `sealSuccession`'s earlier unlocked `listActive` read, so a second concurrent seal for this
     // chair can never slip through the gap between that read and this write.
@@ -163,7 +135,7 @@ export async function createSealed(
       existingIds = []
     }
     for (const existingId of existingIds) {
-      const existing = await readMeta(deps, chair, existingId)
+      const existing = await readSuccessionMeta(deps, chair, existingId)
       // G1 repair N5: `confirming` counts as in flight too — admitted here previously, letting a
       // second seal slip through while an accept is still finishing its takeover.
       if (
@@ -253,7 +225,7 @@ export async function transitionLocked(
   next: SuccessionState,
   patch: TransitionPatch = {}
 ): Promise<SuccessionMeta> {
-  const current = await readMeta(deps, chair, id)
+  const current = await readSuccessionMeta(deps, chair, id)
   const from = current?.state
   const legal = from !== undefined && LEGAL_TRANSITIONS[from].includes(next)
   if (!current || !legal) {
@@ -279,7 +251,7 @@ export async function transition(
   next: SuccessionState,
   patch: TransitionPatch = {}
 ): Promise<SuccessionMeta> {
-  return withPaneLock(lockKey(chair), () => transitionLocked(deps, chair, id, next, patch))
+  return withPaneLock(chairLockKey(chair), () => transitionLocked(deps, chair, id, next, patch))
 }
 
 /** Read-only; no lock (a snapshot read racing a concurrent writer only ever sees a fully-written
@@ -289,7 +261,7 @@ export async function read(
   chair: string,
   id: string
 ): Promise<SuccessionMeta | null> {
-  return readMeta(deps, chair, id)
+  return readSuccessionMeta(deps, chair, id)
 }
 
 // listActive moved to chair-succession-store-reads.ts, listRetiredHandles / appendRetiredHandle to

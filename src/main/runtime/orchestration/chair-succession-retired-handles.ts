@@ -1,16 +1,15 @@
 // S10-22a WAVE 2: the append-only `retired-handles.json` log — split out of
 // chair-succession-store.ts to keep that file under the line ratchet (G1 repair round).
 import { readFile } from 'node:fs/promises'
+import { withPaneLock } from '../../ipc/agent-launch-admission-lock'
 import {
   chairLockKey,
   chairRoot,
-  ensureDirMode0700,
   retiredHandlesPath,
-  withPaneLock,
-  writeAtomic,
   type ChairSuccessionStoreDeps,
   type RetiredHandleEntry
-} from './chair-succession-store'
+} from './chair-succession-paths'
+import { ensureDirMode0700, writeAtomic } from './chair-succession-store-atomic-write'
 
 /** WAVE 2 addition (additive only): read-only snapshot of `retired-handles.json`, append order. */
 export async function listRetiredHandles(

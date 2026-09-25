@@ -1,7 +1,8 @@
 // S10-22a G1 repair round: split out of chair-succession-store.ts (line ratchet) — the
 // multi-record read accessor.
 import { readdir } from 'node:fs/promises'
-import { read, successionsRoot, type ChairSuccessionStoreDeps } from './chair-succession-store'
+import { readSuccessionMeta } from './chair-succession-meta-read'
+import { successionsRoot, type ChairSuccessionStoreDeps } from './chair-succession-paths'
 import type { SuccessionMeta } from './chair-succession-types'
 
 /** All successions for `chair` currently in `sealed`, `launching` or `confirming` state.
@@ -22,7 +23,7 @@ export async function listActive(
   }
   const active: SuccessionMeta[] = []
   for (const id of entries) {
-    const meta = await read(deps, chair, id)
+    const meta = await readSuccessionMeta(deps, chair, id)
     if (
       meta &&
       (meta.state === 'sealed' || meta.state === 'launching' || meta.state === 'confirming')
@@ -52,7 +53,7 @@ export async function collectAbortedLandedAckIds(
   }
   const landed = new Set<string>()
   for (const id of entries) {
-    const meta = await read(deps, chair, id)
+    const meta = await readSuccessionMeta(deps, chair, id)
     if (meta && meta.state === 'aborted' && meta.landedAckIds) {
       for (const ackId of meta.landedAckIds) {
         landed.add(ackId)
