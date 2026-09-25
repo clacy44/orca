@@ -17556,6 +17556,58 @@ describe('OrcaRuntimeService', () => {
         vi.useRealTimers()
       }
     })
+
+    // G1 round-5 recheck: a confirm still in flight when the pty exits, settling positive
+    // after onPtyExit clears the trust entry, must not re-seed trust for the next waiter.
+    it('a confirm in flight at pty exit does not re-seed trust for the next waiter', async () => {
+      vi.useFakeTimers()
+      try {
+        let release: (value: string | null) => void = () => {}
+        const confirmForegroundProcess = vi
+          .fn<() => Promise<string | null>>()
+          .mockImplementationOnce(
+            () =>
+              new Promise<string | null>((resolve) => {
+                release = resolve
+              })
+          )
+          .mockResolvedValue('zsh')
+        const runtime = new OrcaRuntimeService(store)
+        runtime.setPtyController({
+          spawn: vi.fn().mockResolvedValue({ id: 'pty-bg' }),
+          write: () => true,
+          kill: () => true,
+          getForegroundProcess: async () => 'claude',
+          confirmForegroundProcess
+        })
+        const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+          restoreProvenance: { kind: 'none' },
+          credentialLane: { kind: 'shared' }
+        })
+        runtime.onPtyData('pty-bg', 'agent output, no title\r\n', Date.now())
+
+        const w1 = runtime.waitForTerminal(handle, { condition: 'tui-idle', timeoutMs: 20_000 })
+        w1.catch(() => {})
+        await vi.advanceTimersByTimeAsync(4_000)
+        expect(confirmForegroundProcess).toHaveBeenCalledTimes(1)
+
+        // The pty exits while that confirm is still in flight; the confirm then settles positive.
+        runtime.onPtyExit('pty-bg', 0)
+        release('claude')
+        await vi.advanceTimersByTimeAsync(1)
+
+        const w2 = runtime.waitForTerminal(handle, { condition: 'tui-idle', timeoutMs: 20_000 })
+        w2.catch(() => {})
+        await vi.advanceTimersByTimeAsync(4_000)
+
+        expect(confirmForegroundProcess.mock.calls.length).toBeGreaterThan(1)
+        await expect(Promise.race([w2, Promise.resolve('still-pending')])).resolves.toBe(
+          'still-pending'
+        )
+      } finally {
+        vi.useRealTimers()
+      }
+    })
   })
 
   it('resolves tui-idle from an Antigravity ready prompt preview', async () => {

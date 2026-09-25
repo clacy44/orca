@@ -3212,7 +3212,12 @@ export class OrcaRuntimeService {
   // outputSeq pins ptyOutputSequenceById at confirm time: a captured leaf/pty object goes stale
   // across a renderer graph resync, so voiding trust must key on the live sequence, not a
   // record's lastOutputAt.
-  private lastPositiveForegroundConfirmAt = new Map<string, { monoAt: number; outputSeq: number }>()
+  // generation pins the pty lifecycle generation at confirm time: a confirm still in flight
+  // when the pty exits, then settling positive, must not re-seed trust for the next waiter.
+  private lastPositiveForegroundConfirmAt = new Map<
+    string,
+    { monoAt: number; outputSeq: number; generation: number }
+  >()
   // Why: exact-stop is the current sleep transaction boundary; its exit must
   // leave the renderer's intentional sleeping surface available for wake.
   private intentionalHandlelessPtyStops = new Map<string, string | null>()
@@ -36276,7 +36281,8 @@ export class OrcaRuntimeService {
     }
     const fresh = performance.now() - stamp.monoAt < TUI_IDLE_FOREGROUND_CONFIRM_TRUST_MS
     const noOutputSinceConfirm = (this.ptyOutputSequenceById.get(ptyId) ?? 0) === stamp.outputSeq
-    return fresh && noOutputSinceConfirm
+    const sameGeneration = this.getPtyLifecycleGeneration(ptyId) === stamp.generation
+    return fresh && noOutputSinceConfirm && sameGeneration
   }
 
   // [R197] INV-P-LAUNCH-EDGE: while a launch command sits in the pane and the launched agent
@@ -37873,14 +37879,18 @@ export class OrcaRuntimeService {
                 ) {
                   this.lastPositiveForegroundConfirmAt.set(leafPtyId, {
                     monoAt: performance.now(),
-                    outputSeq: this.ptyOutputSequenceById.get(leafPtyId) ?? 0
+                    outputSeq: this.ptyOutputSequenceById.get(leafPtyId) ?? 0,
+                    generation: preConfirmGeneration
                   })
                 }
                 // G1 repair: null means "cannot prove it's a shell" (no confirm support, e.g.
                 // SSH/degraded providers) and must resolve, not hold forever. Premises computed
                 // before this await are stale during it (2-6s on Windows) — output or a fence
                 // arriving meanwhile must still be able to defer the resolve.
-                if (confirmed === null || !isShellProcess(confirmed)) {
+                if (
+                  (confirmed === null || !isShellProcess(confirmed)) &&
+                  this.getPtyLifecycleGeneration(leafPtyId) === preConfirmGeneration
+                ) {
                   const freshFenceHolds = this.launchPromptFenceHolds(this.ptysById.get(leafPtyId))
                   const freshQuietMs = leaf.lastOutputAt ? Date.now() - leaf.lastOutputAt : 0
                   if (!freshFenceHolds && freshQuietMs >= TUI_IDLE_QUIESCENCE_MS) {
@@ -37995,14 +38005,18 @@ export class OrcaRuntimeService {
                 ) {
                   this.lastPositiveForegroundConfirmAt.set(pty.ptyId, {
                     monoAt: performance.now(),
-                    outputSeq: this.ptyOutputSequenceById.get(pty.ptyId) ?? 0
+                    outputSeq: this.ptyOutputSequenceById.get(pty.ptyId) ?? 0,
+                    generation: preConfirmGeneration
                   })
                 }
                 // G1 repair: null means "cannot prove it's a shell" (no confirm support, e.g.
                 // SSH/degraded providers) and must resolve, not hold forever. Premises computed
                 // before this await are stale during it (2-6s on Windows) — output or a fence
                 // arriving meanwhile must still be able to defer the resolve.
-                if (confirmed === null || !isShellProcess(confirmed)) {
+                if (
+                  (confirmed === null || !isShellProcess(confirmed)) &&
+                  this.getPtyLifecycleGeneration(pty.ptyId) === preConfirmGeneration
+                ) {
                   const freshFenceHolds = this.launchPromptFenceHolds(pty)
                   const freshQuietMs = pty.lastOutputAt ? Date.now() - pty.lastOutputAt : 0
                   if (!freshFenceHolds && freshQuietMs >= TUI_IDLE_QUIESCENCE_MS) {
