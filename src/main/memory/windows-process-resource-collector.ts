@@ -5,6 +5,7 @@ import {
   iterateProcessOutputLines,
   PROCESS_OUTPUT_FIELD_SCAN_MAX_CHARS
 } from '../../shared/process-output-field-scanner'
+import { createWindowsProcessResourceScanThrottle } from './windows-process-resource-scan-throttle'
 
 const PROCESS_QUERY_TIMEOUT_MS = 5_000
 const PROCESS_QUERY_MAX_BUFFER = 10 * 1024 * 1024
@@ -51,8 +52,13 @@ type TypeperfProcessFields = {
 let processBackend: 'cim' | 'typeperf' = 'cim'
 let previousCpuSample: WindowsProcessSample | null = null
 let retryCimAtMs = 0
+// Why: a cache hit must not touch the CPU sample chain (applyWindowsCpuSample) — reusing a
+// result is not a new sample, so previousCpuSample/backend state stays exactly as it was.
+export const enumerateWindowsProcessResources = createWindowsProcessResourceScanThrottle(
+  performWindowsProcessResourceScan
+)
 
-export async function enumerateWindowsProcessResources(): Promise<WindowsProcessResourceRow[]> {
+async function performWindowsProcessResourceScan(): Promise<WindowsProcessResourceRow[]> {
   // Why: one CIM sweep supplies both resource values and process identity,
   // avoiding a second host-wide PowerShell process on every open-popover poll.
   if (processBackend === 'typeperf') {

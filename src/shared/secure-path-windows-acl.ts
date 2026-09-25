@@ -21,23 +21,31 @@ function buildWindowsRestrictAclArgs(
   ]
 }
 
-export function bestEffortRestrictWindowsPath(targetPath: string, isDirectory: boolean): void {
+/** Fires the async best-effort hardening; resolves true/false once PowerShell actually finishes
+ *  (never rejects) so callers can record cache state after completion, not before it starts. */
+export function bestEffortRestrictWindowsPath(
+  targetPath: string,
+  isDirectory: boolean
+): Promise<boolean> {
   const currentUserSid = getCurrentWindowsUserSid()
   if (!currentUserSid) {
-    return
+    return Promise.resolve(false)
   }
   // Why: async to avoid blocking the main thread — sync PowerShell cold-start (~1-1.5s) on the frequent read path stormed it (#4901).
-  execFile(
-    getWindowsSystemToolPath('WindowsPowerShell\\v1.0\\powershell.exe'),
-    buildWindowsRestrictAclArgs(targetPath, currentUserSid, isDirectory),
-    {
-      windowsHide: true,
-      timeout: 5000
-    },
-    () => {
-      // Why: ignore errors — hardening is best-effort; PowerShell ACL APIs may be unavailable or locked down.
-    }
-  )
+  return new Promise((resolve) => {
+    execFile(
+      getWindowsSystemToolPath('WindowsPowerShell\\v1.0\\powershell.exe'),
+      buildWindowsRestrictAclArgs(targetPath, currentUserSid, isDirectory),
+      {
+        windowsHide: true,
+        timeout: 5000
+      },
+      (error) => {
+        // Why: ignore errors — hardening is best-effort; PowerShell ACL APIs may be unavailable or locked down.
+        resolve(!error)
+      }
+    )
+  })
 }
 
 export function restrictWindowsPathSync(targetPath: string, isDirectory: boolean): boolean {
@@ -63,6 +71,9 @@ export function restrictWindowsPathSync(targetPath: string, isDirectory: boolean
   }
 }
 
+// Why (item C step 1): verify first and skip Set-Acl when the ACL already matches — re-applying
+// an unchanged DACL still bumps the file's ChangeTime, which previously defeated the read-path
+// re-harden cache on every subsequent read. Exit codes/messages on a real mismatch are unchanged.
 const WINDOWS_RESTRICT_ACL_SCRIPT = `
 $ErrorActionPreference = 'Stop'
 $path = $args[0]
@@ -73,43 +84,54 @@ $allowedSids = @{}
 foreach ($sidText in $allowedSidTexts) {
   $allowedSids[$sidText] = $true
 }
-$acl = Get-Acl -LiteralPath $path
-$acl.SetAccessRuleProtection($true, $false)
-foreach ($rule in @($acl.Access)) {
-  [void]$acl.RemoveAccessRuleSpecific($rule)
-}
-$inheritanceFlags = [System.Security.AccessControl.InheritanceFlags]::None
-if ($isDirectory) {
-  $inheritanceFlags = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
-}
-foreach ($sidText in $allowedSidTexts) {
-  $sid = [System.Security.Principal.SecurityIdentifier]::new($sidText)
-  $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
-    $sid,
-    [System.Security.AccessControl.FileSystemRights]::FullControl,
-    $inheritanceFlags,
-    [System.Security.AccessControl.PropagationFlags]::None,
-    [System.Security.AccessControl.AccessControlType]::Allow
-  )
-  [void]$acl.AddAccessRule($rule)
-}
-Set-Acl -LiteralPath $path -AclObject $acl
-$verifiedAcl = Get-Acl -LiteralPath $path
-if (-not $verifiedAcl.AreAccessRulesProtected) {
-  throw 'ACL inheritance is still enabled'
-}
 $fullControl = [System.Security.AccessControl.FileSystemRights]::FullControl
-foreach ($rule in @($verifiedAcl.Access)) {
-  $sid = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
-  if (-not $allowedSids.ContainsKey($sid)) {
-    throw "Unexpected ACL entry $sid"
+function Confirm-AclRestricted($candidateAcl) {
+  if (-not $candidateAcl.AreAccessRulesProtected) {
+    throw 'ACL inheritance is still enabled'
   }
-  if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) {
-    throw "Unexpected ACL deny entry $sid"
+  foreach ($rule in @($candidateAcl.Access)) {
+    $sid = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
+    if (-not $allowedSids.ContainsKey($sid)) {
+      throw "Unexpected ACL entry $sid"
+    }
+    if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) {
+      throw "Unexpected ACL deny entry $sid"
+    }
+    if (($rule.FileSystemRights -band $fullControl) -ne $fullControl) {
+      throw "ACL entry $sid does not grant FullControl"
+    }
   }
-  if (($rule.FileSystemRights -band $fullControl) -ne $fullControl) {
-    throw "ACL entry $sid does not grant FullControl"
+}
+$acl = Get-Acl -LiteralPath $path
+$alreadyRestricted = $true
+try {
+  Confirm-AclRestricted $acl
+} catch {
+  $alreadyRestricted = $false
+}
+if (-not $alreadyRestricted) {
+  $acl.SetAccessRuleProtection($true, $false)
+  foreach ($rule in @($acl.Access)) {
+    [void]$acl.RemoveAccessRuleSpecific($rule)
   }
+  $inheritanceFlags = [System.Security.AccessControl.InheritanceFlags]::None
+  if ($isDirectory) {
+    $inheritanceFlags = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+  }
+  foreach ($sidText in $allowedSidTexts) {
+    $sid = [System.Security.Principal.SecurityIdentifier]::new($sidText)
+    $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+      $sid,
+      $fullControl,
+      $inheritanceFlags,
+      [System.Security.AccessControl.PropagationFlags]::None,
+      [System.Security.AccessControl.AccessControlType]::Allow
+    )
+    [void]$acl.AddAccessRule($rule)
+  }
+  Set-Acl -LiteralPath $path -AclObject $acl
+  $verifiedAcl = Get-Acl -LiteralPath $path
+  Confirm-AclRestricted $verifiedAcl
 }
 `.trim()
 

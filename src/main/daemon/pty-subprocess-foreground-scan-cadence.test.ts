@@ -162,7 +162,7 @@ describe('daemon pty foreground scan cadence', () => {
     expect(await readForegroundAt(handle, 8_500)).toBe('claude')
   })
 
-  it('keeps the fast identity refresh for a Windows session with a cached agent', async () => {
+  it('relaxes a cached Windows agent to the 30s idle tier once output goes quiet', async () => {
     resolveAgentForegroundProcessMock.mockResolvedValue('codex')
     const { handle } = spawnShellSubprocess('powershell.exe', 'win32')
 
@@ -171,9 +171,28 @@ describe('daemon pty foreground scan cadence', () => {
     await readForegroundAt(handle, 3_000)
     await readForegroundAt(handle, 5_000)
 
-    // Every read past the 1s cache TTL refreshes (t=0s, 1s, 3s, 5s): agent-exit
-    // detection through the identity cache must not be relaxed by the idle tier.
-    expect(resolveAgentForegroundProcessMock).toHaveBeenCalledTimes(4)
+    // Item A: past the startup window a cached agent with no output relaxes to the
+    // 30s idle tier, so the 1s/3s/5s reads serve the cache without a fresh scan.
+    expect(resolveAgentForegroundProcessMock).toHaveBeenCalledTimes(1)
+    expect(await readForegroundAt(handle, 30_500)).toBe('codex')
+    expect(resolveAgentForegroundProcessMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps a cached Windows agent on the 5s active tier while output flows', async () => {
+    resolveAgentForegroundProcessMock.mockResolvedValue('claude')
+    const { proc, handle } = spawnShellSubprocess('powershell.exe', 'win32')
+
+    await readForegroundAt(handle, 0)
+    expect(resolveAgentForegroundProcessMock).toHaveBeenCalledTimes(1)
+
+    for (let atMs = 500; atMs <= 60_000; atMs += 500) {
+      vi.setSystemTime(BASE_TIME_MS + atMs)
+      proc._simulateData('x')
+      expect(await readForegroundAt(handle, atMs)).toBe('claude')
+    }
+
+    // Output flowing every 500ms for 60s on the 5s active tier: ceil(60/5)+1 = 13.
+    expect(resolveAgentForegroundProcessMock.mock.calls.length).toBeLessThanOrEqual(13)
   })
 
   it('keeps the 5s retry for an idle POSIX shell with no output', async () => {

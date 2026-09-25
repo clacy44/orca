@@ -146,7 +146,7 @@ describe('hardenSecurePath', () => {
     expect(getPowerShellCalls().map(getPowerShellTarget)).toEqual([userDataPath, targetPath])
   })
 
-  it('LRU-evicts Windows file hardening entries and safely re-hardens an evicted path', () => {
+  it('LRU-evicts Windows file hardening entries and safely re-hardens an evicted path', async () => {
     Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' })
     __resetSecureFileHardenedPathsForTests({
       maxEntries: 2,
@@ -161,15 +161,19 @@ describe('hardenSecurePath', () => {
     for (const path of paths) {
       writeFileSync(path, '{}')
       hardenExistingSecureFile(path)
+      // Item C: the read-path hardening now completes async (single-flight per path); let it
+      // settle before the next path so an evicted re-read below isn't coalesced as "in flight".
+      await flushWindowsFileHardening()
     }
 
     hardenExistingSecureFile(paths[0]!)
+    await flushWindowsFileHardening()
 
     const fileTargets = getPowerShellCalls()
       .map(getPowerShellTarget)
       .filter((path) => paths.includes(path))
     expect(fileTargets).toEqual([...paths, paths[0]])
-    expect(__getSecureFileHardeningCacheStateForTests().paths).toMatchObject({
+    expect(__getSecureFileHardeningCacheStateForTests().windowsFiles).toMatchObject({
       entries: 2
     })
   })
@@ -205,7 +209,10 @@ describe('hardenSecurePath', () => {
     })
   })
 
-  it('re-hardens an existing file when its metadata changes after caching', async () => {
+  it('does not re-harden a file on an in-place content change (identity unchanged)', async () => {
+    // Item C: the Windows read path now caches identity only (dev/ino/birthtime), not
+    // mtime/size/mode — an in-place content rewrite keeps the same inode, and the file's ACL is
+    // unaffected by its content, so it must not trigger another PowerShell spawn.
     Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' })
     const userDataPath = mkdtempSync(join(tmpdir(), 'orca-secure-file-'))
     tempDirs.push(userDataPath)
@@ -213,17 +220,15 @@ describe('hardenSecurePath', () => {
     writeFileSync(targetPath, '{}')
 
     hardenExistingSecureFile(targetPath)
+    await flushWindowsFileHardening()
     await waitForFileTimestampTick()
     writeFileSync(targetPath, '{"changed":true}')
     hardenExistingSecureFile(targetPath)
+    await flushWindowsFileHardening()
 
-    // call 1: dir + file. call 2: dir skipped (path-cached), file re-hardened (new mtime)
-    expect(getPowerShellCalls()).toHaveLength(3)
-    expect(getPowerShellCalls().map(getPowerShellTarget)).toEqual([
-      userDataPath,
-      targetPath,
-      targetPath
-    ])
+    // call 1: dir + file. call 2: dir path-cached, file identity unchanged (within the floor).
+    expect(getPowerShellCalls()).toHaveLength(2)
+    expect(getPowerShellCalls().map(getPowerShellTarget)).toEqual([userDataPath, targetPath])
   })
 
   it('keeps post-rename target hardening on every write while caching the directory', () => {
@@ -460,6 +465,12 @@ function getPowerShellTarget(call: unknown[]): string {
 
 async function waitForFileTimestampTick(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 20))
+}
+
+// Lets a mocked (synchronously-resolving) Windows file hardening's .finally() land.
+async function flushWindowsFileHardening(): Promise<void> {
+  await Promise.resolve()
+  await Promise.resolve()
 }
 
 function statMode(path: string): number {

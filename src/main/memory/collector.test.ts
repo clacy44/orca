@@ -47,6 +47,15 @@ async function loadWindowsProcessResourceCollector() {
   return await import('./windows-process-resource-collector')
 }
 
+// Item D added a single-flight + 5s result cache to enumerateWindowsProcessResources. These
+// CPU-delta tests intentionally poll collectMemorySnapshot back-to-back to simulate distinct
+// sweeps; drop the cache (not the CPU-sample/backend state) between such polls so each still
+// triggers its own scan, matching real ~2s-apart popover polls rather than a same-tick cache hit.
+async function resetWindowsProcessResourceCache(): Promise<void> {
+  const { enumerateWindowsProcessResources } = await import('./windows-process-resource-collector')
+  enumerateWindowsProcessResources.reset()
+}
+
 const emptyStore = {
   getWorktreeMeta: () => undefined,
   getRepo: () => undefined
@@ -364,6 +373,7 @@ describe('collectMemorySnapshot', () => {
     const { collectMemorySnapshot } = await loadCollector()
 
     const first = await collectMemorySnapshot(emptyStore)
+    await resetWindowsProcessResourceCache()
     const second = await collectMemorySnapshot(emptyStore)
 
     expect(first.worktrees[0].sessions[0].cpu).toBe(0)
@@ -396,6 +406,7 @@ describe('collectMemorySnapshot', () => {
     const { collectMemorySnapshot } = await loadCollector()
 
     await collectMemorySnapshot(emptyStore)
+    await resetWindowsProcessResourceCache()
     const second = await collectMemorySnapshot(emptyStore)
 
     expect(second.worktrees[0].sessions[0].cpu).toBe(0)
@@ -423,6 +434,7 @@ describe('collectMemorySnapshot', () => {
     const { collectMemorySnapshot } = await loadCollector()
 
     await collectMemorySnapshot(emptyStore)
+    await resetWindowsProcessResourceCache()
     const second = await collectMemorySnapshot(emptyStore)
 
     expect(second.worktrees[0].sessions[0].cpu).toBe(100)
@@ -454,7 +466,9 @@ describe('collectMemorySnapshot', () => {
     const { collectMemorySnapshot } = await loadCollector()
 
     await collectMemorySnapshot(emptyStore)
+    await resetWindowsProcessResourceCache()
     const tooSoon = await collectMemorySnapshot(emptyStore)
+    await resetWindowsProcessResourceCache()
     const normalPoll = await collectMemorySnapshot(emptyStore)
 
     expect(tooSoon.worktrees[0].sessions[0].cpu).toBe(0)
@@ -484,6 +498,7 @@ describe('collectMemorySnapshot', () => {
     const { collectMemorySnapshot } = await loadCollector()
 
     await collectMemorySnapshot(emptyStore)
+    await resetWindowsProcessResourceCache()
     const capped = await collectMemorySnapshot(emptyStore)
 
     expect(capped.worktrees[0].sessions[0].cpu).toBe(200)
@@ -511,6 +526,7 @@ describe('collectMemorySnapshot', () => {
     const { collectMemorySnapshot } = await loadCollector()
 
     await collectMemorySnapshot(emptyStore)
+    await resetWindowsProcessResourceCache()
     const reopened = await collectMemorySnapshot(emptyStore)
 
     expect(reopened.worktrees[0].sessions[0].cpu).toBe(0)
@@ -558,6 +574,7 @@ describe('collectMemorySnapshot', () => {
     const { collectMemorySnapshot } = await loadCollector()
 
     const first = await collectMemorySnapshot(emptyStore)
+    await resetWindowsProcessResourceCache()
     const second = await collectMemorySnapshot(emptyStore)
 
     expect(execFileMock).toHaveBeenCalledTimes(3)
@@ -608,8 +625,11 @@ describe('collectMemorySnapshot', () => {
     const { collectMemorySnapshot } = await loadCollector()
 
     await collectMemorySnapshot(emptyStore)
+    await resetWindowsProcessResourceCache()
     await collectMemorySnapshot(emptyStore)
+    await resetWindowsProcessResourceCache()
     const warming = await collectMemorySnapshot(emptyStore)
+    await resetWindowsProcessResourceCache()
     const recovered = await collectMemorySnapshot(emptyStore)
 
     expect(execFileMock.mock.calls.map(([file]) => file)).toEqual([

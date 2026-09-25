@@ -121,9 +121,9 @@ describe('daemon pty foreground degraded-scan handling', () => {
     const { handle } = spawnWindowsShell()
 
     await readForegroundAt(handle, 0) // establishes 'claude'
-    expect(await readForegroundAt(handle, 1_000)).toBe('claude') // refresh returns degraded → keep
-    // Past the 1s TTL with a shell fallback: pre-fix this returned the shell.
-    expect(await readForegroundAt(handle, 2_500)).toBe('claude')
+    // Cached-agent refreshes relax to the 30s idle tier once past the startup window (item A).
+    expect(await readForegroundAt(handle, 30_000)).toBe('claude') // refresh returns degraded → keep
+    expect(await readForegroundAt(handle, 61_000)).toBe('claude')
     expect(readConptyMock).not.toHaveBeenCalled()
   })
 
@@ -135,8 +135,8 @@ describe('daemon pty foreground degraded-scan handling', () => {
     const { handle } = spawnWindowsShell()
 
     await readForegroundAt(handle, 0)
-    expect(await readForegroundAt(handle, 1_000)).toBe('claude')
-    expect(await readForegroundAt(handle, 2_500)).toBe('claude')
+    expect(await readForegroundAt(handle, 30_000)).toBe('claude')
+    expect(await readForegroundAt(handle, 61_000)).toBe('claude')
   })
 
   it('retires a cached agent when a scan finds no agent and the console is shell-only', async () => {
@@ -147,8 +147,8 @@ describe('daemon pty foreground degraded-scan handling', () => {
     const { handle } = spawnWindowsShell()
 
     await readForegroundAt(handle, 0)
-    await readForegroundAt(handle, 1_000) // refresh clears the cache
-    expect(await readForegroundAt(handle, 1_100)).toBe('powershell.exe')
+    await readForegroundAt(handle, 30_000) // refresh clears the cache (idle cached-agent tier)
+    expect(await readForegroundAt(handle, 30_100)).toBe('powershell.exe')
     expect(readConptyMock).toHaveBeenCalledTimes(1)
   })
 
@@ -160,8 +160,8 @@ describe('daemon pty foreground degraded-scan handling', () => {
     const { handle } = spawnWindowsShell()
 
     await readForegroundAt(handle, 0)
-    expect(await readForegroundAt(handle, 1_000)).toBe('claude')
-    expect(await readForegroundAt(handle, 2_500)).toBe('claude')
+    expect(await readForegroundAt(handle, 30_000)).toBe('claude')
+    expect(await readForegroundAt(handle, 61_000)).toBe('claude')
     expect(readConptyMock).toHaveBeenCalledTimes(2)
   })
 })
