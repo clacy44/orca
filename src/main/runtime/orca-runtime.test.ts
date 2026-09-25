@@ -9378,6 +9378,59 @@ describe('OrcaRuntimeService', () => {
     }
   })
 
+  // G1 round-4 recheck, blocking 1: a renderer graph resync swaps in a fresh leaf object that
+  // never sees output again, so voiding trust must key on ptyOutputSequenceById, not the
+  // captured leaf's frozen lastOutputAt.
+  it('G1N: output after the confirm voids trust even after a renderer graph resync (leaf edge)', async () => {
+    vi.useFakeTimers()
+    try {
+      const confirmForegroundProcess = vi
+        .fn<() => Promise<string | null>>()
+        .mockResolvedValueOnce('claude')
+        .mockResolvedValueOnce('zsh')
+      const runtime = createRuntime()
+      runtime.setPtyController({
+        write: () => true,
+        kill: () => true,
+        getForegroundProcess: async () => 'claude',
+        confirmForegroundProcess
+      })
+      syncSinglePty(runtime)
+      runtime.onPtyData('pty-1', 'agent output, no title\r\n', Date.now())
+
+      const [terminal] = (await runtime.listTerminals()).terminals
+      const w1 = runtime.waitForTerminal(terminal.handle, {
+        condition: 'tui-idle',
+        timeoutMs: 20_000
+      })
+
+      await vi.advanceTimersByTimeAsync(4_000)
+      await expect(w1).resolves.toMatchObject({ condition: 'tui-idle' })
+      expect(confirmForegroundProcess).toHaveBeenCalledTimes(1)
+
+      const w2 = runtime.waitForTerminal(terminal.handle, {
+        condition: 'tui-idle',
+        timeoutMs: 20_000
+      })
+      w2.catch(() => {})
+
+      // A renderer graph sync (any title/focus/layout change) republishes the same leaf as a
+      // new object; the fix must not trust it just because the object never saw new output.
+      syncSinglePty(runtime)
+      await vi.advanceTimersByTimeAsync(1)
+      runtime.onPtyData('pty-1', 'agent working again\r\n', Date.now())
+
+      await vi.advanceTimersByTimeAsync(4_000)
+
+      expect(confirmForegroundProcess.mock.calls.length).toBeGreaterThanOrEqual(2)
+      await expect(Promise.race([w2, Promise.resolve('still-pending')])).resolves.toBe(
+        'still-pending'
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   // G1 attempt-4 blocking 1: a stamp older than TUI_IDLE_FOREGROUND_CONFIRM_TRUST_MS (10s) must
   // not be trusted even with no intervening output (leaf edge).
   it('G1 repair (attempt 4): trust expires after TUI_IDLE_FOREGROUND_CONFIRM_TRUST_MS', async () => {
