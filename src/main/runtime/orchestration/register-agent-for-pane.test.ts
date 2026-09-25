@@ -129,6 +129,15 @@ describe('S10-21d b3: registerAgentForPane', () => {
   // refused at the cap like any other new registration (probe P1 A shape).
   it('refuses directory_full for a new pane taking a DERIVED name holder at the cap', async () => {
     const { db, runtime } = setup()
+    const derivedPaneKey = 'tabD:dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+    // [G1-10z R2-L1] the derived holder's own pane must be DEAD, or isSameNameDeadPaneTakeover
+    // never reaches the derived check (it short-circuits on holderPaneIsLive first) — this test
+    // would then pass whether or not the derived exemption exists.
+    vi.spyOn(runtime, 'getAgentDirectoryLivenessSignals').mockImplementation((paneKey: string) =>
+      paneKey === derivedPaneKey
+        ? { terminalHandle: null, lastAgentStatus: null, observedLive: false }
+        : { terminalHandle: 'term_a', lastAgentStatus: null, observedLive: true }
+    )
     for (let i = 0; i < DIRECTORY_LIVE_CAP; i += 1) {
       const leaf = `${String(i).padStart(8, '0')}-0000-4000-8000-000000000000`
       const result = db.upsertAgentByPaneSuffix({
@@ -153,7 +162,7 @@ describe('S10-21d b3: registerAgentForPane', () => {
     }
     const derived = db.upsertDerivedAgentForPane({
       hostId: 'local',
-      paneKey: 'tabD:dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+      paneKey: derivedPaneKey,
       terminalHandle: 'term_d',
       processIncarnation: null,
       worktreeId: null,

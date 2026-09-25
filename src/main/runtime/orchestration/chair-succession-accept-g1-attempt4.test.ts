@@ -302,6 +302,101 @@ describe('S10-22a G1-10z attempt-4: chair-succession-accept (H1/H2/H4/H6)', () =
       expect(run?.coordinator_pane_key).toBe(SUCCESSOR_PANE)
     })
 
+    // R2-L2 (G1-10z polish-recheck round 2, probe P7b): the post-throw re-read guard must key on
+    // a boolean, not the message string — `new Error('')` has an empty message, and
+    // `registrationThrowReason && !registration` would then skip the re-read even though a throw
+    // did occur, leaving a committed takeover aborted (round-1 N2's end state).
+    it('R2-L2: a post-upsert throw with an EMPTY message still reaches the re-read and continues', async () => {
+      await writeManifest('chair-x')
+      const { agentId } = registerChair('chair-x', PANE_A, HANDLE_A)
+      const runId = bindRunTo(PANE_A, HANDLE_A)
+      const meta = await sealedLaunching('chair-x', runId)
+      vi.spyOn(runtime, 'closeTerminal').mockResolvedValue({} as never)
+      vi.spyOn(runtime, 'waitForTerminal').mockResolvedValue({
+        handle: HANDLE_A,
+        condition: 'exit'
+      } as never)
+      const realAudit = db.writeAgentAudit.bind(db)
+      // [G1-10z R2-L2] probe P7b's exact shape: a throw whose message is the EMPTY string — the
+      // boolean guard (not the message string) must still route this into the re-read.
+      const emptyErrorMessage = ''
+      vi.spyOn(db, 'writeAgentAudit').mockImplementation((row) => {
+        if (row.verb === 'register' && row.outcome !== 'name_taken') {
+          throw new Error(emptyErrorMessage)
+        }
+        return realAudit(row)
+      })
+      void holdSealRequest(deps, hostId, meta, undefined)
+
+      const result = await acceptSuccession(deps, {
+        successionId: meta.id,
+        callerPaneKey: SUCCESSOR_PANE,
+        callerTerminalHandle: SUCCESSOR_HANDLE,
+        callerSessionId: 'sess-succ',
+        hostId
+      })
+
+      expect(result.chair).toBe('chair-x')
+      expect(result.agentId).toBe(agentId)
+      expect(result.warnings).toContain('takeoverCommittedDespiteThrow')
+      const row = db.getAgentByName(hostId, 'chair-x')
+      expect(row?.pane_key).toBe(SUCCESSOR_PANE)
+      expect(row?.id).toBe(agentId)
+      const confirmedMeta = await read({ orcaHome: tmp }, 'chair-x', meta.id)
+      expect(confirmedMeta?.state).toBe('confirmed')
+    })
+
+    // R2-L3 (G1-10z polish-recheck round 2, probe P7c): the re-read itself can throw (a locked
+    // DB) — that must fall through to the abort/settle path below, not escape raw and leave the
+    // hold wedged `confirming` forever (the pre-H2 wedge, resurrected one level deeper).
+    it('R2-L3: a throw from the post-throw re-read still aborts the record and settles the hold', async () => {
+      await writeManifest('chair-x')
+      registerChair('chair-x', PANE_A, HANDLE_A)
+      const runId = bindRunTo(PANE_A, HANDLE_A)
+      const meta = await sealedLaunching('chair-x', runId)
+      const closeSpy = vi.spyOn(runtime, 'closeTerminal').mockResolvedValue({} as never)
+      vi.spyOn(runtime, 'waitForTerminal').mockResolvedValue({
+        handle: HANDLE_A,
+        condition: 'exit'
+      } as never)
+      vi.spyOn(db, 'upsertAgentByPaneSuffix').mockImplementation(() => {
+        throw new Error('SQLITE_BUSY: database is locked')
+      })
+      const realGetAgentByName = db.getAgentByName.bind(db)
+      let getAgentByNameCalls = 0
+      vi.spyOn(db, 'getAgentByName').mockImplementation((forHostId, displayName) => {
+        getAgentByNameCalls += 1
+        // First call is registerAgentForPane's own isSameNameDeadPaneTakeover lookup; the
+        // second is the post-throw re-read under test.
+        if (getAgentByNameCalls === 2) {
+          throw new Error('SQLITE_BUSY: database is locked (re-read)')
+        }
+        return realGetAgentByName(forHostId, displayName)
+      })
+      const holdPromise = holdSealRequest(deps, hostId, meta, undefined)
+
+      await expect(
+        acceptSuccession(deps, {
+          successionId: meta.id,
+          callerPaneKey: SUCCESSOR_PANE,
+          callerTerminalHandle: SUCCESSOR_HANDLE,
+          callerSessionId: 'sess-succ',
+          hostId
+        })
+      ).rejects.toMatchObject({ code: 'succession_takeover_failed' })
+
+      expect(closeSpy).toHaveBeenCalledWith(HANDLE_A)
+      const finalMeta = await read({ orcaHome: tmp }, 'chair-x', meta.id)
+      expect(finalMeta?.state).toBe('aborted')
+
+      const holdOutcome = await holdPromise
+      expect(holdOutcome).toMatchObject({
+        ok: false,
+        code: 'succession_aborted',
+        reason: 'takeover_failed'
+      })
+    })
+
     // H6 (G1-10z attempt-4): the takeover-failure audit write used to be unguarded — a throwing
     // audit skipped the settle below it, leaving the record wedged with no hold outcome.
     it('H6: a throwing takeover-failure audit still settles the hold and throws succession_takeover_failed', async () => {

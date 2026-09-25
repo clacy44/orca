@@ -106,6 +106,10 @@ export async function acceptSuccession(
   // here left the record wedged `confirming` and the successor with a raw DB error (H2).
   let registration: Awaited<ReturnType<typeof registerAgentForPane>> | undefined
   let registrationThrowReason: string | undefined
+  // [G1-10z R2-L2] a boolean, not the message string: `new Error('')` has an empty message, and
+  // `registrationThrowReason && !registration` would then skip the re-read below even though a
+  // throw did occur.
+  let registrationThrew = false
   try {
     registration = await registerAgentForPane(deps.db, deps.runtime, {
       paneKey: params.callerPaneKey,
@@ -122,6 +126,7 @@ export async function acceptSuccession(
         undefined
     })
   } catch (err) {
+    registrationThrew = true
     registrationThrowReason = err instanceof Error ? err.message : String(err)
   }
   // [G1-10z polish-recheck N2 repair] a throw can arrive AFTER `upsertAgentByPaneSuffix` already
@@ -132,8 +137,15 @@ export async function acceptSuccession(
   // longer converges). Re-read the row: if it landed on the caller's pane, the write committed —
   // continue into the post-takeover steps with a warning instead of aborting a done takeover.
   let takeoverCommittedDespiteThrow = false
-  if (registrationThrowReason && !registration) {
-    const postThrowRow = deps.db.getAgentByName(params.hostId, chair)
+  if (registrationThrew && !registration) {
+    // [G1-10z R2-L3] the re-read itself can throw (e.g. a locked DB) — that must fall through to
+    // the abort/settle path below, not escape raw and leave the hold wedged `confirming`.
+    let postThrowRow: ReturnType<typeof deps.db.getAgentByName> | undefined
+    try {
+      postThrowRow = deps.db.getAgentByName(params.hostId, chair)
+    } catch {
+      postThrowRow = undefined
+    }
     if (postThrowRow && postThrowRow.pane_key === params.callerPaneKey) {
       takeoverCommittedDespiteThrow = true
       registration = {

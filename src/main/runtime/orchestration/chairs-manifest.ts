@@ -9,7 +9,11 @@ import {
   isResumeSelectorToken,
   isSessionIdRefusalToken
 } from '../../../shared/covered-launch-agents'
-import { tokenizeStartupCommand } from '../../../shared/tui-agent-startup-shell'
+import {
+  tokenizeStartupCommand,
+  type AgentStartupShell
+} from '../../../shared/tui-agent-startup-shell'
+import { resolveLocalWindowsAgentStartupShell } from '../../../shared/windows-terminal-shell'
 export const CHAIRS_MANIFEST_EFFORTS = [
   'low',
   'medium',
@@ -59,7 +63,21 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0
 }
 
-function validateEntry(raw: unknown, index: number): string | null {
+// [G1-10z R2-L5] the host's own launch shell, resolved the same way the request boundary does
+// (orca-runtime.ts `assertNoCoveredLaunchSelectorAtRequestBoundary`) — undefined off Windows
+// falls back to 'posix', so on Linux/macOS this is always 'posix'. A manifest is validated
+// locally, so `isRemote` is always false here.
+function resolveManifestLaunchShell(platform: NodeJS.Platform): AgentStartupShell {
+  return (
+    resolveLocalWindowsAgentStartupShell({
+      platform,
+      isRemote: false,
+      terminalWindowsShell: undefined
+    }) ?? 'posix'
+  )
+}
+
+function validateEntry(raw: unknown, index: number, hostShell: AgentStartupShell): string | null {
   if (typeof raw !== 'object' || raw === null) {
     return `chairs[${index}] is not an object`
   }
@@ -101,7 +119,7 @@ function validateEntry(raw: unknown, index: number): string | null {
     }
   }
   if (entry.launchArgs !== undefined) {
-    const problem = validateLaunchArgs(entry.launchArgs, index)
+    const problem = validateLaunchArgs(entry.launchArgs, index, hostShell)
     if (problem) {
       return problem
     }
@@ -171,7 +189,11 @@ function isForbiddenLaunchArgSelectorToken(token: string): boolean {
   )
 }
 
-function validateLaunchArgs(raw: unknown, index: number): string | null {
+function validateLaunchArgs(
+  raw: unknown,
+  index: number,
+  hostShell: AgentStartupShell
+): string | null {
   if (!Array.isArray(raw)) {
     return `chairs[${index}].launchArgs must be an array of strings`
   }
@@ -195,9 +217,15 @@ function validateLaunchArgs(raw: unknown, index: number): string | null {
   for (const shell of ['posix', 'powershell', 'cmd'] as const) {
     const tokenized = tokenizeStartupCommand(raw.join(' '), shell)
     if (!tokenized.ok) {
-      // Whole-manifest refusal on an unbalanced quote is intentional (N4): every launch shell
-      // fails to build a command from such a value anyway.
-      return `chairs[${index}].launchArgs is invalid: ${tokenized.error}`
+      // [G1-10z R2-L5] a tokenize FAILURE only refuses under the host's own launch shell — the
+      // value launches fine on the shell that will actually run it; a tokenize failure under a
+      // DIFFERENT shell's rules (e.g. a stray backtick under powershell on a POSIX host) is not
+      // reachable and must not block `chairs restore` for every chair. A SELECTOR found under
+      // any shell still refuses below, regardless of the host.
+      if (shell === hostShell) {
+        return `chairs[${index}].launchArgs is invalid: ${tokenized.error}`
+      }
+      continue
     }
     for (const token of tokenized.tokens) {
       if (isForbiddenLaunchArgSelectorToken(token)) {
@@ -208,8 +236,13 @@ function validateLaunchArgs(raw: unknown, index: number): string | null {
   return null
 }
 
-/** Refuses the whole file (never a partial acceptance) on any malformed entry or shape. */
-export function parseChairsManifest(raw: unknown): ChairsManifestParseResult {
+/** Refuses the whole file (never a partial acceptance) on any malformed entry or shape.
+ * `platform` defaults to the real host and exists so a test can resolve a win32 host without
+ * mocking global `process` (R2-L5). */
+export function parseChairsManifest(
+  raw: unknown,
+  platform: NodeJS.Platform = process.platform
+): ChairsManifestParseResult {
   if (typeof raw !== 'object' || raw === null) {
     return { ok: false, reason: 'manifest must be a JSON object' }
   }
@@ -220,9 +253,10 @@ export function parseChairsManifest(raw: unknown): ChairsManifestParseResult {
   if (!Array.isArray(candidate.chairs)) {
     return { ok: false, reason: 'manifest.chairs must be an array' }
   }
+  const hostShell = resolveManifestLaunchShell(platform)
   const names = new Set<string>()
   for (let i = 0; i < candidate.chairs.length; i += 1) {
-    const problem = validateEntry(candidate.chairs[i], i)
+    const problem = validateEntry(candidate.chairs[i], i, hostShell)
     if (problem) {
       return { ok: false, reason: problem }
     }

@@ -225,4 +225,54 @@ describe('parseChairsManifest', () => {
       }).ok
     ).toBe(true)
   })
+
+  // R2-L5 (G1-10z polish-recheck round 2, probe P9): a value that launches fine on the HOST's own
+  // shell must not be refused just because a DIFFERENT shell's tokenizer fails on it — every
+  // launch shell fails on the whole manifest otherwise, for values only reachable through one.
+  // On a posix host (Linux/macOS), all four exotic-but-launchable shapes below are accepted.
+  it.each([
+    ['posix escaped quote, odd count', ['--append-system-prompt', 'Quote: \\"x']],
+    ['backslash-escaped apostrophe', ['--append-system-prompt', "Don\\'t"]],
+    ['caret before closing quote', ['--append-system-prompt', '"anchor lines with ^"']],
+    ['backtick before closing quote', ['--append-system-prompt', '"wrap in a backtick `"']]
+  ])('R2-L5: accepts on a posix host, %s', (_label, launchArgs) => {
+    const result = parseChairsManifest({ version: 1, chairs: [baseEntry({ launchArgs })] }, 'linux')
+    expect(result.ok).toBe(true)
+  })
+
+  // R2-L5: a genuine SELECTOR found under ANY shell still refuses, even though the tokenize
+  // itself succeeds under every shell (an escaped space the non-host shells split on differently,
+  // landing "-rdata" as its own token under powershell/cmd) — this is not a tokenize-failure case.
+  it('R2-L5: still refuses a selector a non-host shell tokenizes out, escaped space then -r', () => {
+    const result = parseChairsManifest(
+      { version: 1, chairs: [baseEntry({ launchArgs: ['--add-dir', '/srv/my\\ -rdata'] })] },
+      'linux'
+    )
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.reason).toContain('"-rdata"')
+    }
+  })
+
+  // R2-L5: on a win32-resolved host, a tokenize failure under the HOST's own shell (powershell,
+  // the win32 default) still refuses — only the tokenize-failure-under-a-different-shell case is
+  // relaxed, not the host's own.
+  it.each([
+    ['posix escaped quote, odd count', ['--append-system-prompt', 'Quote: \\"x']],
+    ['backslash-escaped apostrophe', ['--append-system-prompt', "Don\\'t"]],
+    ['backtick before closing quote', ['--append-system-prompt', '"wrap in a backtick `"']]
+  ])('R2-L5: refuses on a win32-resolved host, %s', (_label, launchArgs) => {
+    const result = parseChairsManifest({ version: 1, chairs: [baseEntry({ launchArgs })] }, 'win32')
+    expect(result.ok).toBe(false)
+  })
+
+  // R2-L5: the P4w Windows-escape shapes stay refused on a posix host — those are genuine
+  // selectors under a non-host shell, unaffected by the tokenize-failure relaxation.
+  it.each([
+    ['powershell backtick-escaped -c', ['`-c']],
+    ['cmd caret-escaped -c', ['^-c']]
+  ])('R2-L5: P4w shape %s stays refused on a posix host', (_label, launchArgs) => {
+    const result = parseChairsManifest({ version: 1, chairs: [baseEntry({ launchArgs })] }, 'linux')
+    expect(result.ok).toBe(false)
+  })
 })

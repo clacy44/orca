@@ -883,8 +883,12 @@ describe('S10-22a WAVE 2: chair-succession-execute', () => {
       })
     ).rejects.toBeTruthy()
 
-    // A retry naming the UNRELATED old-acked id (instead of the run delivery that must still be
-    // covered) must refuse — it never landed on this chair's aborted record.
+    // [G1-10z R2-L6] the retry also acks the genuinely outstanding run delivery — under a WIDE
+    // (unscoped) "any acknowledged delivery on this mailbox" check, oldDelivery.id would also be
+    // accepted and this retry would SEAL. Only the correctly-scoped check (landed ids from THIS
+    // chair's own aborted record only) refuses it. A retry missing the outstanding run delivery
+    // would refuse either way (succession_unacked_delivery), discriminating only by code, not by
+    // whether the wide check actually admits the unrelated id.
     const { path: path2, sha: sha2 } = await writeCheckpoint()
     await expect(
       sealSuccession(deps, {
@@ -896,7 +900,7 @@ describe('S10-22a WAVE 2: chair-succession-execute', () => {
         checkpointPath: path2,
         checkpointSha256: sha2,
         reason: 'batch_end',
-        ack: [mailboxDelivery.id, oldDelivery.id]
+        ack: [mailboxDelivery.id, runDelivery.delivery.id, oldDelivery.id]
       })
     ).rejects.toMatchObject({ code: 'succession_unknown_ack' })
   })
