@@ -48,6 +48,23 @@ describe('mapRuntimeError', () => {
     }
   )
 
+  // H8 (G1-10z attempt-4, probe p11a2): `succession_directory_full` was missing from the
+  // pass-through set, so it mapped to the generic `runtime_error` — losing the caller's ability
+  // to tell "directory full" from any other fault.
+  it('preserves succession_directory_full as its own typed code, not runtime_error', () => {
+    const error = new OrchestrationError(
+      'succession_directory_full',
+      'The agent directory is at its cap (200); a takeover cannot register a successor.'
+    )
+
+    const response = mapRuntimeError('req_1', { runtimeId: 'runtime-1' }, error)
+
+    expect(response).toMatchObject({
+      ok: false,
+      error: { code: 'succession_directory_full' }
+    })
+  })
+
   it.each([
     ['window_not_focused', 'keyboard input requires focus', 'restore-window'],
     ['permission_denied', 'missing DBUS_SESSION_BUS_ADDRESS', 'permissions'],

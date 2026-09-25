@@ -2,6 +2,10 @@
 // public OrchestrationDb API. Mutation-guard comments match the s10-2-spec.md TESTS table.
 import { describe, expect, it } from 'vitest'
 import { OrchestrationDb } from './db'
+import {
+  _resetRetiredHandlesIndexForTest,
+  refreshRetiredHandlesIndexSync
+} from './chair-succession-retired-index'
 
 function freshDb(): OrchestrationDb {
   return new OrchestrationDb(':memory:')
@@ -451,3 +455,144 @@ function rawGet(db: OrchestrationDb, sql: string, args: unknown[]): unknown {
 function rawAll(db: OrchestrationDb, sql: string): unknown[] {
   return rawDb(db).prepare(sql).all()
 }
+
+// [G1-10z B7 repair] The retired-handle -> agent:<id> rewrite moved OUT of this choke and into
+// the RPC layer's address-resolution block (orchestration.ts, send/reply/peer-question — see
+// orchestration-succession-retired-handle-mail.test.ts for the end-to-end proof). What remains
+// here is a refuse-if-unattested BACKSTOP: reaching this choke with a `to` that still names a
+// retired handle means address resolution was skipped (no senderPaneKey) — refused, never
+// silently rewritten (a rewrite here is exactly the layering bug the attacker review found).
+describe('B7 repair: retired-handle backstop at the choke (no rewrite; refuse-if-unattested)', () => {
+  it('an unattested call (no senderPaneKey) whose `to` names a retired handle is refused, not rewritten', async () => {
+    const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+
+    const db = freshDb()
+    _resetRetiredHandlesIndexForTest()
+    const orcaHome = await mkdtemp(join(tmpdir(), 'orca-mail-rewrite-'))
+    try {
+      db.upsertAgentByPaneSuffix({
+        displayName: 'chair-succ',
+        role: null,
+        hostId: 'local',
+        paneKey: 'tab:new-pane',
+        terminalHandle: null,
+        processIncarnation: null,
+        worktreeId: null,
+        worktreePath: null,
+        branch: null,
+        title: null,
+        agentLabel: null,
+        originHandle: null,
+        originHostId: 'local'
+      })
+
+      const chairDir = join(orcaHome, 'chairs', 'chair-succ')
+      await mkdir(chairDir, { recursive: true })
+      await writeFile(
+        join(chairDir, 'retired-handles.json'),
+        JSON.stringify([
+          { handle: 'agent:retired-old-handle', succession: 'succ_abc', at: '2026-01-01T00:00:00Z' }
+        ])
+      )
+      refreshRetiredHandlesIndexSync(orcaHome)
+
+      const result = db.insertGatedMessage({
+        from: 'agent:other',
+        to: 'agent:retired-old-handle',
+        subject: 'status',
+        body: 'hello successor',
+        runId: 'run_peer_local',
+        verb: 'send'
+        // no senderPaneKey — address resolution above this choke was skipped.
+      })
+      expect(result.outcome).toBe('refused')
+      if (result.outcome !== 'refused') {
+        throw new Error('expected refused')
+      }
+      expect(result.verdict.ruleIds).toEqual(['retired_handle_unattested'])
+    } finally {
+      db.close()
+      await rm(orcaHome, { recursive: true, force: true })
+      _resetRetiredHandlesIndexForTest()
+    }
+  })
+
+  it('an attested call (senderPaneKey set) reaching the choke with an unresolved retired handle is passed through unchanged (call-site bug, not rewritten)', async () => {
+    const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+
+    const db = freshDb()
+    _resetRetiredHandlesIndexForTest()
+    const orcaHome = await mkdtemp(join(tmpdir(), 'orca-mail-rewrite-attested-'))
+    try {
+      const senderRegistration = db.upsertAgentByPaneSuffix({
+        displayName: 'sender-agent',
+        role: null,
+        hostId: 'local',
+        paneKey: 'tab:sender-pane',
+        terminalHandle: null,
+        processIncarnation: null,
+        worktreeId: null,
+        worktreePath: null,
+        branch: null,
+        title: null,
+        agentLabel: null,
+        originHandle: null,
+        originHostId: 'local'
+      })
+      const senderAgentId = (senderRegistration as { agent: { id: string } }).agent.id
+
+      const chairDir = join(orcaHome, 'chairs', 'chair-succ')
+      await mkdir(chairDir, { recursive: true })
+      await writeFile(
+        join(chairDir, 'retired-handles.json'),
+        JSON.stringify([
+          { handle: 'agent:retired-old-handle', succession: 'succ_abc', at: '2026-01-01T00:00:00Z' }
+        ])
+      )
+      refreshRetiredHandlesIndexSync(orcaHome)
+
+      const result = db.insertGatedMessage({
+        from: 'agent:other',
+        to: 'agent:retired-old-handle',
+        subject: 'status',
+        body: 'hello successor',
+        runId: 'run_peer_local',
+        senderPaneKey: 'tab:sender-pane',
+        verb: 'send'
+      })
+      expect(result.outcome).toBe('stored')
+      if (result.outcome !== 'stored') {
+        throw new Error('expected stored')
+      }
+      expect(result.message.to_handle).toBe('agent:retired-old-handle')
+      expect(result.message.sender_agent_id).toBe(senderAgentId)
+    } finally {
+      db.close()
+      await rm(orcaHome, { recursive: true, force: true })
+      _resetRetiredHandlesIndexForTest()
+    }
+  })
+
+  it('a `to` with no retired-handle match is passed through unchanged', () => {
+    _resetRetiredHandlesIndexForTest()
+    const db = freshDb()
+    const result = db.insertGatedMessage({
+      from: 'agent:a',
+      to: 'agent:untouched',
+      subject: 'status',
+      body: 'plain send',
+      runId: 'run_peer_local',
+      verb: 'send'
+    })
+    expect(result.outcome).toBe('stored')
+    if (result.outcome !== 'stored') {
+      throw new Error('expected stored')
+    }
+    expect(result.message.to_handle).toBe('agent:untouched')
+    db.close()
+  })
+})

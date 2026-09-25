@@ -21,6 +21,7 @@ import { buildDispatchPreamble } from '../../orchestration/preamble'
 import { formatMessageBanner } from '../../orchestration/formatter'
 import { isGroupAddress, resolveGroupAddress } from '../../orchestration/groups'
 import { isBarePeerHandle } from '../../orchestration/stale-handle-resolution'
+import { retiredHandleChair } from '../../orchestration/chair-succession-retired-index'
 import { reconcileLifecycleMessage } from '../../orchestration/lifecycle-reconciliation'
 import { waitForFederatedLifecycleSettlement } from '../../orchestration/federation-lifecycle-settlement'
 import { findLiveTerminalByHandle } from './agent-directory-rpc-liveness'
@@ -1061,13 +1062,29 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         // Peers cannot reach this: `remoteRunMailbox`/`from` are refused for accessProfile ===
         // 'peer' well above (S10-19 §8.1/§8.2), so `senderHostId` here is always this host's own
         // directory, never a peer-supplied id.
+        // [S10-22a Wave 2 contract, D-R215 §Protocol step 6 A3; G1-10z attempt-2 N2 repair] A
+        // retired chair handle (the incumbent's terminal handle before a dead-pane takeover)
+        // resolves to `agent:<chair's current agent id>` here, in the address-resolution block
+        // beside A1/F-5b — BEFORE the C4 attested-sender checks below, so `send` runs the same
+        // requireAddressableAgentRecipient + sender-attestation gauntlet an explicit
+        // `agent:<id>` target gets, and the wake below keys off the resolved handle. Resolved
+        // BEFORE and OUTSIDE the display-name/getTerminalPaneKey gate below — a retired handle
+        // is dead by definition (no live pane key), so a real `term_<uuid>` handle must still be
+        // caught even though it never matches DISPLAY_NAME_PATTERN and `getTerminalPaneKey`
+        // returns null for it. Mirrors reply's block (:2617-2619) and ask's (:3135, :3620). The
+        // choke (message-gate-writer.ts) no longer performs this rewrite itself — moved here per
+        // the attacker review (a rewrite after these checks let an unauthenticated `from` land in
+        // agent:<id> and keyed the wake to a stale handle nobody parks on).
+        const retiredChair =
+          !agentRecipient && isBarePeerHandle(to) ? retiredHandleChair(to) : undefined
         if (
           !agentRecipient &&
           isBarePeerHandle(to) &&
-          validateDisplayNameCandidate(to).ok &&
-          runtime.getTerminalPaneKey(to) == null
+          (retiredChair ||
+            (validateDisplayNameCandidate(to).ok && runtime.getTerminalPaneKey(to) == null))
         ) {
-          const named = db.getAgentByName(senderHostId, to)
+          const successor = retiredChair ? db.getAgentByName(senderHostId, retiredChair) : undefined
+          const named = successor ?? db.getAgentByName(senderHostId, to)
           if (named) {
             agentRecipient = requireAddressableAgentRecipient(db, named.id)
             to = `agent:${named.id}`
@@ -2595,13 +2612,33 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         }
       }
 
-      // Amendment B: reply mirrors send's guards. `to_handle` is bound to `original.from_handle`
+      // [S10-22a Wave 2 contract, D-R215 §Protocol step 6 A3; G1-10z B7 repair] Reply's target is
+      // `original.from_handle` (never caller-supplied), but a chair succession can retire that
+      // exact handle (the confirmed successor now answers under a NEW terminal handle, same
+      // agent id). Resolved here, in the address-resolution block, BEFORE the `agent:` guard
+      // below and every downstream use — same reasoning as send's block above: the choke
+      // (message-gate-writer.ts) rewrote this too late, after the sender-attestation checks and
+      // the wake had already run against the stale handle.
+      const retiredReplyChair = isBarePeerHandle(original.from_handle)
+        ? retiredHandleChair(original.from_handle)
+        : undefined
+      const retiredReplySuccessor = retiredReplyChair
+        ? db.getAgentByName(
+            runtime.getOrchestrationCompatibilityHostId() ?? 'local',
+            retiredReplyChair
+          )
+        : undefined
+      const replyToHandle = retiredReplySuccessor
+        ? `agent:${retiredReplySuccessor.id}`
+        : original.from_handle
+
+      // Amendment B: reply mirrors send's guards. `to_handle` is bound to `replyToHandle`
       // (never caller-supplied) but that address can itself be `agent:<id>` — the recipient of
       // THIS reply — so the same quarantine-then-derived checks send applies to an `agent:`
       // recipient apply here too, before the insert (ruling 3: "reply is a second to_handle
       // writer that can still carry an agent: address via a forged from").
-      if (original.from_handle.startsWith('agent:')) {
-        requireAddressableAgentRecipient(db, original.from_handle.slice('agent:'.length))
+      if (replyToHandle.startsWith('agent:')) {
+        requireAddressableAgentRecipient(db, replyToHandle.slice('agent:'.length))
       }
       // D-R177 F1-F4: a plain local reply to an `agent:`-addressed thread (either side) must
       // bind authorship to the ATTESTED caller, never to params.from/original.to_handle — those
@@ -2611,7 +2648,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
       let replyFrom: string
       let replySenderPaneKey: string | undefined
       let replySenderHostId: string
-      if (original.to_handle.startsWith('agent:') || original.from_handle.startsWith('agent:')) {
+      if (original.to_handle.startsWith('agent:') || replyToHandle.startsWith('agent:')) {
         const replyHostId = runtime.getOrchestrationCompatibilityHostId() ?? 'local'
         // C2: attest BEFORE resolveCallerAgent (smaller change than threading a data.paneKey
         // through OrchestrationError, and scoped to this one call site rather than
@@ -2730,7 +2767,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
       // Amendment A: the plain reply insert routes through the single write choke too.
       const insertedReply = db.insertGatedMessage({
         from: replyFrom,
-        to: original.from_handle,
+        to: replyToHandle,
         subject: `Re: ${original.subject}`,
         body: params.body,
         threadId: original.thread_id ?? original.id,
@@ -2751,7 +2788,7 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
       const reply = insertedReply.message
 
       runtime.notifyMessageArrived(
-        original.from_handle,
+        replyToHandle,
         reply.type,
         reply.thread_id,
         extractPayloadKind(reply.payload_kind)
@@ -3093,8 +3130,18 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
       // with a supervised Dispatch, so it must never fall into the `dispatch_inactive` throw a
       // few lines down (s10-2-spec.md:120: "today a peer ask is impossible").
       const resumedPeerQuestion = params.resume ? db.getQuestion(params.resume) : undefined
+      // [S10-22a Wave 2 contract, D-R215 §Protocol step 6 A3; G1-10z B7 repair] A bare `to` that
+      // is a retired chair handle routes into the peer-ask branch too (resolved to `agent:<id>`
+      // inside handlePeerAsk, address-resolution block) — otherwise it would fall to the
+      // dispatch-ask branch below and refuse `dispatch_inactive` for what is really a peer
+      // address whose owner just retired a terminal handle.
+      const retiredAskChair =
+        params.to !== undefined && !params.to.startsWith('agent:')
+          ? retiredHandleChair(params.to)
+          : undefined
       if (
         (params.to?.startsWith('agent:') ?? false) ||
+        retiredAskChair !== undefined ||
         resumedPeerQuestion?.run_id === PEER_RUN_ID
       ) {
         // S10-8 R1/R2: `host` names a foreign agent's saved environment (CLI's `name@host`
@@ -3571,7 +3618,24 @@ async function handlePeerAsk(args: {
     if (!params.to) {
       throw new OrchestrationError('invalid_argument', 'Missing --to for a peer ask.')
     }
-    const toAgent = requireAddressableAgentRecipient(db, params.to.slice('agent:'.length))
+    // [S10-22a Wave 2 contract, D-R215 §Protocol step 6 A3; G1-10z B7 repair] Address-resolution
+    // block, mirroring send/reply: a bare retired chair handle resolves to the chair's current
+    // agent id (its confirmed successor) before the addressability check below — never a
+    // caller-supplied `agent:<id>` shortcut, so the same attested-directory lookup send/reply use.
+    const retiredChair = params.to.startsWith('agent:') ? undefined : retiredHandleChair(params.to)
+    const resolvedTo = retiredChair
+      ? (() => {
+          const successor = db.getAgentByName(hostId, retiredChair)
+          return successor ? `agent:${successor.id}` : params.to
+        })()
+      : params.to
+    if (!resolvedTo.startsWith('agent:')) {
+      throw new OrchestrationError(
+        'invalid_argument',
+        'orca agents ask requires an agent: address or a resolvable chair handle.'
+      )
+    }
+    const toAgent = requireAddressableAgentRecipient(db, resolvedTo.slice('agent:'.length))
     const options =
       params.options
         ?.split(',')

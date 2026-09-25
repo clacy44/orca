@@ -531,6 +531,24 @@ function longPollClassOf(request: RpcRequest): LongPollClass | null {
   if (request.method === 'orchestration.workerStart') {
     return 'wait'
   }
+  // G1 repair B2: `orchestration.chairs.succeed` parks the incumbent's RPC open for up to 150 s
+  // (chair-succession-hold.ts's SEAL_HOLD_TIMEOUT_MS), the identical shape as `orchestration.ask`
+  // — without this, the 30s socket idle timer tears the connection down mid-hold and its `signal`
+  // (the only thing that lets the successor's abort/timeout path release promptly) is never wired.
+  if (request.method === 'orchestration.chairs.succeed') {
+    return 'wait'
+  }
+  // N9: successionAccept's worst case (a chair-lock wait up to 30s, plus a bounded 10s exit
+  // wait, plus a manifest-lock wait up to 30s behind a restore) can exceed the 30s socket idle
+  // bound the same way `succeed` above can — same classification, same reason.
+  // G1 attempt-3 repair F2: classifying it 'wait' put it behind the same 12-slot sub-cap as every
+  // `terminal.wait`/`check --wait`/`orchestration.wait`/`workerStart` on the host, so a normal
+  // fleet's parked waits could starve the one successionAccept call the incumbent's hold is
+  // waiting on, timing the hold out. It still keeps the keepalive/abort wiring 'wait' gives it —
+  // classify it 'pact' so it takes the reserved headroom instead of competing for it.
+  if (request.method === 'orchestration.chairs.successionAccept') {
+    return 'pact'
+  }
   return null
 }
 
@@ -1835,7 +1853,7 @@ export class OrcaRuntimeRpcServer {
 
     // Why: long-poll admission fence; short RPCs bypass the counter. See §7 risk #2.
     const longPoll = longPollClassOf(request)
-    const rejection = this.admitLongPoll(longPoll)
+    const rejection = this.admitLongPoll(longPoll, undefined, request.method)
     if (rejection) {
       return this.buildError(request.id, 'runtime_busy', rejection.message, rejection.data)
     }
@@ -1861,7 +1879,8 @@ export class OrcaRuntimeRpcServer {
   // is reserved.
   private admitLongPoll(
     longPoll: LongPollClass | null,
-    peerKey?: { pairedDeviceId: string; accessProfile: 'full' | 'peer' | undefined }
+    peerKey?: { pairedDeviceId: string; accessProfile: 'full' | 'peer' | undefined },
+    method?: string
   ): { message: string; data?: { nextSteps: readonly string[] } } | null {
     if (!longPoll) {
       return null
@@ -1872,6 +1891,14 @@ export class OrcaRuntimeRpcServer {
     // bare "capacity reached" error (§3.2's third bullet).
     if (longPoll === 'pact') {
       if (this.activeLongPolls >= this.longPollCap) {
+        // H9 (G1-10z attempt-4): `successionAccept` (G1 attempt-3 repair F2) shares this class
+        // only to take the reserved headroom, not the FEDERATED PACT protocol it belongs to — the
+        // "re-arm; steps are durable" text (and its baked-in nextSteps, which pre-empted the CLI's
+        // own `runtime_busy` fallback) is nonsensical for an accept caller. Send no `data` here so
+        // the CLI's `SUCCESSION_NEXT_STEPS.runtime_busy` entry is what actually reaches it.
+        if (method === 'orchestration.chairs.successionAccept') {
+          return { message: 'long-poll capacity reached; retry with backoff' }
+        }
         return {
           message: 're-arm; steps are durable',
           data: { nextSteps: ['re-arm; steps are durable'] }
@@ -2082,7 +2109,7 @@ export class OrcaRuntimeRpcServer {
 
     const longPoll = longPollClassOf(request)
     const peerLongPollKey = { pairedDeviceId: device.deviceId, accessProfile }
-    const rejection = this.admitLongPoll(longPoll, peerLongPollKey)
+    const rejection = this.admitLongPoll(longPoll, peerLongPollKey, request.method)
     if (rejection) {
       reply(
         JSON.stringify(

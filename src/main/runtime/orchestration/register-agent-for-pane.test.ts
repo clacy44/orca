@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { registerAgentForPane } from './register-agent-for-pane'
 import { OrchestrationDb } from './db'
 import { OrcaRuntimeService } from '../orca-runtime'
+import { DIRECTORY_LIVE_CAP } from '../rpc/methods/agent-directory-rpc-view'
 import type { RuntimeTerminalSummary } from '../../../shared/runtime-types'
 
 const PANE_A = 'tabA:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
@@ -121,5 +122,65 @@ describe('S10-21d b3: registerAgentForPane', () => {
       expect(outcome.reMinted).toBe(true)
       expect(outcome.agent.role).toBe('r2')
     }
+  })
+
+  // [G1-10z polish-recheck N1 regression] a derived name holder is not a same-name dead-pane
+  // takeover (its re-point re-mints `derived = 0`, raising the cap-counted total) — it must be
+  // refused at the cap like any other new registration (probe P1 A shape).
+  it('refuses directory_full for a new pane taking a DERIVED name holder at the cap', async () => {
+    const { db, runtime } = setup()
+    const derivedPaneKey = 'tabD:dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+    // [G1-10z R2-L1] the derived holder's own pane must be DEAD, or isSameNameDeadPaneTakeover
+    // never reaches the derived check (it short-circuits on holderPaneIsLive first) — this test
+    // would then pass whether or not the derived exemption exists.
+    vi.spyOn(runtime, 'getAgentDirectoryLivenessSignals').mockImplementation((paneKey: string) =>
+      paneKey === derivedPaneKey
+        ? { terminalHandle: null, lastAgentStatus: null, observedLive: false }
+        : { terminalHandle: 'term_a', lastAgentStatus: null, observedLive: true }
+    )
+    for (let i = 0; i < DIRECTORY_LIVE_CAP; i += 1) {
+      const leaf = `${String(i).padStart(8, '0')}-0000-4000-8000-000000000000`
+      const result = db.upsertAgentByPaneSuffix({
+        displayName: `filler-${i}`,
+        role: null,
+        hostId: 'local',
+        paneKey: `tabF${i}:${leaf}`,
+        terminalHandle: `term_f${i}`,
+        processIncarnation: null,
+        worktreeId: null,
+        worktreePath: null,
+        branch: null,
+        title: null,
+        agentLabel: null,
+        originHandle: `term_f${i}`,
+        originHostId: 'local',
+        isPaneLive: () => false
+      })
+      if (result.outcome === 'name_taken') {
+        throw new Error('fixture: unexpected name_taken while filling the directory')
+      }
+    }
+    const derived = db.upsertDerivedAgentForPane({
+      hostId: 'local',
+      paneKey: derivedPaneKey,
+      terminalHandle: 'term_d',
+      processIncarnation: null,
+      worktreeId: null,
+      worktreePath: '/w/derived-repo',
+      branch: 'feat-derived',
+      title: null,
+      agentLabel: null
+    })
+    expect(derived?.derived).toBe(1)
+
+    const outcome = await registerAgentForPane(db, runtime, {
+      paneKey: 'tabN:99999999-0000-4000-8000-000000000000',
+      terminalHandle: 'term_new',
+      processIncarnation: null,
+      displayName: derived!.display_name,
+      role: undefined
+    })
+
+    expect(outcome).toMatchObject({ ok: false, reason: 'directory_full' })
   })
 })

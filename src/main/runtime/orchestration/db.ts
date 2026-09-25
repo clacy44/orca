@@ -5110,6 +5110,27 @@ export class OrchestrationDb {
     return row?.count ?? 0
   }
 
+  // S10-22a WAVE 2 chair-succession fix #4: read-only — unlike `getOrCreateRunDelivery` below,
+  // never mints. The seal path needs to know whether an outstanding delivery exists WITHOUT the
+  // side effect of creating one on a refusal path.
+  getOutstandingRunDelivery(runId: string): DeliveryRow | undefined {
+    const row = this.db
+      .prepare("SELECT * FROM deliveries WHERE run_id = ? AND status = 'outstanding'")
+      .get(runId) as DeliveryRow | undefined
+    return row ? exposeDeliveryTimestamps(row) : undefined
+  }
+
+  // H11 (G1-10z attempt-4): read-only, ANY status (unlike the outstanding-only pair above) — lets
+  // a caller tell "this id belongs to this Run but was already acknowledged" (a safe retry) from
+  // "this id never existed for this Run" (a real typo/refusal), which `getOutstandingRunDelivery`
+  // alone cannot: an already-acknowledged delivery is invisible to it.
+  getRunDeliveryById(runId: string, id: string): DeliveryRow | undefined {
+    const row = this.db
+      .prepare('SELECT * FROM deliveries WHERE id = ? AND run_id = ?')
+      .get(id, runId) as DeliveryRow | undefined
+    return row ? exposeDeliveryTimestamps(row) : undefined
+  }
+
   getOrCreateRunDelivery(params: {
     runId: string
     consumerGeneration: number
@@ -5830,6 +5851,23 @@ export class OrchestrationDb {
     params: GetOrCreateMailboxDeliveryParams
   ): GetOrCreateMailboxDeliveryResult | undefined {
     return getOrCreateMailboxDeliveryImpl(this.db, params)
+  }
+
+  // S10-22a WAVE 2 chair-succession fix #4: read-only sibling of the above — never mints.
+  getOutstandingMailboxDelivery(mailboxHandle: string): MailboxDeliveryRow | undefined {
+    return this.db
+      .prepare(
+        "SELECT * FROM mailbox_deliveries WHERE mailbox_handle = ? AND status = 'outstanding'"
+      )
+      .get(mailboxHandle) as MailboxDeliveryRow | undefined
+  }
+
+  // H11 (G1-10z attempt-4): read-only, ANY status — the mailbox sibling of
+  // `getRunDeliveryById` above, same reason.
+  getMailboxDeliveryById(mailboxHandle: string, id: string): MailboxDeliveryRow | undefined {
+    return this.db
+      .prepare('SELECT * FROM mailbox_deliveries WHERE id = ? AND mailbox_handle = ?')
+      .get(id, mailboxHandle) as MailboxDeliveryRow | undefined
   }
 
   acknowledgeMailboxDelivery(

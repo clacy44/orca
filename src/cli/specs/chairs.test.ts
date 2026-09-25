@@ -22,9 +22,16 @@ describe('chairs command specs', () => {
     }
   })
 
-  it('covers restore, status, and export', () => {
+  it('covers restore, status, export, succeed, succession-accept, and resume-context', () => {
     const paths = CHAIRS_COMMAND_SPECS.map((entry) => entry.path.join(' '))
-    expect(paths).toEqual(['chairs restore', 'chairs status', 'chairs export'])
+    expect(paths).toEqual([
+      'chairs restore',
+      'chairs status',
+      'chairs export',
+      'chairs succeed',
+      'chairs succession-accept',
+      'chairs resume-context'
+    ])
   })
 
   it('restore accepts --manifest, --only, and --dry-run', () => {

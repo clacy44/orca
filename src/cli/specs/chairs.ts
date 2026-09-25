@@ -30,5 +30,36 @@ export const CHAIRS_COMMAND_SPECS: CommandSpec[] = [
     usage: 'orca chairs export [--manifest <path>] [--force] [--json]',
     allowedFlags: [...GLOBAL_FLAGS, 'manifest', 'force'],
     notes: ['Refuses to overwrite any existing file at the target path unless --force is passed.']
+  },
+  {
+    path: ['chairs', 'succeed'],
+    summary: 'Hand a chair off to a successor session and hold for the outcome',
+    usage:
+      'orca chairs succeed --checkpoint <path> --reason batch_end|context [--ack <id>]... [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'checkpoint', 'reason', 'ack'],
+    notes: [
+      'Holds open for minutes while the runtime seals, launches and waits on the successor.',
+      'On abort prints `RESULT=succession_aborted id=<id> reason=<reason>` and exits 1.',
+      'On confirm the process is ended with the pane; nothing more is printed.'
+    ]
+  },
+  {
+    path: ['chairs', 'succession-accept'],
+    summary: 'Accept a pending succession as the successor session',
+    usage: 'orca chairs succession-accept <id> [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'id'],
+    positionalArgs: ['id']
+  },
+  {
+    path: ['chairs', 'resume-context'],
+    summary: 'Print the resume context for this pane after a succession',
+    usage: 'orca chairs resume-context [--json|--markdown|--hook]',
+    allowedFlags: [...GLOBAL_FLAGS, 'markdown', 'hook'],
+    notes: [
+      '--hook reads a Claude Code SessionStart JSON payload from stdin (empty/invalid stdin is ' +
+        'fine), prints the context text and exits 0, or prints nothing and exits 0 when there is ' +
+        'no pending record for this pane.',
+      'Default and --markdown print the text; --json prints the raw RPC result.'
+    ]
   }
 ]

@@ -136,6 +136,99 @@ describe('request-boundary launch-selector refusal (T29)', () => {
     )
     expect(createTerminal).toHaveBeenCalledOnce()
   })
+
+  // [G1-10z attempt-2 N11 repair] appendAgentArgs (chair restore/succession launchArgs) is a
+  // fourth surface this refusal can see, bypassing it before the repair because only
+  // `agentArgs`/`command` were scanned.
+  it('createAgentSession refuses --session-id carried in appendAgentArgs, not just agentArgs', async () => {
+    const { runtime, createTerminal } = createRuntime()
+
+    const error = await runtime
+      .createAgentSession({
+        ...createRequest(operationId('a005'), '--model opus'),
+        appendAgentArgs: '--session-id deadbeef'
+      })
+      .catch((thrown: unknown) => thrown)
+
+    expect((error as { reasonCode?: string }).reasonCode).toBe('launch_session_id_forbidden')
+    expect(createTerminal).not.toHaveBeenCalled()
+  })
+
+  it('ensureAgentSession refuses --fork-session carried in appendAgentArgs', async () => {
+    const { runtime, createTerminal } = createRuntime()
+
+    const error = await runtime
+      .ensureAgentSession({ ...resumeRequest('--model opus'), appendAgentArgs: '--fork-session' })
+      .catch((thrown: unknown) => thrown)
+
+    expect((error as { reasonCode?: string }).reasonCode).toBe('launch_fork_forbidden')
+    expect(createTerminal).not.toHaveBeenCalled()
+  })
+
+  // [G1-10z attempt-4 H3] The scan tokenized correctly but only classified session-id/
+  // fork-session tokens — a resume/continue selector in appendAgentArgs (chair restore/
+  // succession launchArgs) reached the plan unrefused despite this function's own doc comment
+  // naming resume/continue as covered.
+  it('createAgentSession refuses --resume carried in appendAgentArgs', async () => {
+    const { runtime, createTerminal } = createRuntime()
+
+    const error = await runtime
+      .createAgentSession({
+        ...createRequest(operationId('a006'), '--model opus'),
+        appendAgentArgs: '--resume deadbeef-0000-4000-8000-000000000000'
+      })
+      .catch((thrown: unknown) => thrown)
+
+    expect((error as { reasonCode?: string }).reasonCode).toBe('launch_resume_forbidden')
+    expect(createTerminal).not.toHaveBeenCalled()
+  })
+
+  it('ensureAgentSession refuses --continue carried in appendAgentArgs', async () => {
+    const { runtime, createTerminal } = createRuntime()
+
+    const error = await runtime
+      .ensureAgentSession({ ...resumeRequest('--model opus'), appendAgentArgs: '--continue' })
+      .catch((thrown: unknown) => thrown)
+
+    expect((error as { reasonCode?: string }).reasonCode).toBe('launch_resume_forbidden')
+    expect(createTerminal).not.toHaveBeenCalled()
+  })
+
+  // [G1-10z G1-10z-polish-recheck B1 regression] resume/continue selectors in `agentArgs`/
+  // `command` (as opposed to `appendAgentArgs`) must reach the plan unrefused at this boundary —
+  // `isResumeSelectorToken`/`isContinueSelectorToken` are a deliberate superset, and admission /
+  // chair ruling 21c-E2 both keep a caller-typed `--resume`/`--continue` alive on these subjects.
+  it.each([
+    ['--continue', '--continue'],
+    ['-c', '-c'],
+    ['--agent -review (a documented non-selector value)', '--agent -review'],
+    [
+      '--resume <uuid> (caller resume, ruling 21c-E2)',
+      '--resume 0f1e2d3c-4b5a-4968-8778-695a4b3c2d1e'
+    ]
+  ])('createAgentSession does not refuse agentArgs: %s at the boundary', async (_label, args) => {
+    const { runtime, createTerminal } = createRuntime()
+
+    await expect(
+      runtime.createAgentSession(createRequest(operationId(`b0${args.length}`), args))
+    ).resolves.toMatchObject({ disposition: 'created' })
+    expect(createTerminal).toHaveBeenCalledOnce()
+  })
+
+  it.each([
+    ['--continue', '--continue'],
+    ['-r stale-id (strip-guard shape)', '-r stale-id']
+  ])('ensureAgentSession does not refuse agentArgs: %s at the boundary', async (_label, args) => {
+    const { runtime, createTerminal } = createRuntime()
+
+    const error = await runtime
+      .ensureAgentSession(resumeRequest(args))
+      .then(() => undefined)
+      .catch((thrown: unknown) => thrown)
+
+    expect((error as { name?: string } | undefined)?.name).not.toBe('LaunchAdmissionRefusedError')
+    expect(createTerminal).toHaveBeenCalledOnce()
+  })
 })
 
 // [D-R104 (ii), Ruling 34 Addendum 15] The third named site: runCreateMobileSessionTerminal's
@@ -209,6 +302,57 @@ describe('request-boundary launch-selector refusal (D-R104 (ii)): runCreateMobil
     // Not a LaunchAdmissionRefusedError from the request-boundary check — proves the boundary
     // itself let it through; whatever `createTerminal`'s own mock/downstream stub does past
     // that is out of this fence's scope.
+    expect((error as { name?: string } | undefined)?.name).not.toBe('LaunchAdmissionRefusedError')
+  })
+
+  // [G1-10z G1-10z-polish-recheck B1 regression] mobile createTerminal's `command`/
+  // `launchConfig.agentArgs` are caller-typed, not chair-owned `appendAgentArgs` — a resume/
+  // continue selector there must not be refused at this boundary.
+  it('createMobileSessionTerminal does not refuse command: claude --resume <uuid>', async () => {
+    const { runtime } = createRuntimeForMobile()
+
+    const error = await runtime
+      .createMobileSessionTerminal('id:worktree-1', {
+        credentialLane: { kind: 'shared' },
+        activate: false,
+        launchAgent: 'claude',
+        command: 'claude --resume 0f1e2d3c-4b5a-4968-8778-695a4b3c2d1e'
+      })
+      .then(() => undefined)
+      .catch((thrown: unknown) => thrown)
+
+    expect((error as { name?: string } | undefined)?.name).not.toBe('LaunchAdmissionRefusedError')
+  })
+
+  it('createMobileSessionTerminal does not refuse command: claude --continue', async () => {
+    const { runtime } = createRuntimeForMobile()
+
+    const error = await runtime
+      .createMobileSessionTerminal('id:worktree-1', {
+        credentialLane: { kind: 'shared' },
+        activate: false,
+        launchAgent: 'claude',
+        command: 'claude --continue'
+      })
+      .then(() => undefined)
+      .catch((thrown: unknown) => thrown)
+
+    expect((error as { name?: string } | undefined)?.name).not.toBe('LaunchAdmissionRefusedError')
+  })
+
+  it('createMobileSessionTerminal does not refuse launchConfig.agentArgs: --continue', async () => {
+    const { runtime } = createRuntimeForMobile()
+
+    const error = await runtime
+      .createMobileSessionTerminal('id:worktree-1', {
+        credentialLane: { kind: 'shared' },
+        activate: false,
+        launchAgent: 'claude',
+        launchConfig: { agentCommand: 'claude', agentArgs: '--continue', agentEnv: {} }
+      })
+      .then(() => undefined)
+      .catch((thrown: unknown) => thrown)
+
     expect((error as { name?: string } | undefined)?.name).not.toBe('LaunchAdmissionRefusedError')
   })
 })

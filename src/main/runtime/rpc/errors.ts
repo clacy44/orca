@@ -165,7 +165,52 @@ const STRUCTURED_RUNTIME_PASSTHROUGH_CODES: ReadonlySet<string> = new Set([
   // staying unpropagated).
   'link_binding_conflict',
   'link_store_unreadable',
-  'link_store_empty'
+  'link_store_empty',
+  // S10-22a WAVE 2 (b1-slice1-succession.md §"Wave 2 contract"): chair succession's typed
+  // refusals, each a complete sentence the CLI prints verbatim with next steps where the brief
+  // names them (`succession_unacked_delivery`'s `ids`, checkpoint_*'s `line`).
+  'succession_not_a_chair',
+  'succession_no_run',
+  'succession_legacy_run',
+  'succession_active_dispatch',
+  'succession_in_flight',
+  'succession_charter_missing',
+  'succession_unacked_delivery',
+  'succession_unknown',
+  'succession_wrong_pane',
+  'succession_not_launching',
+  'succession_expired',
+  'succession_takeover_failed',
+  'succession_none',
+  // G1 repair round (b2-g1-repairs.md; findings B5/L3/L4/M1/M8): typed refusals reachable only
+  // after the wave 2 contract's first pass, added additively.
+  'resume_context_too_large',
+  'succession_run_moved',
+  'succession_unknown_ack',
+  'succession_incumbent_exit_timeout',
+  // Judgment call (see RETURN): not in the brief's own 4-code pass-through list, but M8's seal-
+  // time lane refusal (A9) has no existing code that fits without misleading the caller.
+  'succession_lane_unsupported',
+  // H8 (G1-10z attempt-4): the seal-time directory-cap pre-check (chair-succession-execute.ts)
+  // throws this code directly — before this it mapped to the generic `runtime_error`, losing the
+  // caller's ability to tell "directory full" from any other fault. [G1-10z polish-recheck N5
+  // correction] a takeover at the cap does NOT throw this code: `registerAgentForPane`'s
+  // `directory_full` refusal is caught and re-thrown as `succession_takeover_failed` by
+  // chair-succession-accept.ts, which is already in this list above.
+  'succession_directory_full',
+  // Not in the wave 2 contract's own refusal list, but the same checkpoint_* family (D-R212
+  // "sha changed after hashing → checkpoint_changed") — flagged in RETURN as a judgment call.
+  'checkpoint_changed',
+  'checkpoint_schema',
+  'checkpoint_sections',
+  'checkpoint_empty_section',
+  'checkpoint_fence_line',
+  'checkpoint_tag_line',
+  'checkpoint_too_large',
+  'checkpoint_secret_shape',
+  'checkpoint_unsupported_claim',
+  // N3: validateEmbeddedCharterText's refusal at seal time (data.line/data.code).
+  'charter_invalid'
 ])
 
 export function mapRuntimeError(id: string, meta: RpcEnvelopeMeta, error: unknown): RpcFailure {

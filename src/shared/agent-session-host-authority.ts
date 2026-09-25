@@ -116,6 +116,8 @@ export type RuntimeEnsureAgentSessionRequest =
       ompResumeFilePath?: string
       /** Explicit client override. Omission keeps launch defaults host-owned. */
       agentArgs?: string | null
+      /** Appended after host-default agentArgs instead of replacing them (chair restore/succession). */
+      appendAgentArgs?: string | null
       launchPreferences?: AgentLaunchPreferences
       presentation?: RuntimeTerminalPresentation
       placement?: { tabId?: string; leafId?: string }
@@ -134,6 +136,8 @@ export type RuntimeCreateAgentSessionRequest = {
   promptDelivery?: AgentPromptDelivery
   /** Explicit client override. Omission keeps launch defaults host-owned. */
   agentArgs?: string | null
+  /** Appended after host-default agentArgs instead of replacing them (chair restore/succession). */
+  appendAgentArgs?: string | null
   launchPreferences?: AgentLaunchPreferences
   startupCwd?: string
   presentation?: RuntimeTerminalPresentation

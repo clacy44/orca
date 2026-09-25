@@ -47,6 +47,9 @@ export type ChairsRestoreExecutorDeps = {
     role?: string
     model?: string
     effort?: string
+    // [S10-22a Wave 2 contract, D-R217] threaded straight from the manifest entry — see
+    // chair-restore.ts's `ChairRestoreRequest.launchArgs` for the join-by-space caveat.
+    launchArgs?: string[]
   }) => Promise<RequestChairRestoreOutcome>
   // [S10-21d b3b, D-R165 M5] null = the hook-report check is unwired — never a wired false.
   hasLiveHookReportOfSession: (sessionId: string) => boolean | null
@@ -211,7 +214,8 @@ export async function executeChairsRestorePlan(
       displayName: entry.name,
       role: entry.role,
       model: entry.model,
-      effort: entry.effort
+      effort: entry.effort,
+      launchArgs: entry.launchArgs
     })
     if (!outcome.ok) {
       rows.push({
