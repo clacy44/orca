@@ -102,6 +102,9 @@ const SUCCESSION_NEXT_STEPS: Record<string, string[]> = {
   ],
   succession_expired: [
     'The acceptance window passed and the succession was aborted; ask the incumbent chair to run `orca chairs succeed` again.'
+  ],
+  succession_takeover_failed: [
+    'Both panes may be down: run `orca chairs restore` twice, ten seconds apart, then retry from the restored chair.'
   ]
 }
 

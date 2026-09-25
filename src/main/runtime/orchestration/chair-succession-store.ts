@@ -186,6 +186,16 @@ export async function createSealed(
   })
 }
 
+/** WAVE 2 addition: overwrites `resume-context.md` atomically once the seal path's minted id is known. */
+export async function writeResumeContext(
+  deps: ChairSuccessionStoreDeps,
+  chair: string,
+  id: string,
+  text: string
+): Promise<void> {
+  return writeAtomic(join(successionDir(deps, chair, id), 'resume-context.md'), text)
+}
+
 export type TransitionPatch = Partial<{
   successor: SuccessorHandle
   retiredHandle: string
@@ -257,6 +267,23 @@ export async function listActive(
     }
   }
   return active
+}
+
+/** WAVE 2 addition (additive only): read-only snapshot of `retired-handles.json`, append order. */
+export async function listRetiredHandles(
+  deps: ChairSuccessionStoreDeps,
+  chair: string
+): Promise<RetiredHandleEntry[]> {
+  try {
+    return JSON.parse(
+      await readFile(retiredHandlesPath(deps, chair), 'utf8')
+    ) as RetiredHandleEntry[]
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return []
+    }
+    throw error
+  }
 }
 
 /** Appends one entry to `retired-handles.json` (created on first append) under the per-chair

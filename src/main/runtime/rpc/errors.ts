@@ -165,7 +165,34 @@ const STRUCTURED_RUNTIME_PASSTHROUGH_CODES: ReadonlySet<string> = new Set([
   // staying unpropagated).
   'link_binding_conflict',
   'link_store_unreadable',
-  'link_store_empty'
+  'link_store_empty',
+  // S10-22a WAVE 2 (b1-slice1-succession.md §"Wave 2 contract"): chair succession's typed
+  // refusals, each a complete sentence the CLI prints verbatim with next steps where the brief
+  // names them (`succession_unacked_delivery`'s `ids`, checkpoint_*'s `line`).
+  'succession_not_a_chair',
+  'succession_no_run',
+  'succession_legacy_run',
+  'succession_active_dispatch',
+  'succession_in_flight',
+  'succession_charter_missing',
+  'succession_unacked_delivery',
+  'succession_unknown',
+  'succession_wrong_pane',
+  'succession_not_launching',
+  'succession_expired',
+  'succession_takeover_failed',
+  'succession_none',
+  // Not in the wave 2 contract's own refusal list, but the same checkpoint_* family (D-R212
+  // "sha changed after hashing → checkpoint_changed") — flagged in RETURN as a judgment call.
+  'checkpoint_changed',
+  'checkpoint_schema',
+  'checkpoint_sections',
+  'checkpoint_empty_section',
+  'checkpoint_fence_line',
+  'checkpoint_tag_line',
+  'checkpoint_too_large',
+  'checkpoint_secret_shape',
+  'checkpoint_unsupported_claim'
 ])
 
 export function mapRuntimeError(id: string, meta: RpcEnvelopeMeta, error: unknown): RpcFailure {

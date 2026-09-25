@@ -58,6 +58,10 @@ export type IncumbentHandle = {
 export type SuccessorHandle = {
   paneKey?: string
   sessionId?: string
+  /** WAVE 2 addition (additive only): the successor pane's terminal handle — needed to
+   * `closeTerminal` a launching-but-never-accepted successor on abort, and to register the
+   * dead-pane takeover at confirm. Absent on records written before this field existed. */
+  terminalHandle?: string
 }
 
 /** `<root>/successions/<id>/meta.json` — the succession record's durable state, written only

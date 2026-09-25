@@ -13,6 +13,7 @@ import { ORCHESTRATION_AGENTS_QUARANTINE_REMOTE_METHODS } from './orchestration-
 import { ORCHESTRATION_AGENTS_RELINK_METHODS } from './orchestration-agents-relink'
 import { ORCHESTRATION_AGENTS_RETIRE_METHODS } from './orchestration-agents-retire'
 import { CHAIRS_RESTORE_METHODS } from './chairs-restore'
+import { CHAIRS_SUCCESSION_METHODS } from './chairs-succession'
 
 export const ORCHESTRATION_AGENT_METHODS: RpcMethod[] = [
   ...ORCHESTRATION_AGENTS_REGISTER_METHODS,
@@ -25,5 +26,9 @@ export const ORCHESTRATION_AGENT_METHODS: RpcMethod[] = [
   // S10-21d b4: `orca chairs restore|status|export` — no pane attestation (see chairs-restore.ts's
   // own JUDGMENT CALL note); a host-keyed rate limit stands in its place, plus (b3b, D-R165 M4) a
   // strict local-transport fence: any paired-device caller is refused regardless.
-  ...CHAIRS_RESTORE_METHODS
+  ...CHAIRS_RESTORE_METHODS,
+  // S10-22a WAVE 2: `orca chairs succeed|succession-accept|resume-context` — same local-transport
+  // fence (`assertLocalCaller`), pane attestation via `resolveCallerAgent` instead (see
+  // chairs-succession.ts's own header).
+  ...CHAIRS_SUCCESSION_METHODS
 ]
