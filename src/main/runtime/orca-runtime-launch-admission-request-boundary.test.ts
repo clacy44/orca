@@ -164,6 +164,35 @@ describe('request-boundary launch-selector refusal (T29)', () => {
     expect((error as { reasonCode?: string }).reasonCode).toBe('launch_fork_forbidden')
     expect(createTerminal).not.toHaveBeenCalled()
   })
+
+  // [G1-10z attempt-4 H3] The scan tokenized correctly but only classified session-id/
+  // fork-session tokens — a resume/continue selector in appendAgentArgs (chair restore/
+  // succession launchArgs) reached the plan unrefused despite this function's own doc comment
+  // naming resume/continue as covered.
+  it('createAgentSession refuses --resume carried in appendAgentArgs', async () => {
+    const { runtime, createTerminal } = createRuntime()
+
+    const error = await runtime
+      .createAgentSession({
+        ...createRequest(operationId('a006'), '--model opus'),
+        appendAgentArgs: '--resume deadbeef-0000-4000-8000-000000000000'
+      })
+      .catch((thrown: unknown) => thrown)
+
+    expect((error as { reasonCode?: string }).reasonCode).toBe('launch_resume_forbidden')
+    expect(createTerminal).not.toHaveBeenCalled()
+  })
+
+  it('ensureAgentSession refuses --continue carried in appendAgentArgs', async () => {
+    const { runtime, createTerminal } = createRuntime()
+
+    const error = await runtime
+      .ensureAgentSession({ ...resumeRequest('--model opus'), appendAgentArgs: '--continue' })
+      .catch((thrown: unknown) => thrown)
+
+    expect((error as { reasonCode?: string }).reasonCode).toBe('launch_resume_forbidden')
+    expect(createTerminal).not.toHaveBeenCalled()
+  })
 })
 
 // [D-R104 (ii), Ruling 34 Addendum 15] The third named site: runCreateMobileSessionTerminal's

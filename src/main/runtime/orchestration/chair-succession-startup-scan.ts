@@ -40,7 +40,7 @@ export type SuccessionStartupScanRuntime = Pick<
 // rebinding it) and `writeAgentAudit` (every skip/failure below is audited, not silent).
 export type SuccessionStartupScanDb = Pick<
   OrchestrationDb,
-  'getAgentByName' | 'bindRun' | 'getRun' | 'writeAgentAudit'
+  'getAgentByName' | 'bindRun' | 'getRun' | 'getCurrentRunForPane' | 'writeAgentAudit'
 >
 
 export type SuccessionStartupScanDeps = {
@@ -134,8 +134,17 @@ async function confirmAlreadyTakenOver(
     const run = deps.db.getRun(runId)
     const currentPane = run?.coordinator_pane_key ?? null
     const successorPaneKey = meta.successor.paneKey
+    // H7 (G1-10z attempt-4): `stillMovable` used to check only where the OLD Run sits — it never
+    // asked whether the successor's pane had since become the coordinator of a DIFFERENT, newer
+    // Run (e.g. accept's bindRun/confirm both failed, then the chair went on to bind a fresh Run
+    // to its own pane). Rebinding the old Run there would silently unbind that newer one.
+    const successorCurrentRun = successorPaneKey
+      ? deps.db.getCurrentRunForPane(successorPaneKey)
+      : undefined
+    const successorPaneFree = !successorCurrentRun || successorCurrentRun.id === runId
     const stillMovable =
       currentPane !== null &&
+      successorPaneFree &&
       (isEquivalentPaneKey(currentPane, meta.incumbent.paneKey) ||
         (successorPaneKey !== undefined && isEquivalentPaneKey(currentPane, successorPaneKey)))
     if (stillMovable) {

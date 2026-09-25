@@ -6396,6 +6396,116 @@ describe('OrcaRuntimeRpcServer', () => {
       }
     })
 
+    // H9 (G1-10z attempt-4, probe p14 ii): `successionAccept` shares the 'pact' class ONLY to
+    // take its reserved headroom (G1 attempt-3 repair F2) — it is not itself the federated pact
+    // protocol this refusal text belongs to. At the cap it used to get the SAME "re-arm; steps
+    // are durable" text/nextSteps a real pact park gets, which is nonsensical advice for an
+    // accept caller. Assert it gets the generic busy message with no baked-in `data` instead, so
+    // the CLI's own `SUCCESSION_NEXT_STEPS.runtime_busy` entry is what actually reaches it.
+    it('renders a pact-class runtime_busy refusal for successionAccept without the pact re-arm text', async () => {
+      const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-rpc-'))
+      const runtime = new OrcaRuntimeService()
+      const db = new OrchestrationDb(':memory:')
+      runtime.setOrchestrationDb(db)
+      const paneA = 'tab_a:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+      const paneB = 'tab_b:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+      const evidenceA = { terminalHandle: 'term_a', paneKey: paneA, launchToken: 'lt-a' }
+      const evidenceB = { terminalHandle: 'term_b', paneKey: paneB, launchToken: 'lt-b' }
+      vi.spyOn(runtime, 'verifyOrchestrationCompatibilityCaller').mockImplementation((evidence) => {
+        if (evidence?.terminalHandle === 'term_a' && evidence.paneKey === paneA) {
+          return {
+            hostScope: { kind: 'local', hostId: 'local' },
+            paneKey: paneA,
+            terminalHandle: 'term_a',
+            processIncarnation: 'proc-a',
+            launchTokenHash: 'hash-a'
+          } as never
+        }
+        if (evidence?.terminalHandle === 'term_b' && evidence.paneKey === paneB) {
+          return {
+            hostScope: { kind: 'local', hostId: 'local' },
+            paneKey: paneB,
+            terminalHandle: 'term_b',
+            processIncarnation: 'proc-b',
+            launchTokenHash: 'hash-b'
+          } as never
+        }
+        return null
+      })
+      const server = new OrcaRuntimeRpcServer({
+        runtime,
+        userDataPath,
+        keepaliveIntervalMs: 1000,
+        longPollCap: 1
+      })
+      await server.start()
+
+      try {
+        const metadata = readRuntimeMetadata(userDataPath)
+        const endpoint = metadata!.transports[0]!.endpoint
+        const authToken = metadata!.authToken
+
+        const registeredA = (await sendRequest(endpoint, {
+          id: 'req_register_a2',
+          authToken,
+          method: 'orchestration.agents.register',
+          params: { name: 'agent-a2', role: 'test agent' },
+          orchestrationCompatibilityEvidence: evidenceA
+        })) as { result?: { agent: { id: string } } }
+        expect(registeredA.result).toBeDefined()
+
+        const registeredB = (await sendRequest(endpoint, {
+          id: 'req_register_b2',
+          authToken,
+          method: 'orchestration.agents.register',
+          params: { name: 'agent-b2', role: 'test agent' },
+          orchestrationCompatibilityEvidence: evidenceB
+        })) as { result?: { agent: { id: string } } }
+        const agentBId = registeredB.result!.agent.id
+
+        const createdThread = (await sendRequest(endpoint, {
+          id: 'req_thread_create2',
+          authToken,
+          method: 'orchestration.threads.create',
+          params: { subject: 'succession accept busy render', with: `agent:${agentBId}` },
+          orchestrationCompatibilityEvidence: evidenceA
+        })) as { result?: { thread: { id: string } } }
+        const threadId = createdThread.result!.thread.id
+
+        const held = openFramedSession(endpoint, {
+          id: 'req_wait_step_hold2',
+          authToken,
+          method: 'orchestration.wait',
+          params: { threadId, for: 'step', timeoutMs: 10_000 },
+          orchestrationCompatibilityEvidence: evidenceA
+        })
+        await waitFor(() => server['activeLongPolls'] === 1)
+
+        const overflow = await sendRequest(endpoint, {
+          id: 'req_accept_overflow',
+          authToken,
+          method: 'orchestration.chairs.successionAccept',
+          params: { successionId: 'succ_000000000001' },
+          orchestrationCompatibilityEvidence: evidenceB
+        })
+        expect(overflow).toMatchObject({
+          ok: false,
+          error: {
+            code: 'runtime_busy',
+            message: 'long-poll capacity reached; retry with backoff'
+          }
+        })
+        const errorData = (overflow as { error?: { data?: unknown } }).error?.data
+        expect(JSON.stringify(errorData ?? {}).includes('re-arm; steps are durable')).toBe(false)
+
+        held.socket.destroy()
+        await held.done
+      } finally {
+        db.close()
+        await server.stop()
+      }
+    })
+
     it('does not emit keepalive frames for short RPCs', async () => {
       const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-rpc-'))
       const runtime = new OrcaRuntimeService()

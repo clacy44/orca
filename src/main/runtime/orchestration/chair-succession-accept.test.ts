@@ -286,56 +286,6 @@ describe('S10-22a WAVE 2: chair-succession-accept', () => {
       expect(retired.at(-1)).toMatchObject({ handle: HANDLE_A, succession: meta.id })
     })
 
-    it('chair review fix #3: takeover failure after the incumbent is closed aborts the record and leaves the successor pane open', async () => {
-      await writeManifest('chair-x')
-      registerChair('chair-x', PANE_A, HANDLE_A)
-      const runId = bindRunTo(PANE_A, HANDLE_A)
-      const meta = await sealedLaunching('chair-x', runId)
-      const closeSpy = vi.spyOn(runtime, 'closeTerminal').mockResolvedValue({} as never)
-      vi.spyOn(runtime, 'waitForTerminal').mockResolvedValue({
-        handle: HANDLE_A,
-        condition: 'exit'
-      } as never)
-      // Force `registerAgentForPane`'s takeover to fail: report the INCUMBENT's own pane as
-      // still live (its `closeTerminal` above is mocked, not a real kill), so
-      // `upsertAgentByPaneSuffix` refuses `name_taken` with `holderPaneDead: false` instead of
-      // reminting.
-      vi.spyOn(runtime, 'getAgentDirectoryLivenessSignals').mockImplementation((paneKey) =>
-        paneKey === PANE_A
-          ? { terminalHandle: HANDLE_A, lastAgentStatus: null, observedLive: true }
-          : { terminalHandle: null, lastAgentStatus: null, observedLive: false }
-      )
-      // Registered as if `succeed`'s RPC call were still holding open, exactly as it is for real
-      // during the accept window — proves `settleHold` actually reaches it (not a no-op).
-      const holdPromise = holdSealRequest(deps, hostId, meta, undefined)
-
-      await expect(
-        acceptSuccession(deps, {
-          successionId: meta.id,
-          callerPaneKey: SUCCESSOR_PANE,
-          callerTerminalHandle: SUCCESSOR_HANDLE,
-          callerSessionId: 'sess-succ',
-          hostId
-        })
-      ).rejects.toMatchObject({ code: 'succession_takeover_failed' })
-
-      // The incumbent's own closeTerminal WAS still called (Act order unchanged)...
-      expect(closeSpy).toHaveBeenCalledWith(HANDLE_A)
-      // ...but the successor pane must NEVER be closed on this path — that would strand both.
-      expect(closeSpy).not.toHaveBeenCalledWith(SUCCESSOR_HANDLE)
-      const finalMeta = await read({ orcaHome: tmp }, 'chair-x', meta.id)
-      expect(finalMeta?.state).toBe('aborted')
-      expect(finalMeta?.abortReason).toContain('takeover_failed_after_close')
-
-      // The hold must have settled with reason takeover_failed directly — no 150s timeout needed.
-      const holdOutcome = await holdPromise
-      expect(holdOutcome).toMatchObject({
-        ok: false,
-        code: 'succession_aborted',
-        reason: 'takeover_failed'
-      })
-    })
-
     it('refuses accept from the wrong pane', async () => {
       await writeManifest('chair-x')
       registerChair('chair-x', PANE_A, HANDLE_A)

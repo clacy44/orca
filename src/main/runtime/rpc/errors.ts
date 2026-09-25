@@ -191,6 +191,10 @@ const STRUCTURED_RUNTIME_PASSTHROUGH_CODES: ReadonlySet<string> = new Set([
   // Judgment call (see RETURN): not in the brief's own 4-code pass-through list, but M8's seal-
   // time lane refusal (A9) has no existing code that fits without misleading the caller.
   'succession_lane_unsupported',
+  // H8 (G1-10z attempt-4): the seal-time directory-cap refusal (chair-succession-execute.ts) and
+  // the takeover's own cap refusal both throw this code — before this it mapped to the generic
+  // `runtime_error`, losing the caller's ability to tell "directory full" from any other fault.
+  'succession_directory_full',
   // Not in the wave 2 contract's own refusal list, but the same checkpoint_* family (D-R212
   // "sha changed after hashing → checkpoint_changed") — flagged in RETURN as a judgment call.
   'checkpoint_changed',

@@ -177,4 +177,30 @@ describe('parseChairsManifest', () => {
   ])('refuses launchArgs %s', (_label, launchArgs) => {
     expect(parseChairsManifest({ version: 1, chairs: [baseEntry({ launchArgs })] }).ok).toBe(false)
   })
+
+  // G1-10z attempt-4 H3 (probe p9): the F7 validator split on `/\s+/` instead of using the
+  // launch's own POSIX tokenizer, so quoted/escaped selectors were never re-split away from
+  // their quotes and passed the exact-token check unrefused.
+  it.each([
+    ['double-quoted --continue', ['"--continue"']],
+    ['single-quoted -c', ["'-c'"]],
+    ['empty quotes inside --continue', ['--con""tinue']],
+    ['backslash-escaped -c', ['\\-c']],
+    ['quoted -r then an id', ['"-r"', 'deadbeef-0000-4000-8000-000000000000']],
+    ['quoted --resume=<id>', ['"--resume=deadbeef-0000-4000-8000-000000000000"']]
+  ])('H3: refuses launchArgs bypassing the naive split via %s', (_label, launchArgs) => {
+    expect(parseChairsManifest({ version: 1, chairs: [baseEntry({ launchArgs })] }).ok).toBe(false)
+  })
+
+  // G1-10z attempt-4 H3 (probe p9): the false-positive side — a naive `/\s+/` split treated a
+  // legitimate quoted phrase merely CONTAINING "-c" as if "-c" were its own token, refusing the
+  // whole manifest file. The real tokenizer keeps the quoted phrase as one token.
+  it('H3: accepts a quoted multi-word value that merely contains "-c" as text, not a token', () => {
+    expect(
+      parseChairsManifest({
+        version: 1,
+        chairs: [baseEntry({ launchArgs: ['"Be careful: -c resumes"'] })]
+      }).ok
+    ).toBe(true)
+  })
 })

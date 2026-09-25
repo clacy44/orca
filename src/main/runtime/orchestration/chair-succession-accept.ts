@@ -100,34 +100,50 @@ export async function acceptSuccession(
 
   const entry = await readManifestEntry(deps.manifestPath, chair).catch(() => undefined)
 
-  const registration = await registerAgentForPane(deps.db, deps.runtime, {
-    paneKey: params.callerPaneKey,
-    terminalHandle: params.callerTerminalHandle,
-    processIncarnation: deps.runtime.getTerminalProcessIncarnation(params.callerTerminalHandle),
-    displayName: chair,
-    // G1 repair M6 / N15: pass the manifest's role through — `registerAgentForPane` writes
-    // `role` unconditionally, so leaving this `undefined` erases the chair's role on every
-    // takeover. N15: the manifest is not the only source — a chair whose role exists only on
-    // its (incumbent) agents row must not lose it just because the manifest never set one.
-    role:
-      entry?.role ??
-      deps.db.getAgentByPaneKey(params.hostId, hold.incumbent.paneKey)?.role ??
-      undefined
-  })
-  if (!registration.ok) {
+  // H2 (G1-10z attempt-4): a throw from the write itself (the DB upsert, or the `listTerminals`
+  // it awaits) must reach the SAME abort/settle/succession_takeover_failed path as a refused
+  // `{ ok: false }` — the incumbent's pane is already closed either way, so an uncaught throw
+  // here left the record wedged `confirming` and the successor with a raw DB error (H2).
+  let registration: Awaited<ReturnType<typeof registerAgentForPane>> | undefined
+  let registrationThrowReason: string | undefined
+  try {
+    registration = await registerAgentForPane(deps.db, deps.runtime, {
+      paneKey: params.callerPaneKey,
+      terminalHandle: params.callerTerminalHandle,
+      processIncarnation: deps.runtime.getTerminalProcessIncarnation(params.callerTerminalHandle),
+      displayName: chair,
+      // G1 repair M6 / N15: pass the manifest's role through — `registerAgentForPane` writes
+      // `role` unconditionally, so leaving this `undefined` erases the chair's role on every
+      // takeover. N15: the manifest is not the only source — a chair whose role exists only on
+      // its (incumbent) agents row must not lose it just because the manifest never set one.
+      role:
+        entry?.role ??
+        deps.db.getAgentByPaneKey(params.hostId, hold.incumbent.paneKey)?.role ??
+        undefined
+    })
+  } catch (err) {
+    registrationThrowReason = err instanceof Error ? err.message : String(err)
+  }
+  if (!registration || !registration.ok) {
     // Chair review fix #3: the incumbent's pane is ALREADY closed at this point — leaving the
     // record `confirming` would let a later hold timeout no-op (already_terminal only fires for
     // `launching`), stranding the record forever. Abort it here instead.
-    const abortReason = `takeover_failed_after_close:${registration.reason}`.slice(0, 200)
+    const failureReason = registration ? registration.reason : registrationThrowReason
+    const abortReason = `takeover_failed_after_close:${failureReason}`.slice(0, 200)
     await transition(storeDepsFor(deps), chair, params.successionId, 'aborted', { abortReason })
-    deps.db.writeAgentAudit({
-      agentId: null,
-      actorPaneKey: params.callerPaneKey,
-      actorHostId: params.hostId,
-      verb: 'succession_abort',
-      outcome: 'aborted',
-      reasonCode: `succession=${params.successionId} reason=${abortReason}`.slice(0, 200)
-    })
+    // H6 (G1-10z attempt-4): guarded — a throwing audit here must not skip the settle/throw below.
+    try {
+      deps.db.writeAgentAudit({
+        agentId: null,
+        actorPaneKey: params.callerPaneKey,
+        actorHostId: params.hostId,
+        verb: 'succession_abort',
+        outcome: 'aborted',
+        reasonCode: `succession=${params.successionId} reason=${abortReason}`.slice(0, 200)
+      })
+    } catch {
+      // best-effort — see above.
+    }
     settleHold(params.successionId, {
       ok: false,
       code: 'succession_aborted',
@@ -136,7 +152,7 @@ export async function acceptSuccession(
     })
     throw new OrchestrationError(
       'succession_takeover_failed',
-      `Dead-pane takeover for chair "${chair}" failed: ${registration.reason}.`
+      `Dead-pane takeover for chair "${chair}" failed: ${failureReason}.`
     )
   }
 
@@ -218,12 +234,35 @@ export async function acceptSuccession(
   // uses) against the successor's OWN mailbox/run, taken after the takeover above — anything
   // still outstanding here arrived on/after the handoff, so the successor (not the acked-at-seal
   // set) owns it.
+  // H4 (G1-10z attempt-4): these ran unguarded — a DB fault here threw a raw error although the
+  // record is already `confirmed` and the identity has already moved (N7 applies here too).
   const successorMailbox = `agent:${registration.agent.id}`
-  const outstandingMailbox = deps.db.getOutstandingMailboxDelivery(successorMailbox)
-  const outstandingRun = runId ? deps.db.getOutstandingRunDelivery(runId) : undefined
-  const outstandingDeliveryIds = [outstandingMailbox?.id, outstandingRun?.id].filter(
-    (id): id is string => id !== undefined
-  )
+  let outstandingDeliveryIds: string[] = []
+  try {
+    const outstandingMailbox = deps.db.getOutstandingMailboxDelivery(successorMailbox)
+    const outstandingRun = runId ? deps.db.getOutstandingRunDelivery(runId) : undefined
+    outstandingDeliveryIds = [outstandingMailbox?.id, outstandingRun?.id].filter(
+      (id): id is string => id !== undefined
+    )
+  } catch (err) {
+    try {
+      deps.db.writeAgentAudit({
+        agentId: registration.agent.id,
+        actorPaneKey: params.callerPaneKey,
+        actorHostId: params.hostId,
+        verb: 'succession_confirm',
+        outcome: 'outstanding_delivery_read_failed',
+        reasonCode:
+          `succession=${params.successionId} ${err instanceof Error ? err.message : String(err)}`.slice(
+            0,
+            200
+          )
+      })
+    } catch {
+      // best-effort — see above.
+    }
+    warnings.push('outstandingDeliveryReadFailed')
+  }
 
   const obligations: AcceptObligations = {
     ackedDeliveryIds: confirmingMeta.ackedDeliveryIds ?? [],
@@ -233,13 +272,36 @@ export async function acceptSuccession(
     pactTurnsHeld: 0
   }
 
+  let generation = 0
+  try {
+    generation = runId ? (deps.db.getRun(runId)?.consumer_generation ?? 0) : 0
+  } catch (err) {
+    try {
+      deps.db.writeAgentAudit({
+        agentId: registration.agent.id,
+        actorPaneKey: params.callerPaneKey,
+        actorHostId: params.hostId,
+        verb: 'succession_confirm',
+        outcome: 'run_generation_read_failed',
+        reasonCode:
+          `succession=${params.successionId} ${err instanceof Error ? err.message : String(err)}`.slice(
+            0,
+            200
+          )
+      })
+    } catch {
+      // best-effort — see above.
+    }
+    warnings.push('runGenerationReadFailed')
+  }
+
   return {
     ok: true,
     successionId: confirmedId,
     chair,
     agentId: registration.agent.id,
     runId: runId ?? '',
-    generation: runId ? (deps.db.getRun(runId)?.consumer_generation ?? 0) : 0,
+    generation,
     ...(resumeContextText !== undefined ? { resumeContext: resumeContextText } : {}),
     obligations,
     ...(warnings.length > 0 ? { warnings } : {}),

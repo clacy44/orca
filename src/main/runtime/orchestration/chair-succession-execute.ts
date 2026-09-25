@@ -196,7 +196,23 @@ export async function sealSuccession(
   const knownDeliveryIds = new Set(
     [agentDelivery?.id, runDelivery?.id].filter((id): id is string => id !== undefined)
   )
-  const unknownAck = [...ack].filter((id) => !knownDeliveryIds.has(id))
+  // H11 (G1-10z attempt-4, probe p8 B): a partial ack can survive an aborted seal — the mailbox
+  // ack lands, the run ack throws, and the record aborts. The incumbent's NATURAL retry resends
+  // the SAME --ack list, but the mailbox delivery is no longer "outstanding" (it is already
+  // acknowledged), so it vanished from `knownDeliveryIds` above and the retry was refused
+  // `succession_unknown_ack` — stuck. An id that names a REAL delivery for this mailbox/Run,
+  // already acknowledged, is a safe retry, not a typo; only a truly unrecognized id refuses.
+  const unknownAck = [...ack].filter((id) => {
+    if (knownDeliveryIds.has(id)) {
+      return false
+    }
+    const alreadyAckedMailbox = deps.db.getMailboxDeliveryById(agentMailbox, id)
+    if (alreadyAckedMailbox?.status === 'acknowledged') {
+      return false
+    }
+    const alreadyAckedRun = deps.db.getRunDeliveryById(run.id, id)
+    return alreadyAckedRun?.status !== 'acknowledged'
+  })
   if (unknownAck.length > 0) {
     refuse('succession_unknown_ack', '--ack named an id with no outstanding delivery.', {
       ids: unknownAck

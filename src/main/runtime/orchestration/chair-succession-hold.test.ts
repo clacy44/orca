@@ -154,6 +154,45 @@ describe('S10-22a WAVE 2: chair-succession hold / abort', () => {
     vi.useRealTimers()
   })
 
+  // H6 (G1-10z attempt-4, probe p15a): the launch-failure audit write used to share no guard —
+  // a throwing audit skipped `settleHold`, so `void launchSuccessor(...)` became an unhandled
+  // rejection in production and the incumbent waited out the full 150s hold for an outcome
+  // already known. Assert the hold still settles even when the audit write itself throws.
+  it('H6: a throwing launch-failure audit still settles the hold', async () => {
+    await mkdir(join(tmp, 'chairs'), { recursive: true })
+    const sealedMeta = await createSealed(storeDeps, 'chair-audit-fail', {
+      reason: 'batch_end',
+      checkpointText: VALID_CHECKPOINT,
+      checkpointSha: sha256(VALID_CHECKPOINT),
+      charterPath: join(tmp, 'CHARTER.md'),
+      charterSha: sha256('charter'),
+      charterMode: 'reference',
+      resumeContextText: 'resume text',
+      incumbent: { paneKey: PANE_A, terminalHandle: HANDLE_A }
+    })
+    vi.spyOn(runtime, 'createAgentSession').mockRejectedValue(new Error('spawn failed'))
+    vi.spyOn(db, 'writeAgentAudit').mockImplementation(() => {
+      throw new Error('SQLITE_FULL: database or disk is full')
+    })
+    const holdPromise = holdSealRequest(deps, hostId, sealedMeta, undefined)
+    void launchSuccessor(
+      deps,
+      hostId,
+      {
+        name: 'chair-audit-fail',
+        worktree: 'id:wt-1',
+        agent: 'claude',
+        conversationId: 'sess-orig'
+      },
+      sealedMeta
+    )
+    const outcome = await Promise.race([
+      holdPromise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('hold did not settle')), 2000))
+    ])
+    expect(outcome).toMatchObject({ ok: false, code: 'succession_aborted' })
+  })
+
   // G1 repair M8 (D-R215 §Protocol step 4 "manifest else the row"): `launchSuccessor`'s
   // `createAgentSession` args — the exact prompt, background presentation, launch args, and
   // launch-prefs fallback to the INCUMBENT's own last-recorded prefs when the manifest sets
@@ -324,17 +363,19 @@ describe('S10-22a WAVE 2: chair-succession hold / abort', () => {
     expect(getHoldRecord(meta.id)).toBeUndefined()
   })
 
-  // G1 attempt-3 repair F10 (probe p1b): a signal already aborted when the hold registers
-  // settles the hold via its async abort tail. If `launchSuccessor` runs AFTER that settle has
-  // landed (getHoldRecord already undefined), spawning a pane just to close it again a moment
-  // later is pure waste — checking the hold before `createAgentSession` avoids the spawn.
-  it('F10: launchSuccessor never spawns when the hold already settled (pre-aborted signal)', async () => {
+  // G1 attempt-3 repair F10 (probe p1b), corrected by G1-10z attempt-4 H5: the ORIGINAL version of
+  // this test awaited the hold before calling `launchSuccessor` — a call order production never
+  // uses (the RPC handler registers the hold then calls `launchSuccessor` SYNCHRONOUSLY,
+  // rpc/methods/chairs-succession.ts:119-120, never awaiting the hold first). In that real order
+  // the pre-H5 check (an unlocked `getHoldRecord` read) still saw the hold as live and spawned
+  // anyway, because the abort tail had not necessarily won `chairLockKey` yet. This test now
+  // reproduces the handler's own order: `holdSealRequest` is fired-and-forgotten, exactly like
+  // the handler does, before `launchSuccessor` is called.
+  it("H5: launchSuccessor never spawns when the hold is pre-aborted, in the handler's own (unawaited) call order", async () => {
     const meta = await sealedLaunchingMeta('chair-preaborted-launch')
     const controller = new AbortController()
     controller.abort()
-    const holdPromise = holdSealRequest(deps, hostId, meta, controller.signal)
-    await holdPromise // the async abort tail has now fully settled and cleared the hold.
-    expect(getHoldRecord(meta.id)).toBeUndefined()
+    void holdSealRequest(deps, hostId, meta, controller.signal) // NOT awaited — the handler's order.
     const createSpy = vi.spyOn(runtime, 'createAgentSession')
     await launchSuccessor(
       deps,

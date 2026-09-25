@@ -41,12 +41,17 @@ export async function launchSuccessor(
   // rather than leaving it orphaned (N1 REPAIR item 2).
   let createdTerminalHandle: string | undefined
   try {
-    // G1 attempt-3 repair F10 (probe p1b): a signal already aborted when the hold registers can
-    // settle the hold (its async abort tail) before this async function reaches its first spawn
-    // call — spawning a pane just to close it again a moment later is pure waste. Best-effort
-    // only (a race with the abort tail landing slightly later is still covered by the re-read
-    // under the chair lock below, same as always) — never a substitute for that check.
-    if (!getHoldRecord(meta.id)) {
+    // G1 attempt-3 repair F10 (probe p1b), corrected by G1-10z attempt-4 H5: the RPC handler
+    // registers the hold then calls this synchronously — a pre-aborted signal's abort tail
+    // (`runAbortTail`, also under `chairLockKey`) had not necessarily won the lock yet, so an
+    // unlocked `getHoldRecord` read here could see the hold as still live and spawn anyway (H5's
+    // own probe measured exactly one such spawn). Taking the SAME lock here serializes this
+    // check against that abort tail: whichever reaches `chairLockKey(meta.chair)` first decides.
+    const stillSealed = await withPaneLock(chairLockKey(meta.chair), async () => {
+      const current = await read(storeDepsFor(deps), meta.chair, meta.id)
+      return current?.state === 'sealed' && getHoldRecord(meta.id) !== undefined
+    })
+    if (!stillSealed) {
       return
     }
     const incumbentLaunch = deps.db.newestLaunchForPane(hostId, meta.incumbent.paneKey)
@@ -129,14 +134,22 @@ export async function launchSuccessor(
     } catch {
       // Already terminal — e.g. the abort tail beat this catch to `aborted`. Nothing more to do.
     }
-    deps.db.writeAgentAudit({
-      agentId: null,
-      actorPaneKey: meta.incumbent.paneKey,
-      actorHostId: hostId,
-      verb: 'succession_abort',
-      outcome: 'aborted',
-      reasonCode: reason
-    })
+    // H6 (G1-10z attempt-4): guarded — a throwing audit here must not skip `settleHold` below.
+    // Unguarded, this left `void launchSuccessor(...)`'s caller (an unhandled rejection in
+    // production) never resolving the hold, so the incumbent waited out the full 150s timer for
+    // an outcome (`launch_failed`) already known.
+    try {
+      deps.db.writeAgentAudit({
+        agentId: null,
+        actorPaneKey: meta.incumbent.paneKey,
+        actorHostId: hostId,
+        verb: 'succession_abort',
+        outcome: 'aborted',
+        reasonCode: reason
+      })
+    } catch {
+      // best-effort — see above; the settle below is what actually matters.
+    }
     settleHold(meta.id, { ok: false, code: 'succession_aborted', successionId: meta.id, reason })
   }
 }

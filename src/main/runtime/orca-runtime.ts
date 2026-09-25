@@ -379,7 +379,9 @@ import { LaunchAdmissionRefusedError, type LaunchAdmission } from '../ipc/agent-
 import { audit as writeLaunchAdmissionAudit } from '../ipc/agent-launch-admission-support'
 import {
   isCoveredLaunchAgent,
+  isContinueSelectorToken,
   isForkSessionRefusalToken,
+  isResumeSelectorToken,
   isSessionIdRefusalToken
 } from '../../shared/covered-launch-agents'
 import {
@@ -28331,7 +28333,11 @@ export class OrcaRuntimeService {
    * own agentArgs (chair restore/succession launches, `appendAgentArgs()` below) but this refusal
    * previously read only `agentArgs`, so a `--resume`/`-r`/`--continue`/`-c`/`--session-id`/
    * `--fork-session` placed there instead reached the plan unrefused. Scanned as its own subject
-   * now, alongside `agentArgs`/`command`. */
+   * now, alongside `agentArgs`/`command`. [G1-10z attempt-4 H3] The token scan itself used to
+   * check only `--session-id`/`--fork-session`, despite this comment naming resume/continue too
+   * — a `--resume`/`-r`/`--continue`/`-c` placed in `appendAgentArgs` reached the plan unrefused
+   * here (chairs-manifest.ts's own validator is the only other line of defense for that surface).
+   * Both selector families are refused now. */
   private assertNoCoveredLaunchSelectorAtRequestBoundary(args: {
     agent: TuiAgent | undefined
     shell: AgentStartupShell | undefined
@@ -28360,6 +28366,9 @@ export class OrcaRuntimeService {
         }
         if (isForkSessionRefusalToken(token)) {
           throw new LaunchAdmissionRefusedError('launch_fork_forbidden')
+        }
+        if (isResumeSelectorToken(token) || isContinueSelectorToken(token)) {
+          throw new LaunchAdmissionRefusedError('launch_resume_forbidden')
         }
       }
     }

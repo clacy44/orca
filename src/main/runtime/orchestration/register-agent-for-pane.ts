@@ -12,6 +12,7 @@ import { sanitizeRole, sanitizeTitle, validateDisplayNameCandidate } from './age
 import { deriveAgentLabelSlug } from './agent-derivation'
 import { findLiveTerminalByHandle } from '../rpc/methods/agent-directory-rpc-liveness'
 import { DIRECTORY_LIVE_CAP, hostIdFor } from '../rpc/methods/agent-directory-rpc-view'
+import { holderPaneIsLive } from './agent-pane-rebind'
 
 export type RegisterAgentForPaneParams = {
   paneKey: string
@@ -62,7 +63,11 @@ export async function registerAgentForPane(
   }
 
   const existingForPane = db.getAgentByPaneKey(hostId, params.paneKey)
-  if (!existingForPane) {
+  if (!existingForPane && !isSameNameDeadPaneTakeover(db, runtime, hostId, params)) {
+    // H1 (G1-10z): a same-name dead-pane takeover re-points an existing row onto this pane
+    // (upsertAgentByPaneSuffix's remintRow branch) instead of inserting a new one, so it must
+    // not count against the cap — the seal-time pre-check (chair-succession-execute.ts) already
+    // covers the genuine-add case.
     const liveCount = db.listAgents({
       hostId,
       includeDerived: false,
@@ -170,4 +175,29 @@ export async function registerAgentForPane(
     pendingPeerQuestions: catchUp ? catchUp.pendingPeerQuestions : result.pendingPeerQuestions,
     unreadMailOnRetiredId: catchUp ? catchUp.unreadMailOnRetiredId : result.unreadMailOnRetiredId
   }
+}
+
+/** H1 (G1-10z): true only when upsertAgentByPaneSuffix's no-existing-row branch will re-point a
+ * dead, non-quarantined name holder onto this pane (remintRow, same id) rather than INSERT a new
+ * row. Mirrors that branch's own predicate so the cap count stays accurate for this caller only —
+ * it does not decide the write; upsertAgentByPaneSuffix still re-derives it under its own lock. */
+function isSameNameDeadPaneTakeover(
+  db: OrchestrationDb,
+  runtime: OrcaRuntimeService,
+  hostId: string,
+  params: RegisterAgentForPaneParams
+): boolean {
+  const nameHolder = db.getAgentByName(hostId, params.displayName)
+  if (!nameHolder || nameHolder.quarantined === 1) {
+    return false
+  }
+  const isReclaimableDerivedPlaceholder = nameHolder.state === 'gone' && nameHolder.derived === 1
+  if (isReclaimableDerivedPlaceholder) {
+    return false // that branch tombstones and INSERTs a new row, not a re-point.
+  }
+  const isPaneLive = (paneKey: string) => {
+    const signals = runtime.getAgentDirectoryLivenessSignals(paneKey)
+    return signals.terminalHandle !== null || signals.observedLive
+  }
+  return !holderPaneIsLive(nameHolder, isPaneLive)
 }

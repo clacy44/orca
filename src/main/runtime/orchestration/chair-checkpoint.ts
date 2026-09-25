@@ -46,13 +46,19 @@ const TOTAL_CAP_BYTES = 32 * 1024
 // fence line inside the checkpoint still closes it early. `\s*` covers any leading whitespace,
 // not just up to 3 spaces — 4+ spaces of indent makes it a code block in CommonMark, never a
 // fence, but refusing it too is strictly safer and costs nothing real checkpoints need.
-const FENCE_LINE_RE = /^\s*(```|~~~)/
+// H10 (G1-10z attempt-4): `\s` excludes Unicode format characters (Cf) — a zero-width space
+// (U+200B), word joiner (U+2060), BOM/ZWNBSP (U+FEFF) or any other Cf codepoint placed before the
+// fence/tag delimiter rendered invisibly but still passed both validators unseen (probe p3b). Not
+// a line-break gap (F9 already covers every Unicode mandatory break) — this is an invisible
+// PREFIX on the SAME line. `\p{Cf}` (needs the `u` flag) covers the whole category, not just the
+// two measured.
+const FENCE_LINE_RE = /^[\s\p{Cf}]*(```|~~~)/u
 // A run of 4+ backticks ANYWHERE in a line (not just at line start) still closes this
 // checkpoint's own render fence, which uses backticks — `~~~` fences are unaffected by a
 // backtick run, so only backticks are checked here; the FENCE_LINE_RE above already catches an
 // indented ~~~ line-start fence.
 const BACKTICK_RUN_RE = /`{4,}/
-const TAG_LINE_RE = /^\s*<[A-Za-z!?/]/
+const TAG_LINE_RE = /^[\s\p{Cf}]*<[A-Za-z!?/]/u
 // G1 attempt-3 repair F9: the fence/tag rules above only ever saw what `.split('\n')` produced —
 // a tag line hidden behind a bare CR, U+2028 (LINE SEPARATOR), U+2029 (PARAGRAPH SEPARATOR), VT
 // or FF (every line ending CommonMark itself recognizes, besides `\n`/`\r\n`) passed both

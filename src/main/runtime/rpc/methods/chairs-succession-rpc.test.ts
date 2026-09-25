@@ -287,6 +287,9 @@ describe('S10-22a G1 repair B2: orchestration.chairs.succeed keepalive', () => {
     } finally {
       db.close()
       await server.stop()
+      // H12 (G1-10z attempt-4): this held an `orca-runtime.json` with a (now-dead) auth token —
+      // never removed, leaking one mkdtemp directory per run of this test.
+      await rm(userDataPath, { recursive: true, force: true })
     }
   }, 15_000)
 })
@@ -401,6 +404,8 @@ describe('S10-22a G1 repair N9: orchestration.chairs.successionAccept keepalive'
     } finally {
       db.close()
       await server.stop()
+      // H12 (G1-10z attempt-4): see the B2 keepalive test's identical cleanup above.
+      await rm(userDataPath, { recursive: true, force: true })
     }
   }, 15_000)
 })
@@ -590,6 +595,8 @@ describe('S10-22a G1 repair round 2 Q7: succeed -> real launch -> successionAcce
     } finally {
       db.close()
       await server.stop()
+      // H12 (G1-10z attempt-4): see the B2 keepalive test's identical cleanup above.
+      await rm(userDataPath, { recursive: true, force: true })
     }
   }, 15_000)
 })

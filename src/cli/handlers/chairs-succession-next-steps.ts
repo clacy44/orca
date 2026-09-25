@@ -88,6 +88,11 @@ export const SUCCESSION_NEXT_STEPS: Record<string, string[]> = {
   ],
   runtime_busy: [
     'The host is at its long-poll capacity; wait a few seconds and retry (a backoff, not a permanent refusal).'
+  ],
+  // H8 (G1-10z attempt-4): the directory-cap refusal (seal time and the dead-pane takeover) had
+  // no map entry, so a caller at the cap saw a bare error code with no guidance.
+  succession_directory_full: [
+    'The agent directory is at its cap; retire an unused agent (`orca agents retire`) or free a slot, then retry.'
   ]
 }
 

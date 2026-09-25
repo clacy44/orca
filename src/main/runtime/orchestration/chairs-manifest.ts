@@ -9,6 +9,7 @@ import {
   isResumeSelectorToken,
   isSessionIdRefusalToken
 } from '../../../shared/covered-launch-agents'
+import { tokenizeStartupCommand } from '../../../shared/tui-agent-startup-shell'
 export const CHAIRS_MANIFEST_EFFORTS = [
   'low',
   'medium',
@@ -148,20 +149,19 @@ function hasForbiddenLaunchArgControlChar(value: string): boolean {
   return false
 }
 
-// [G1-10z attempt-2 N11 repair, widened by G1 attempt-3 repair F7] `launchArgs` is appended after
-// the host's own resume/session selectors (orca-runtime.ts appendAgentArgs) and reaches the shell
-// unfiltered by spawn-time admission's --session-id/--fork-session refusal
-// (ipc/agent-launch-admission.ts:181-184), which only inspects the tokens IT constructs, never a
-// manifest's launchArgs. The launch joins every element with `' '` and re-tokenizes the WHOLE
-// string on whitespace before building the command — an exact-element check (the pre-F7 shape)
-// let `-r<id>` (a joined short form, one element, not an exact `-r`/`--resume` match) and
-// ' --continue' / '--verbose --continue' / '\t-c' (one element that tokenizes into MORE than one
-// token once joined and re-split) straight through. Validate the SAME way the launch tokenizes:
-// join, split on whitespace, and classify every resulting token with the shared predicates
-// `agent-launch-admission.ts`'s spawn-time boundary check already uses (never a private
-// re-implementation to drift from it). An element with leading/trailing whitespace is refused
-// outright — that whitespace is exactly what smuggles an extra token past a naive per-element
-// check when the join happens.
+// [G1-10z attempt-2 N11 repair, widened by G1 attempt-3 repair F7, corrected by G1 attempt-4 H3]
+// `launchArgs` is appended after the host's own resume/session selectors (orca-runtime.ts
+// appendAgentArgs) and reaches the shell unfiltered by spawn-time admission's
+// --session-id/--fork-session refusal (ipc/agent-launch-admission.ts:181-184), which only
+// inspects the tokens IT constructs, never a manifest's launchArgs. The launch joins every
+// element with `' '` then runs the joined string through `tokenizeStartupCommand` (the SAME
+// POSIX tokenizer `planAgentCliArgsSuffix`/`appendAgentArgs` use) before building the command —
+// a naive `split(/\s+/)` re-implementation (the pre-H3 shape) does not honor quoting or
+// backslash escapes the way that tokenizer does, so it both let quoted/escaped selectors
+// (`"--continue"`, `\-c`, `"-r" <id>`) straight through AND falsely refused a legitimate quoted
+// value merely containing selector-shaped text. Validate with the launch's own tokenizer
+// instead of re-implementing it. An element with leading/trailing whitespace is still refused
+// outright — that is unrelated to tokenization and catches a different smuggling shape.
 function isForbiddenLaunchArgSelectorToken(token: string): boolean {
   return (
     isResumeSelectorToken(token) ||
@@ -187,11 +187,11 @@ function validateLaunchArgs(raw: unknown, index: number): string | null {
       return `chairs[${index}].launchArgs[${i}] must not have leading or trailing whitespace`
     }
   }
-  const joinedTokens = raw
-    .join(' ')
-    .split(/\s+/)
-    .filter((t) => t.length > 0)
-  for (const token of joinedTokens) {
+  const tokenized = tokenizeStartupCommand(raw.join(' '), 'posix')
+  if (!tokenized.ok) {
+    return `chairs[${index}].launchArgs is invalid: ${tokenized.error}`
+  }
+  for (const token of tokenized.tokens) {
     if (isForbiddenLaunchArgSelectorToken(token)) {
       return `chairs[${index}].launchArgs must not tokenize to a resume/session/fork selector (--resume, -r, --continue, -c, --session-id, --fork-session); "${token}" does`
     }

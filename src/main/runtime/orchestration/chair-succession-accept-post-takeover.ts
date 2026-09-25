@@ -119,7 +119,12 @@ export async function runPostTakeoverSteps(
   // N7: a lock-wait timeout here must not strand the record `confirming` forever without at
   // least telling the caller — fall back to the params-derived id on failure so the caller can
   // still build a result.
+  // H6 (G1-10z attempt-4): the `confirmed` audit write used to share THIS try block, so a
+  // throwing audit after a SUCCESSFUL transition raised the false `confirmTransitionFailed`
+  // warning although the record was already confirmed. Moved out of the transition's own try —
+  // a failure here is audited (best-effort) but never re-labels a successful transition.
   let confirmedId = params.successionId
+  let transitionSucceeded = false
   try {
     const confirmed = await transition(
       storeDepsFor(deps),
@@ -131,17 +136,25 @@ export async function runPostTakeoverSteps(
       }
     )
     confirmedId = confirmed.id
-    deps.db.writeAgentAudit({
-      agentId: registeredAgentId,
-      actorPaneKey: params.callerPaneKey,
-      actorHostId: params.hostId,
-      verb: 'succession_confirm',
-      outcome: 'confirmed',
-      reasonCode: `succession=${params.successionId}`.slice(0, 200)
-    })
+    transitionSucceeded = true
   } catch (err) {
     auditFailure('confirm_transition_failed', err)
     warnings.push('confirmTransitionFailed')
+  }
+  if (transitionSucceeded) {
+    try {
+      deps.db.writeAgentAudit({
+        agentId: registeredAgentId,
+        actorPaneKey: params.callerPaneKey,
+        actorHostId: params.hostId,
+        verb: 'succession_confirm',
+        outcome: 'confirmed',
+        reasonCode: `succession=${params.successionId}`.slice(0, 200)
+      })
+    } catch (err) {
+      auditFailure('confirmed_audit_failed', err)
+      warnings.push('confirmedAuditFailed')
+    }
   }
 
   return { confirmedId, warnings, manifestWriteFailed }

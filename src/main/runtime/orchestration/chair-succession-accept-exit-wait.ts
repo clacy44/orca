@@ -79,14 +79,21 @@ export async function closeIncumbentAndWaitForExit(
     await transition(storeDepsFor(deps), chair, params.successionId, 'aborted', {
       abortReason: 'incumbent_exit_timeout'
     })
-    deps.db.writeAgentAudit({
-      agentId: null,
-      actorPaneKey: params.callerPaneKey,
-      actorHostId: params.hostId,
-      verb: 'succession_abort',
-      outcome: 'aborted',
-      reasonCode: `succession=${params.successionId} reason=incumbent_exit_timeout`.slice(0, 200)
-    })
+    // H6 (G1-10z attempt-4): guarded — a throwing audit here must not skip the settle/stand-down
+    // throw below. Unguarded, the successor got a raw DB error instead of the "stand down" the
+    // caller depends on to decide it is not the chair.
+    try {
+      deps.db.writeAgentAudit({
+        agentId: null,
+        actorPaneKey: params.callerPaneKey,
+        actorHostId: params.hostId,
+        verb: 'succession_abort',
+        outcome: 'aborted',
+        reasonCode: `succession=${params.successionId} reason=incumbent_exit_timeout`.slice(0, 200)
+      })
+    } catch {
+      // best-effort — see above.
+    }
     settleHold(params.successionId, {
       ok: false,
       code: 'succession_aborted',

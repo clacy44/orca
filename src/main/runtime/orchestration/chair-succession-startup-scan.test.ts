@@ -72,6 +72,7 @@ function dbFacade(): SuccessionStartupScanDb {
     getAgentByName: (hostId, name) => db.getAgentByName(hostId, name),
     bindRun: (params) => db.bindRun(params),
     getRun: (id) => db.getRun(id),
+    getCurrentRunForPane: (paneKey) => db.getCurrentRunForPane(paneKey),
     writeAgentAudit: (row) => db.writeAgentAudit(row)
   }
 }
@@ -427,5 +428,77 @@ describe('scanSuccessionsAtStartup', () => {
       chairs: { lastSessionId?: string }[]
     }
     expect(manifestAfter.chairs[0].lastSessionId).toBe('sess-newer')
+  })
+
+  // H7 (G1-10z attempt-4, probe p12 B): `stillMovable` checked only where the OLD Run sits, never
+  // whether the successor's pane had since become the coordinator of a DIFFERENT, newer Run.
+  // Here run1 (the seal-time Run) never moved off the incumbent's pane (bindRun/confirm both
+  // failed), but the chair went on to bind a fresh run2 to the successor pane directly. The old
+  // guard matched on incumbent-pane presence alone and rebound run1 onto the successor pane,
+  // silently displacing run2. Assert run2 stays bound and run1 is left alone.
+  it('H7: does not displace a newer Run already bound to the successor pane', async () => {
+    const chair = 'chair-newer-run-on-successor'
+    const manifestPath = join(tempDir, 'chairs.json')
+    writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 1,
+        chairs: [{ name: chair, worktree: '/repo', agent: 'claude', conversationId: 'sess-orig' }]
+      })
+    )
+    const run1 = db.createRun({
+      objective: 'old',
+      coordinatorHandle: 'handle-incumbent',
+      coordinatorPaneKey: 'pane-incumbent'
+    })
+    const meta = await createSealed(storeDeps, chair, {
+      ...sealedInput(),
+      runId: run1.id,
+      preSuccessionSessionId: 'sess-orig'
+    })
+    await transition(storeDeps, chair, meta.id, 'launching', {
+      successor: {
+        paneKey: 'pane-successor-h7',
+        terminalHandle: 'handle-successor-h7',
+        sessionId: 'sess-b'
+      }
+    })
+    await transition(storeDeps, chair, meta.id, 'confirming')
+    const registered = db.upsertAgentByPaneSuffix({
+      displayName: chair,
+      role: null,
+      hostId: 'local',
+      paneKey: 'pane-successor-h7',
+      terminalHandle: 'handle-successor-h7',
+      processIncarnation: null,
+      worktreeId: null,
+      worktreePath: null,
+      branch: null,
+      title: null,
+      agentLabel: null,
+      originHandle: 'handle-successor-h7',
+      originHostId: 'local'
+    })
+    if (registered.outcome === 'name_taken') {
+      throw new Error('fixture setup failed')
+    }
+    // run1 never got rebound — accept's own bindRun/confirm both failed (H2/H4-shaped fault) —
+    // it stays on the incumbent's own (now-dead) pane.
+    // The chair went on, from the successor pane, to bind a fresh run2 directly.
+    const run2 = db.createRun({
+      objective: 'new',
+      coordinatorHandle: 'handle-successor-h7',
+      coordinatorPaneKey: 'pane-successor-h7'
+    })
+
+    const runtime = fakeRuntime({ live: new Set(['pane-successor-h7']) })
+    await scanSuccessionsAtStartup({ runtime, db: dbFacade(), orcaHome: tempDir, manifestPath })
+
+    const after = await read(storeDeps, chair, meta.id)
+    expect(after?.state).toBe('confirmed')
+    const run2After = db.getRun(run2.id)
+    expect(run2After?.coordinator_pane_key).toBe('pane-successor-h7')
+    const run1After = db.getRun(run1.id)
+    expect(run1After?.coordinator_pane_key).toBe('pane-incumbent')
   })
 })

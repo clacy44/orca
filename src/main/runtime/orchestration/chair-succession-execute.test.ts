@@ -742,4 +742,81 @@ describe('S10-22a WAVE 2: chair-succession-execute', () => {
     const active = await listActive({ orcaHome: tmp }, 'chair-x')
     expect(active).toEqual([])
   })
+
+  // H11 (G1-10z attempt-4, probe p8 B): the mailbox ack lands, the run ack throws, and the
+  // record aborts — the SAME failure shape as F4 above, but this asserts the incumbent's NATURAL
+  // retry (same --ack list) is not itself refused `succession_unknown_ack` for the id that is
+  // now already acknowledged (it vanished from the outstanding-only lookup the refusal used).
+  it('H11: a retry with the same --ack list after a partial-ack abort is not refused succession_unknown_ack', async () => {
+    await writeManifest('chair-x')
+    const { agentId } = registerChair('chair-x', PANE_A, HANDLE_A)
+    const run = bindRunTo(PANE_A, HANDLE_A)
+    db.insertMessage({
+      from: 'someone',
+      to: `agent:${agentId}`,
+      subject: 'hi',
+      type: 'status'
+    })
+    const unread = db.getUnreadMessages(`agent:${agentId}`)
+    const { delivery: mailboxDelivery } = db.getOrCreateMailboxDelivery({
+      mailboxHandle: `agent:${agentId}`,
+      messageIds: unread.map((m) => m.id),
+      limit: 50
+    })!
+    db.insertMessage({
+      from: 'term_worker',
+      to: `run:${run}`,
+      subject: 'worker status',
+      type: 'status',
+      runId: run
+    })
+    const runDelivery = db.getOrCreateRunDelivery({
+      runId: run,
+      consumerGeneration: db.getRun(run)!.consumer_generation
+    })!
+    const ackIds = [mailboxDelivery.id, runDelivery.delivery.id]
+
+    const originalRunAck = db.acknowledgeRunDelivery.bind(db)
+    let firstCall = true
+    vi.spyOn(db, 'acknowledgeRunDelivery').mockImplementation((params) => {
+      if (firstCall) {
+        firstCall = false
+        throw new Error('SQLITE_BUSY: database is locked')
+      }
+      return originalRunAck(params)
+    })
+    const { path, sha } = await writeCheckpoint()
+    await expect(
+      sealSuccession(deps, {
+        callerAgentId: agentId,
+        chairName: 'chair-x',
+        paneKey: PANE_A,
+        terminalHandle: HANDLE_A,
+        hostId,
+        checkpointPath: path,
+        checkpointSha256: sha,
+        reason: 'batch_end',
+        ack: ackIds
+      })
+    ).rejects.toBeTruthy()
+    // The mailbox delivery landed; the run delivery did not — matching p8 B.
+    expect(db.getOutstandingMailboxDelivery(`agent:${agentId}`)).toBeUndefined()
+    expect(db.getOutstandingRunDelivery(run)?.id).toBe(runDelivery.delivery.id)
+
+    // The incumbent's natural retry: same --ack list, both ids, after the abort.
+    const { path: path2, sha: sha2 } = await writeCheckpoint()
+    const result = await sealSuccession(deps, {
+      callerAgentId: agentId,
+      chairName: 'chair-x',
+      paneKey: PANE_A,
+      terminalHandle: HANDLE_A,
+      hostId,
+      checkpointPath: path2,
+      checkpointSha256: sha2,
+      reason: 'batch_end',
+      ack: ackIds
+    })
+    expect(result.meta.state).toBe('sealed')
+    expect(db.getOutstandingRunDelivery(run)).toBeUndefined()
+  })
 })

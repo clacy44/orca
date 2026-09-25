@@ -1853,7 +1853,7 @@ export class OrcaRuntimeRpcServer {
 
     // Why: long-poll admission fence; short RPCs bypass the counter. See §7 risk #2.
     const longPoll = longPollClassOf(request)
-    const rejection = this.admitLongPoll(longPoll)
+    const rejection = this.admitLongPoll(longPoll, undefined, request.method)
     if (rejection) {
       return this.buildError(request.id, 'runtime_busy', rejection.message, rejection.data)
     }
@@ -1879,7 +1879,8 @@ export class OrcaRuntimeRpcServer {
   // is reserved.
   private admitLongPoll(
     longPoll: LongPollClass | null,
-    peerKey?: { pairedDeviceId: string; accessProfile: 'full' | 'peer' | undefined }
+    peerKey?: { pairedDeviceId: string; accessProfile: 'full' | 'peer' | undefined },
+    method?: string
   ): { message: string; data?: { nextSteps: readonly string[] } } | null {
     if (!longPoll) {
       return null
@@ -1890,6 +1891,14 @@ export class OrcaRuntimeRpcServer {
     // bare "capacity reached" error (§3.2's third bullet).
     if (longPoll === 'pact') {
       if (this.activeLongPolls >= this.longPollCap) {
+        // H9 (G1-10z attempt-4): `successionAccept` (G1 attempt-3 repair F2) shares this class
+        // only to take the reserved headroom, not the FEDERATED PACT protocol it belongs to — the
+        // "re-arm; steps are durable" text (and its baked-in nextSteps, which pre-empted the CLI's
+        // own `runtime_busy` fallback) is nonsensical for an accept caller. Send no `data` here so
+        // the CLI's `SUCCESSION_NEXT_STEPS.runtime_busy` entry is what actually reaches it.
+        if (method === 'orchestration.chairs.successionAccept') {
+          return { message: 'long-poll capacity reached; retry with backoff' }
+        }
         return {
           message: 're-arm; steps are durable',
           data: { nextSteps: ['re-arm; steps are durable'] }
@@ -2100,7 +2109,7 @@ export class OrcaRuntimeRpcServer {
 
     const longPoll = longPollClassOf(request)
     const peerLongPollKey = { pairedDeviceId: device.deviceId, accessProfile }
-    const rejection = this.admitLongPoll(longPoll, peerLongPollKey)
+    const rejection = this.admitLongPoll(longPoll, peerLongPollKey, request.method)
     if (rejection) {
       reply(
         JSON.stringify(

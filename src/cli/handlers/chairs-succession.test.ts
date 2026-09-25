@@ -298,6 +298,7 @@ describe('chairs-succession handlers', () => {
     // G1 repair N8: five refusals reachable after the wave-2 pass had no next-steps map entry —
     // the runtime sends none for any of them, so a caller previously saw a bare error code.
     // G1 attempt-3 repair F10: charter_invalid and runtime_busy had no map entry either.
+    // H8 (G1-10z attempt-4): succession_directory_full had no map entry either.
     it.each([
       'succession_incumbent_exit_timeout',
       'succession_run_moved',
@@ -305,7 +306,8 @@ describe('chairs-succession handlers', () => {
       'succession_lane_unsupported',
       'resume_context_too_large',
       'charter_invalid',
-      'runtime_busy'
+      'runtime_busy',
+      'succession_directory_full'
     ])('adds a next step for %s when the runtime sent none', async (code) => {
       const call = vi.fn().mockRejectedValue(new RuntimeClientError(code, 'refused'))
 
