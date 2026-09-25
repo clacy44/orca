@@ -819,4 +819,85 @@ describe('S10-22a WAVE 2: chair-succession-execute', () => {
     expect(result.meta.state).toBe('sealed')
     expect(db.getOutstandingRunDelivery(run)).toBeUndefined()
   })
+
+  // N3 (G1-10z polish-recheck, probe P5): the H11 retry exemption above must be scoped to ids
+  // that actually landed on a PAST ABORTED seal for this chair, not "any acknowledged delivery
+  // on this mailbox" — an unrelated, long-acknowledged id on the SAME mailbox must still refuse.
+  it('N3: an unrelated already-acked id on the same mailbox is refused, even after a partial-ack abort', async () => {
+    await writeManifest('chair-x')
+    const { agentId } = registerChair('chair-x', PANE_A, HANDLE_A)
+    const run = bindRunTo(PANE_A, HANDLE_A)
+
+    // An unrelated, long-acknowledged delivery on this chair's own mailbox — never part of any
+    // aborted seal's ack list.
+    db.insertMessage({ from: 'someone', to: `agent:${agentId}`, subject: 'old', type: 'status' })
+    const oldUnread = db.getUnreadMessages(`agent:${agentId}`)
+    const { delivery: oldDelivery } = db.getOrCreateMailboxDelivery({
+      mailboxHandle: `agent:${agentId}`,
+      messageIds: oldUnread.map((m) => m.id),
+      limit: 50
+    })!
+    db.acknowledgeMailboxDelivery(oldDelivery.id, `agent:${agentId}`)
+
+    // A partial-ack abort, so a real `landedAckIds` retry exemption exists on disk for this
+    // chair, distinct from `oldDelivery.id`.
+    db.insertMessage({ from: 'someone', to: `agent:${agentId}`, subject: 'hi', type: 'status' })
+    const unread = db.getUnreadMessages(`agent:${agentId}`)
+    const { delivery: mailboxDelivery } = db.getOrCreateMailboxDelivery({
+      mailboxHandle: `agent:${agentId}`,
+      messageIds: unread.map((m) => m.id),
+      limit: 50
+    })!
+    db.insertMessage({
+      from: 'term_worker',
+      to: `run:${run}`,
+      subject: 'worker status',
+      type: 'status',
+      runId: run
+    })
+    const runDelivery = db.getOrCreateRunDelivery({
+      runId: run,
+      consumerGeneration: db.getRun(run)!.consumer_generation
+    })!
+    const originalRunAck = db.acknowledgeRunDelivery.bind(db)
+    let firstCall = true
+    vi.spyOn(db, 'acknowledgeRunDelivery').mockImplementation((params) => {
+      if (firstCall) {
+        firstCall = false
+        throw new Error('SQLITE_BUSY: database is locked')
+      }
+      return originalRunAck(params)
+    })
+    const { path, sha } = await writeCheckpoint()
+    await expect(
+      sealSuccession(deps, {
+        callerAgentId: agentId,
+        chairName: 'chair-x',
+        paneKey: PANE_A,
+        terminalHandle: HANDLE_A,
+        hostId,
+        checkpointPath: path,
+        checkpointSha256: sha,
+        reason: 'batch_end',
+        ack: [mailboxDelivery.id, runDelivery.delivery.id]
+      })
+    ).rejects.toBeTruthy()
+
+    // A retry naming the UNRELATED old-acked id (instead of the run delivery that must still be
+    // covered) must refuse — it never landed on this chair's aborted record.
+    const { path: path2, sha: sha2 } = await writeCheckpoint()
+    await expect(
+      sealSuccession(deps, {
+        callerAgentId: agentId,
+        chairName: 'chair-x',
+        paneKey: PANE_A,
+        terminalHandle: HANDLE_A,
+        hostId,
+        checkpointPath: path2,
+        checkpointSha256: sha2,
+        reason: 'batch_end',
+        ack: [mailboxDelivery.id, oldDelivery.id]
+      })
+    ).rejects.toMatchObject({ code: 'succession_unknown_ack' })
+  })
 })

@@ -191,9 +191,11 @@ function isSameNameDeadPaneTakeover(
   if (!nameHolder || nameHolder.quarantined === 1) {
     return false
   }
-  const isReclaimableDerivedPlaceholder = nameHolder.state === 'gone' && nameHolder.derived === 1
-  if (isReclaimableDerivedPlaceholder) {
-    return false // that branch tombstones and INSERTs a new row, not a re-point.
+  // [G1-10z polish-recheck N1 repair] a derived holder re-mints as non-derived on the re-point
+  // (agent-pane-rebind.ts/agent-directory.ts), raising the cap-counted total — not a re-point of
+  // an existing non-derived row, so it must not skip the cap check regardless of its `state`.
+  if (nameHolder.derived === 1) {
+    return false
   }
   const isPaneLive = (paneKey: string) => {
     const signals = runtime.getAgentDirectoryLivenessSignals(paneKey)

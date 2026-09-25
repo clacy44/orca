@@ -28331,13 +28331,20 @@ export class OrcaRuntimeService {
    * `launchConfig.agentCommand` (D-R101 F-3's three channels). [G1-10z attempt-2 N11 repair]
    * `appendAgentArgs` is a fourth surface this function can see — it is appended after the lane's
    * own agentArgs (chair restore/succession launches, `appendAgentArgs()` below) but this refusal
-   * previously read only `agentArgs`, so a `--resume`/`-r`/`--continue`/`-c`/`--session-id`/
-   * `--fork-session` placed there instead reached the plan unrefused. Scanned as its own subject
-   * now, alongside `agentArgs`/`command`. [G1-10z attempt-4 H3] The token scan itself used to
-   * check only `--session-id`/`--fork-session`, despite this comment naming resume/continue too
-   * — a `--resume`/`-r`/`--continue`/`-c` placed in `appendAgentArgs` reached the plan unrefused
-   * here (chairs-manifest.ts's own validator is the only other line of defense for that surface).
-   * Both selector families are refused now. */
+   * previously read only `agentArgs`, so a `--session-id`/`--fork-session` placed there instead
+   * reached the plan unrefused. Scanned as its own subject now, alongside `agentArgs`/`command`.
+   * [G1-10z G1-10z-polish-recheck B1 repair] `--resume`/`-r`/`--continue`/`-c` are NOT refused
+   * here for `agentArgs`/`command`: `isResumeSelectorToken`/`isContinueSelectorToken` are a
+   * deliberate superset (src/shared/covered-launch-agents.ts) that is safe only because nothing
+   * downstream treats it as a hard refusal predicate for caller-typed or renderer-sourced args —
+   * admission itself admits `--continue` as unrecorded and chair ruling 21c-E2 (D-R151 HIGH)
+   * declined a hard refusal on caller-typed `--resume` there. Refusing it here reached
+   * non-succession launches (`ensureAgentSession`, `createAgentSession`, mobile
+   * `createTerminal`'s `agentArgs`/`command`) and dash-leading non-selector values like
+   * `--agent -review`. `appendAgentArgs` is different: it is chair-owned (chair restore /
+   * succession launches only, never caller- or renderer-typed), so the resume/continue refusal
+   * stays scoped to that one subject — it is also the only subject that catches a Windows-shell
+   * escape of a manifest `launchArgs` value the POSIX-only manifest validator cannot see (N4). */
   private assertNoCoveredLaunchSelectorAtRequestBoundary(args: {
     agent: TuiAgent | undefined
     shell: AgentStartupShell | undefined
@@ -28352,7 +28359,12 @@ export class OrcaRuntimeService {
     // on a remote host, where POSIX word-splitting rules are the correct tokenizer (same default
     // `agent-launch-classification.ts#resolveAdmissionShell` uses for a non-win32 platform).
     const shell = args.shell ?? 'posix'
-    for (const subject of [args.agentArgs, args.command, args.appendAgentArgs]) {
+    const subjects: { value: string | null | undefined; refuseResumeContinue: boolean }[] = [
+      { value: args.agentArgs, refuseResumeContinue: false },
+      { value: args.command, refuseResumeContinue: false },
+      { value: args.appendAgentArgs, refuseResumeContinue: true }
+    ]
+    for (const { value: subject, refuseResumeContinue } of subjects) {
       if (!subject) {
         continue
       }
@@ -28367,7 +28379,10 @@ export class OrcaRuntimeService {
         if (isForkSessionRefusalToken(token)) {
           throw new LaunchAdmissionRefusedError('launch_fork_forbidden')
         }
-        if (isResumeSelectorToken(token) || isContinueSelectorToken(token)) {
+        if (
+          refuseResumeContinue &&
+          (isResumeSelectorToken(token) || isContinueSelectorToken(token))
+        ) {
           throw new LaunchAdmissionRefusedError('launch_resume_forbidden')
         }
       }

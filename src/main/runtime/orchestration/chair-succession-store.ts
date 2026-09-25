@@ -232,6 +232,8 @@ export type TransitionPatch = Partial<{
   successor: SuccessorHandle
   retiredHandle: string
   abortReason: string
+  /** [G1-10z polish-recheck N3 repair] see `SuccessionMeta.landedAckIds`. */
+  landedAckIds: string[]
 }>
 
 /** Applies a legal state transition, merging `patch` fields onto the record and bumping

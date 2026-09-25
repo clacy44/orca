@@ -203,4 +203,26 @@ describe('parseChairsManifest', () => {
       }).ok
     ).toBe(true)
   })
+
+  // N4 (G1-10z polish-recheck, probe P4w): the validator hardcoded the POSIX tokenizer, but the
+  // launch itself may tokenize with a Windows shell — a PowerShell backtick or cmd caret escape
+  // of a selector is not selector-shaped under POSIX word-splitting, so it passed unrefused.
+  it.each([
+    ['powershell backtick-escaped -c', ['`-c']],
+    ['cmd caret-escaped -c', ['^-c']]
+  ])('N4: refuses a Windows-shell-escaped selector, %s', (_label, launchArgs) => {
+    const result = parseChairsManifest({ version: 1, chairs: [baseEntry({ launchArgs })] })
+    expect(result.ok).toBe(false)
+  })
+
+  // N4: the quoted multi-word false-positive fix must hold under every checked shell, not just
+  // POSIX — a double-quoted phrase merely containing "-c" is one token under cmd/powershell too.
+  it('N4: still accepts the quoted multi-word "-c" text value under every checked shell', () => {
+    expect(
+      parseChairsManifest({
+        version: 1,
+        chairs: [baseEntry({ launchArgs: ['"Be careful: -c resumes"'] })]
+      }).ok
+    ).toBe(true)
+  })
 })

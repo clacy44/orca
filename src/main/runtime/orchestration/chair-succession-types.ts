@@ -97,6 +97,13 @@ export type SuccessionMeta = {
    * so pre-repair meta.json files without it still parse (the startup tail then falls back to
    * always writing, its pre-repair shape). */
   preSuccessionSessionId?: string | null
+  /** [G1-10z polish-recheck N3 repair] the delivery ids that landed (acknowledged) before an
+   * ack-or-audit failure aborted THIS record — a retry's `--ack` is safe to include exactly
+   * these (already acked, no longer "outstanding") plus whatever is still outstanding. Narrower
+   * than "any historically-acknowledged id on this mailbox", which let an unrelated
+   * already-acked delivery ride the retry's relaxed check. Absent when nothing landed before the
+   * abort. */
+  landedAckIds?: string[]
 }
 
 /** Whether the resume context embeds the charter text or only references it (D-R215 amendment

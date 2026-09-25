@@ -187,13 +187,22 @@ function validateLaunchArgs(raw: unknown, index: number): string | null {
       return `chairs[${index}].launchArgs[${i}] must not have leading or trailing whitespace`
     }
   }
-  const tokenized = tokenizeStartupCommand(raw.join(' '), 'posix')
-  if (!tokenized.ok) {
-    return `chairs[${index}].launchArgs is invalid: ${tokenized.error}`
-  }
-  for (const token of tokenized.tokens) {
-    if (isForbiddenLaunchArgSelectorToken(token)) {
-      return `chairs[${index}].launchArgs must not tokenize to a resume/session/fork selector (--resume, -r, --continue, -c, --session-id, --fork-session); "${token}" does`
+  // [G1-10z polish-recheck N4 repair] the launch itself may tokenize `launchArgs` with a
+  // Windows shell (`resolveLocalWindowsAgentStartupShell`) — a POSIX-only check here let a
+  // PowerShell backtick (`` `-c ``) or cmd caret (`^-c`) escape of a selector through unrefused,
+  // since those are not selector-shaped under POSIX word-splitting rules. Run the same token
+  // check under every launch shell the tokenizer supports, not just 'posix'.
+  for (const shell of ['posix', 'powershell', 'cmd'] as const) {
+    const tokenized = tokenizeStartupCommand(raw.join(' '), shell)
+    if (!tokenized.ok) {
+      // Whole-manifest refusal on an unbalanced quote is intentional (N4): every launch shell
+      // fails to build a command from such a value anyway.
+      return `chairs[${index}].launchArgs is invalid: ${tokenized.error}`
+    }
+    for (const token of tokenized.tokens) {
+      if (isForbiddenLaunchArgSelectorToken(token)) {
+        return `chairs[${index}].launchArgs must not tokenize to a resume/session/fork selector (--resume, -r, --continue, -c, --session-id, --fork-session); "${token}" does`
+      }
     }
   }
   return null

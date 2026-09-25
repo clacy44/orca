@@ -362,6 +362,43 @@ describe('chairs-succession handlers', () => {
           '`chairs restore` may resume the pre-succession session'
       )
     })
+
+    // [G1-10z polish-recheck N5 repair] outstandingDeliveryReadFailed, runGenerationReadFailed
+    // and confirmedAuditFailed (H4/H6's guarded post-confirm reads/audits) had no WARNING_GUIDANCE
+    // entry — the CLI printed them bare with no next step.
+    it.each(['outstandingDeliveryReadFailed', 'runGenerationReadFailed', 'confirmedAuditFailed'])(
+      'prints guidance for the %s warning, not just the bare identifier',
+      async (warning) => {
+        const call = vi.fn().mockResolvedValue({
+          result: {
+            successionId: 'succ_xyz',
+            chair: 'chair-a',
+            agentId: 'agent_1',
+            runId: 'run_1',
+            generation: 3,
+            warnings: [warning],
+            obligations: {
+              ackedDeliveryIds: [],
+              outstandingDeliveryIds: [],
+              retiredHandle: null,
+              pendingPeerQuestionThreadIds: [],
+              pactTurnsHeld: 0
+            }
+          }
+        })
+
+        await CHAIRS_SUCCESSION_HANDLERS['chairs succession-accept']({
+          flags: new Map<string, string | boolean>([['id', 'succ_xyz']]),
+          client: { call },
+          cwd: '/tmp',
+          json: false
+        } as never)
+
+        const printed = logSpy.mock.calls.at(-1)?.[0] as string
+        expect(printed).toContain(`WARNINGS ${warning}`)
+        expect(printed).toContain(`  - ${warning}: `)
+      }
+    )
   })
 
   describe('chairs resume-context', () => {

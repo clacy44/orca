@@ -193,6 +193,42 @@ describe('request-boundary launch-selector refusal (T29)', () => {
     expect((error as { reasonCode?: string }).reasonCode).toBe('launch_resume_forbidden')
     expect(createTerminal).not.toHaveBeenCalled()
   })
+
+  // [G1-10z G1-10z-polish-recheck B1 regression] resume/continue selectors in `agentArgs`/
+  // `command` (as opposed to `appendAgentArgs`) must reach the plan unrefused at this boundary —
+  // `isResumeSelectorToken`/`isContinueSelectorToken` are a deliberate superset, and admission /
+  // chair ruling 21c-E2 both keep a caller-typed `--resume`/`--continue` alive on these subjects.
+  it.each([
+    ['--continue', '--continue'],
+    ['-c', '-c'],
+    ['--agent -review (a documented non-selector value)', '--agent -review'],
+    [
+      '--resume <uuid> (caller resume, ruling 21c-E2)',
+      '--resume 0f1e2d3c-4b5a-4968-8778-695a4b3c2d1e'
+    ]
+  ])('createAgentSession does not refuse agentArgs: %s at the boundary', async (_label, args) => {
+    const { runtime, createTerminal } = createRuntime()
+
+    await expect(
+      runtime.createAgentSession(createRequest(operationId(`b0${args.length}`), args))
+    ).resolves.toMatchObject({ disposition: 'created' })
+    expect(createTerminal).toHaveBeenCalledOnce()
+  })
+
+  it.each([
+    ['--continue', '--continue'],
+    ['-r stale-id (strip-guard shape)', '-r stale-id']
+  ])('ensureAgentSession does not refuse agentArgs: %s at the boundary', async (_label, args) => {
+    const { runtime, createTerminal } = createRuntime()
+
+    const error = await runtime
+      .ensureAgentSession(resumeRequest(args))
+      .then(() => undefined)
+      .catch((thrown: unknown) => thrown)
+
+    expect((error as { name?: string } | undefined)?.name).not.toBe('LaunchAdmissionRefusedError')
+    expect(createTerminal).toHaveBeenCalledOnce()
+  })
 })
 
 // [D-R104 (ii), Ruling 34 Addendum 15] The third named site: runCreateMobileSessionTerminal's
@@ -266,6 +302,57 @@ describe('request-boundary launch-selector refusal (D-R104 (ii)): runCreateMobil
     // Not a LaunchAdmissionRefusedError from the request-boundary check — proves the boundary
     // itself let it through; whatever `createTerminal`'s own mock/downstream stub does past
     // that is out of this fence's scope.
+    expect((error as { name?: string } | undefined)?.name).not.toBe('LaunchAdmissionRefusedError')
+  })
+
+  // [G1-10z G1-10z-polish-recheck B1 regression] mobile createTerminal's `command`/
+  // `launchConfig.agentArgs` are caller-typed, not chair-owned `appendAgentArgs` — a resume/
+  // continue selector there must not be refused at this boundary.
+  it('createMobileSessionTerminal does not refuse command: claude --resume <uuid>', async () => {
+    const { runtime } = createRuntimeForMobile()
+
+    const error = await runtime
+      .createMobileSessionTerminal('id:worktree-1', {
+        credentialLane: { kind: 'shared' },
+        activate: false,
+        launchAgent: 'claude',
+        command: 'claude --resume 0f1e2d3c-4b5a-4968-8778-695a4b3c2d1e'
+      })
+      .then(() => undefined)
+      .catch((thrown: unknown) => thrown)
+
+    expect((error as { name?: string } | undefined)?.name).not.toBe('LaunchAdmissionRefusedError')
+  })
+
+  it('createMobileSessionTerminal does not refuse command: claude --continue', async () => {
+    const { runtime } = createRuntimeForMobile()
+
+    const error = await runtime
+      .createMobileSessionTerminal('id:worktree-1', {
+        credentialLane: { kind: 'shared' },
+        activate: false,
+        launchAgent: 'claude',
+        command: 'claude --continue'
+      })
+      .then(() => undefined)
+      .catch((thrown: unknown) => thrown)
+
+    expect((error as { name?: string } | undefined)?.name).not.toBe('LaunchAdmissionRefusedError')
+  })
+
+  it('createMobileSessionTerminal does not refuse launchConfig.agentArgs: --continue', async () => {
+    const { runtime } = createRuntimeForMobile()
+
+    const error = await runtime
+      .createMobileSessionTerminal('id:worktree-1', {
+        credentialLane: { kind: 'shared' },
+        activate: false,
+        launchAgent: 'claude',
+        launchConfig: { agentCommand: 'claude', agentArgs: '--continue', agentEnv: {} }
+      })
+      .then(() => undefined)
+      .catch((thrown: unknown) => thrown)
+
     expect((error as { name?: string } | undefined)?.name).not.toBe('LaunchAdmissionRefusedError')
   })
 })

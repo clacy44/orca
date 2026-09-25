@@ -259,6 +259,49 @@ describe('S10-22a G1-10z attempt-4: chair-succession-accept (H1/H2/H4/H6)', () =
       })
     })
 
+    // N2 (G1-10z polish-recheck, probe P2): a throw from a POST-upsert step inside
+    // registerAgentForPane (here, the `register` audit write) arrives AFTER the re-point already
+    // committed — the row already sits on the successor pane. This must NOT abort a done
+    // takeover; it must continue into the post-takeover steps with a warning.
+    it('N2: a throw from a post-upsert step after the takeover already committed continues, not aborts', async () => {
+      await writeManifest('chair-x')
+      const { agentId } = registerChair('chair-x', PANE_A, HANDLE_A)
+      const runId = bindRunTo(PANE_A, HANDLE_A)
+      const meta = await sealedLaunching('chair-x', runId)
+      vi.spyOn(runtime, 'closeTerminal').mockResolvedValue({} as never)
+      vi.spyOn(runtime, 'waitForTerminal').mockResolvedValue({
+        handle: HANDLE_A,
+        condition: 'exit'
+      } as never)
+      const realAudit = db.writeAgentAudit.bind(db)
+      vi.spyOn(db, 'writeAgentAudit').mockImplementation((row) => {
+        if (row.verb === 'register' && row.outcome !== 'name_taken') {
+          throw new Error('SQLITE_BUSY: database is locked (post-upsert register audit)')
+        }
+        return realAudit(row)
+      })
+      void holdSealRequest(deps, hostId, meta, undefined)
+
+      const result = await acceptSuccession(deps, {
+        successionId: meta.id,
+        callerPaneKey: SUCCESSOR_PANE,
+        callerTerminalHandle: SUCCESSOR_HANDLE,
+        callerSessionId: 'sess-succ',
+        hostId
+      })
+
+      expect(result.chair).toBe('chair-x')
+      expect(result.agentId).toBe(agentId)
+      expect(result.warnings).toContain('takeoverCommittedDespiteThrow')
+      const row = db.getAgentByName(hostId, 'chair-x')
+      expect(row?.pane_key).toBe(SUCCESSOR_PANE)
+      expect(row?.id).toBe(agentId)
+      const confirmedMeta = await read({ orcaHome: tmp }, 'chair-x', meta.id)
+      expect(confirmedMeta?.state).toBe('confirmed')
+      const run = db.getRun(runId)
+      expect(run?.coordinator_pane_key).toBe(SUCCESSOR_PANE)
+    })
+
     // H6 (G1-10z attempt-4): the takeover-failure audit write used to be unguarded — a throwing
     // audit skipped the settle below it, leaving the record wedged with no hold outcome.
     it('H6: a throwing takeover-failure audit still settles the hold and throws succession_takeover_failed', async () => {
@@ -400,6 +443,39 @@ describe('S10-22a G1-10z attempt-4: chair-succession-accept (H1/H2/H4/H6)', () =
       expect(result.obligations.outstandingDeliveryIds).toEqual([])
       const row = db.getAgentByName(hostId, 'chair-x')
       expect(row?.pane_key).toBe(SUCCESSOR_PANE)
+      const finalMeta = await read({ orcaHome: tmp }, 'chair-x', meta.id)
+      expect(finalMeta?.state).toBe('confirmed')
+    })
+
+    // [G1-10z polish-recheck N5 repair] the H4 `getRun` guard was untested — a mutant that
+    // rethrows in its catch left every existing suite green (G1-10z-succession-polish-recheck.md
+    // (1) table, H4 row). Assert accept still resolves, with `generation: 0` and the warning.
+    it('H4: getRun throws after confirm -> accept still resolves with generation 0 and a warning', async () => {
+      await writeManifest('chair-x')
+      const { agentId } = registerChair('chair-x', PANE_A, HANDLE_A)
+      const runId = bindRunTo(PANE_A, HANDLE_A)
+      const meta = await sealedLaunching('chair-x', runId)
+      vi.spyOn(runtime, 'closeTerminal').mockResolvedValue({} as never)
+      vi.spyOn(runtime, 'waitForTerminal').mockResolvedValue({
+        handle: HANDLE_A,
+        condition: 'exit'
+      } as never)
+      vi.spyOn(db, 'getRun').mockImplementation(() => {
+        throw new Error('SQLITE_BUSY: database is locked')
+      })
+      void holdSealRequest(deps, hostId, meta, undefined)
+
+      const result = await acceptSuccession(deps, {
+        successionId: meta.id,
+        callerPaneKey: SUCCESSOR_PANE,
+        callerTerminalHandle: SUCCESSOR_HANDLE,
+        callerSessionId: 'sess-succ',
+        hostId
+      })
+
+      expect(result.agentId).toBe(agentId)
+      expect(result.generation).toBe(0)
+      expect(result.warnings).toContain('runGenerationReadFailed')
       const finalMeta = await read({ orcaHome: tmp }, 'chair-x', meta.id)
       expect(finalMeta?.state).toBe('confirmed')
     })

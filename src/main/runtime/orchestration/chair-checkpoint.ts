@@ -46,12 +46,14 @@ const TOTAL_CAP_BYTES = 32 * 1024
 // fence line inside the checkpoint still closes it early. `\s*` covers any leading whitespace,
 // not just up to 3 spaces — 4+ spaces of indent makes it a code block in CommonMark, never a
 // fence, but refusing it too is strictly safer and costs nothing real checkpoints need.
-// H10 (G1-10z attempt-4): `\s` excludes Unicode format characters (Cf) — a zero-width space
-// (U+200B), word joiner (U+2060), BOM/ZWNBSP (U+FEFF) or any other Cf codepoint placed before the
-// fence/tag delimiter rendered invisibly but still passed both validators unseen (probe p3b). Not
-// a line-break gap (F9 already covers every Unicode mandatory break) — this is an invisible
-// PREFIX on the SAME line. `\p{Cf}` (needs the `u` flag) covers the whole category, not just the
-// two measured.
+// H10 (G1-10z attempt-4): `\s` excludes most Unicode format characters (Cf) — a zero-width space
+// (U+200B), word joiner (U+2060) or any other Cf codepoint placed before the fence/tag delimiter
+// rendered invisibly but still passed both validators unseen (probe p3b). [G1-10z polish-recheck
+// N5 correction] BOM/ZWNBSP (U+FEFF) is NOT one of these: JS's `\s` already matches U+FEFF, so
+// that case passed both validators either way (probe P6) — it is covered here only because it is
+// also in the Cf category, not because it needed covering. Not a line-break gap (F9 already
+// covers every Unicode mandatory break) — this is an invisible PREFIX on the SAME line. `\p{Cf}`
+// (needs the `u` flag) covers the whole category, not just the ones measured as actually missed.
 const FENCE_LINE_RE = /^[\s\p{Cf}]*(```|~~~)/u
 // A run of 4+ backticks ANYWHERE in a line (not just at line start) still closes this
 // checkpoint's own render fence, which uses backticks — `~~~` fences are unaffected by a

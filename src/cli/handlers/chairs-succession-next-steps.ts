@@ -89,8 +89,10 @@ export const SUCCESSION_NEXT_STEPS: Record<string, string[]> = {
   runtime_busy: [
     'The host is at its long-poll capacity; wait a few seconds and retry (a backoff, not a permanent refusal).'
   ],
-  // H8 (G1-10z attempt-4): the directory-cap refusal (seal time and the dead-pane takeover) had
-  // no map entry, so a caller at the cap saw a bare error code with no guidance.
+  // H8 (G1-10z attempt-4): the seal-time directory-cap refusal had no map entry, so a caller at
+  // the cap saw a bare error code with no guidance. [G1-10z polish-recheck N5 correction] a
+  // takeover at the cap throws `succession_takeover_failed`, not this code — see that entry's
+  // own comment.
   succession_directory_full: [
     'The agent directory is at its cap; retire an unused agent (`orca agents retire`) or free a slot, then retry.'
   ]
@@ -110,5 +112,16 @@ export const WARNING_GUIDANCE: Record<string, string> = {
   purgeFailed:
     'old succession directories/retired handles were not trimmed this time; harmless, retried on the next confirm',
   resumeContextReadFailed:
-    'resume-context.md could not be read; run `orca chairs resume-context` to fetch it separately'
+    'resume-context.md could not be read; run `orca chairs resume-context` to fetch it separately',
+  // [G1-10z polish-recheck N5 repair] H4's guarded post-confirm reads/audits reach the CLI as
+  // bare warning ids with no guidance, the same gap H8/H9's fix closed for other warnings.
+  outstandingDeliveryReadFailed:
+    'outstanding mailbox/run deliveries could not be checked; check your mailbox by hand (`orca orchestration inbox`) before assuming nothing is waiting',
+  runGenerationReadFailed:
+    "the Run's consumer generation could not be read; treat it as unknown and re-check with `orca orchestration run-use --id <run>` before relying on it",
+  confirmedAuditFailed:
+    'the `confirmed` audit entry was not written; the succession record itself is still confirmed, only the audit trail is short one entry',
+  // [G1-10z polish-recheck N2 repair]
+  takeoverCommittedDespiteThrow:
+    'the takeover actually committed even though a post-commit step threw; the identity, Run and manifest are on the successor — double check the manifest and Run coordinator match'
 }

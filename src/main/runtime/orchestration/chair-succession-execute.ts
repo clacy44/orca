@@ -19,6 +19,7 @@ import {
   SuccessionInFlightError,
   type ChairSuccessionStoreDeps
 } from './chair-succession-store'
+import { collectAbortedLandedAckIds } from './chair-succession-store-reads'
 import type { CharterMode, SuccessionMeta, SuccessionReason } from './chair-succession-types'
 import {
   readManifestEntry,
@@ -200,18 +201,16 @@ export async function sealSuccession(
   // ack lands, the run ack throws, and the record aborts. The incumbent's NATURAL retry resends
   // the SAME --ack list, but the mailbox delivery is no longer "outstanding" (it is already
   // acknowledged), so it vanished from `knownDeliveryIds` above and the retry was refused
-  // `succession_unknown_ack` — stuck. An id that names a REAL delivery for this mailbox/Run,
-  // already acknowledged, is a safe retry, not a typo; only a truly unrecognized id refuses.
+  // `succession_unknown_ack` — stuck. [G1-10z polish-recheck N3 repair] Scoped to ids that
+  // actually landed on a past ABORTED seal for this chair (`landedAckIds`), not "any
+  // acknowledged delivery on this mailbox/Run" — the wider check let an unrelated,
+  // long-acknowledged id ride the same retry exemption (probe P5).
+  const abortedLandedAckIds = await collectAbortedLandedAckIds(storeDepsFor(deps), params.chairName)
   const unknownAck = [...ack].filter((id) => {
     if (knownDeliveryIds.has(id)) {
       return false
     }
-    const alreadyAckedMailbox = deps.db.getMailboxDeliveryById(agentMailbox, id)
-    if (alreadyAckedMailbox?.status === 'acknowledged') {
-      return false
-    }
-    const alreadyAckedRun = deps.db.getRunDeliveryById(run.id, id)
-    return alreadyAckedRun?.status !== 'acknowledged'
+    return !abortedLandedAckIds.has(id)
   })
   if (unknownAck.length > 0) {
     refuse('succession_unknown_ack', '--ack named an id with no outstanding delivery.', {
@@ -301,9 +300,13 @@ export async function sealSuccession(
   // `consumer_fenced` when the Run is rebound mid-seal) left a `sealed` record with no hold ever
   // registered, wedging the chair until restart (every later `succeed` refused
   // `succession_in_flight`). Cover the acks too: ANY throw here, ack or audit, aborts the record.
+  // [G1-10z polish-recheck N3 repair] tracks exactly which acks land before a throw, so an abort
+  // below can record them on the record (`landedAckIds`) for a scoped retry exemption.
+  const landedAckIds: string[] = []
   try {
     if (agentDelivery && ack.has(agentDelivery.id)) {
       deps.db.acknowledgeMailboxDelivery(agentDelivery.id, agentMailbox)
+      landedAckIds.push(agentDelivery.id)
     }
     if (runDelivery && ack.has(runDelivery.id)) {
       deps.db.acknowledgeRunDelivery({
@@ -311,6 +314,7 @@ export async function sealSuccession(
         consumerGeneration: run.consumer_generation,
         deliveryId: runDelivery.id
       })
+      landedAckIds.push(runDelivery.id)
     }
     deps.db.writeAgentAudit({
       agentId: params.callerAgentId,
@@ -327,7 +331,8 @@ export async function sealSuccession(
     )
     try {
       await transition(storeDepsFor(deps), params.chairName, meta.id, 'aborted', {
-        abortReason: reason
+        abortReason: reason,
+        ...(landedAckIds.length > 0 ? { landedAckIds } : {})
       })
     } catch {
       // best-effort — if this also fails, the record is left `sealed` with no hold; a later

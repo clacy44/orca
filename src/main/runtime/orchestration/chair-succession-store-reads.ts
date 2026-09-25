@@ -32,3 +32,32 @@ export async function listActive(
   }
   return active
 }
+
+/** [G1-10z polish-recheck N3 repair] every delivery id that landed (acknowledged) on a PAST
+ * aborted seal for `chair`, across every aborted record on disk — a retry's `--ack` is safe to
+ * repeat exactly these; nothing else, even if acknowledged for an unrelated reason. Read-only,
+ * no lock (same snapshot-read reasoning as `listActive`). */
+export async function collectAbortedLandedAckIds(
+  deps: ChairSuccessionStoreDeps,
+  chair: string
+): Promise<Set<string>> {
+  let entries: string[]
+  try {
+    entries = await readdir(successionsRoot(deps, chair))
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return new Set()
+    }
+    throw error
+  }
+  const landed = new Set<string>()
+  for (const id of entries) {
+    const meta = await read(deps, chair, id)
+    if (meta && meta.state === 'aborted' && meta.landedAckIds) {
+      for (const ackId of meta.landedAckIds) {
+        landed.add(ackId)
+      }
+    }
+  }
+  return landed
+}

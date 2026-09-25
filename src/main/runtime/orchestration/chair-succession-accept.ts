@@ -124,6 +124,33 @@ export async function acceptSuccession(
   } catch (err) {
     registrationThrowReason = err instanceof Error ? err.message : String(err)
   }
+  // [G1-10z polish-recheck N2 repair] a throw can arrive AFTER `upsertAgentByPaneSuffix` already
+  // committed the re-point (a post-upsert step inside `registerAgentForPane` — catch-up, the
+  // `register` audit, the unread-mail read — can throw too). Routing every throw to the abort
+  // path left the identity on the live successor while the record stayed `aborted`, the Run
+  // stayed on the dead incumbent, and the manifest kept the pre-succession session (a restart no
+  // longer converges). Re-read the row: if it landed on the caller's pane, the write committed —
+  // continue into the post-takeover steps with a warning instead of aborting a done takeover.
+  let takeoverCommittedDespiteThrow = false
+  if (registrationThrowReason && !registration) {
+    const postThrowRow = deps.db.getAgentByName(params.hostId, chair)
+    if (postThrowRow && postThrowRow.pane_key === params.callerPaneKey) {
+      takeoverCommittedDespiteThrow = true
+      registration = {
+        ok: true,
+        agent: postThrowRow,
+        created: false,
+        reMinted: true,
+        repointedMessages: 0,
+        pendingOnOldHandle: 0,
+        unreadWaiting: 0,
+        adoptedThreads: 0,
+        blockedByQuarantinedPredecessor: false,
+        pendingPeerQuestions: 0,
+        unreadMailOnRetiredId: 0
+      }
+    }
+  }
   if (!registration || !registration.ok) {
     // Chair review fix #3: the incumbent's pane is ALREADY closed at this point — leaving the
     // record `confirming` would let a later hold timeout no-op (already_terminal only fires for
@@ -168,6 +195,11 @@ export async function acceptSuccession(
     params,
     registration.agent.id
   )
+  // [G1-10z polish-recheck N2 repair] surface the committed-despite-throw case explicitly rather
+  // than leaving it indistinguishable from a clean takeover.
+  if (takeoverCommittedDespiteThrow) {
+    warnings.push('takeoverCommittedDespiteThrow')
+  }
 
   // Never actually reaches the incumbent (its pane is already closed) — released here only so
   // the held `succeed` Promise doesn't leak forever.

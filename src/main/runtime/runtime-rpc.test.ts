@@ -6503,6 +6503,8 @@ describe('OrcaRuntimeRpcServer', () => {
       } finally {
         db.close()
         await server.stop()
+        // [G1-10z polish-recheck N5 repair] left its userDataPath temp dir on disk (H12 class).
+        await rm(userDataPath, { recursive: true, force: true })
       }
     })
 
