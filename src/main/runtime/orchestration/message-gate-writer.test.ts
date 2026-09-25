@@ -2,6 +2,10 @@
 // public OrchestrationDb API. Mutation-guard comments match the s10-2-spec.md TESTS table.
 import { describe, expect, it } from 'vitest'
 import { OrchestrationDb } from './db'
+import {
+  _resetRetiredHandlesIndexForTest,
+  refreshRetiredHandlesIndexSync
+} from './chair-succession-retired-index'
 
 function freshDb(): OrchestrationDb {
   return new OrchestrationDb(':memory:')
@@ -451,3 +455,80 @@ function rawGet(db: OrchestrationDb, sql: string, args: unknown[]): unknown {
 function rawAll(db: OrchestrationDb, sql: string): unknown[] {
   return rawDb(db).prepare(sql).all()
 }
+
+describe('S10-22a Wave 2 contract Mail (A3): retired-handle rewrite', () => {
+  it("a message addressed to a retired handle lands in agent:<id>'s mailbox", async () => {
+    const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+
+    const db = freshDb()
+    _resetRetiredHandlesIndexForTest()
+    const orcaHome = await mkdtemp(join(tmpdir(), 'orca-mail-rewrite-'))
+    try {
+      const registration = db.upsertAgentByPaneSuffix({
+        displayName: 'chair-succ',
+        role: null,
+        hostId: 'local',
+        paneKey: 'tab:new-pane',
+        terminalHandle: null,
+        processIncarnation: null,
+        worktreeId: null,
+        worktreePath: null,
+        branch: null,
+        title: null,
+        agentLabel: null,
+        originHandle: null,
+        originHostId: 'local'
+      })
+      const agentId = (registration as { agent: { id: string } }).agent.id
+
+      const chairDir = join(orcaHome, 'chairs', 'chair-succ')
+      await mkdir(chairDir, { recursive: true })
+      await writeFile(
+        join(chairDir, 'retired-handles.json'),
+        JSON.stringify([
+          { handle: 'agent:retired-old-handle', succession: 'succ_abc', at: '2026-01-01T00:00:00Z' }
+        ])
+      )
+      refreshRetiredHandlesIndexSync(orcaHome)
+
+      const result = db.insertGatedMessage({
+        from: 'agent:other',
+        to: 'agent:retired-old-handle',
+        subject: 'status',
+        body: 'hello successor',
+        runId: 'run_peer_local',
+        verb: 'send'
+      })
+      expect(result.outcome).toBe('stored')
+      if (result.outcome !== 'stored') {
+        throw new Error('expected stored')
+      }
+      expect(result.message.to_handle).toBe(`agent:${agentId}`)
+    } finally {
+      db.close()
+      await rm(orcaHome, { recursive: true, force: true })
+      _resetRetiredHandlesIndexForTest()
+    }
+  })
+
+  it('a `to` with no retired-handle match is passed through unchanged', () => {
+    _resetRetiredHandlesIndexForTest()
+    const db = freshDb()
+    const result = db.insertGatedMessage({
+      from: 'agent:a',
+      to: 'agent:untouched',
+      subject: 'status',
+      body: 'plain send',
+      runId: 'run_peer_local',
+      verb: 'send'
+    })
+    expect(result.outcome).toBe('stored')
+    if (result.outcome !== 'stored') {
+      throw new Error('expected stored')
+    }
+    expect(result.message.to_handle).toBe('agent:untouched')
+    db.close()
+  })
+})

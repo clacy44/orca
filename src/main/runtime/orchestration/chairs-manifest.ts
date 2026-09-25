@@ -13,6 +13,14 @@ export const CHAIRS_MANIFEST_EFFORTS = [
 ] as const
 export type ChairsManifestEffort = (typeof CHAIRS_MANIFEST_EFFORTS)[number]
 
+export type ChairsManifestCharterMode = 'reference' | 'embed'
+
+export type ChairsManifestSuccession = {
+  enabled: boolean
+  charterPath: string
+  charterMode?: ChairsManifestCharterMode
+}
+
 export type ChairsManifestEntry = {
   name: string
   role?: string
@@ -23,6 +31,12 @@ export type ChairsManifestEntry = {
   host?: string
   model?: string
   effort?: ChairsManifestEffort
+  // [S10-22a Wave 2 contract] owner config for `orca chairs succeed` (D-R215 §Protocol step 1).
+  succession?: ChairsManifestSuccession
+  // [S10-22a Wave 2 contract, D-R217] passed verbatim, after the agent's own args, by both
+  // `chairs restore` and the succession launch. Each element must be newline-free (a newline in
+  // an argv element cannot round-trip through the shapes this manifest feeds).
+  launchArgs?: string[]
 }
 
 export type ChairsManifest = {
@@ -72,6 +86,55 @@ function validateEntry(raw: unknown, index: number): string | null {
     !CHAIRS_MANIFEST_EFFORTS.includes(entry.effort as ChairsManifestEffort)
   ) {
     return `chairs[${index}].effort must be one of ${CHAIRS_MANIFEST_EFFORTS.join('|')}`
+  }
+  if (entry.succession !== undefined) {
+    const problem = validateSuccession(entry.succession, index)
+    if (problem) {
+      return problem
+    }
+  }
+  if (entry.launchArgs !== undefined) {
+    const problem = validateLaunchArgs(entry.launchArgs, index)
+    if (problem) {
+      return problem
+    }
+  }
+  return null
+}
+
+function validateSuccession(raw: unknown, index: number): string | null {
+  if (typeof raw !== 'object' || raw === null) {
+    return `chairs[${index}].succession must be an object when present`
+  }
+  const succession = raw as Record<string, unknown>
+  if (typeof succession.enabled !== 'boolean') {
+    return `chairs[${index}].succession.enabled must be a boolean`
+  }
+  if (!isNonEmptyString(succession.charterPath)) {
+    return `chairs[${index}].succession.charterPath must be a non-empty string`
+  }
+  if (
+    succession.charterMode !== undefined &&
+    succession.charterMode !== 'reference' &&
+    succession.charterMode !== 'embed'
+  ) {
+    return `chairs[${index}].succession.charterMode must be "reference" or "embed"`
+  }
+  return null
+}
+
+function validateLaunchArgs(raw: unknown, index: number): string | null {
+  if (!Array.isArray(raw)) {
+    return `chairs[${index}].launchArgs must be an array of strings`
+  }
+  for (let i = 0; i < raw.length; i += 1) {
+    const element = raw[i]
+    if (typeof element !== 'string') {
+      return `chairs[${index}].launchArgs[${i}] must be a string`
+    }
+    if (element.includes('\n') || element.includes('\r')) {
+      return `chairs[${index}].launchArgs[${i}] must not contain a newline`
+    }
   }
   return null
 }

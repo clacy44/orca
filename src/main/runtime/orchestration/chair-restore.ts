@@ -43,6 +43,12 @@ export type ChairRestoreRequest = {
   role?: string
   model?: string
   effort?: string
+  // [S10-22a Wave 2 contract, D-R217] manifest `launchArgs`, passed verbatim after the agent's
+  // own args — same shape chair-succession-hold.ts's `launchSuccessor` passes to
+  // `createAgentSession`. `ensureAgentSession`'s `agentArgs` is a single string (not an array);
+  // elements are joined with one space each, so an element containing a space is not supported
+  // in slice 1 (documented, not silently mangled — see the launch call below).
+  launchArgs?: string[]
 }
 export type ChairRestoreResult =
   | {
@@ -340,6 +346,9 @@ export async function requestChairRestore(
         agent: 'claude',
         providerSession: { key: 'session_id', id: request.sessionId },
         presentation: 'background',
+        ...(request.launchArgs && request.launchArgs.length > 0
+          ? { agentArgs: request.launchArgs.join(' ') }
+          : {}),
         ...(request.model || request.effort
           ? {
               launchPreferences: {

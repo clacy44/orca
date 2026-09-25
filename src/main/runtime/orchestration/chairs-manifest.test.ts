@@ -71,4 +71,42 @@ describe('parseChairsManifest', () => {
     expect(parseChairsManifest(null).ok).toBe(false)
     expect(parseChairsManifest({ version: 1, chairs: 'nope' }).ok).toBe(false)
   })
+
+  it('accepts succession and launchArgs, and a manifest carrying both survives parse -> JSON.stringify unchanged', () => {
+    const raw = {
+      version: 1,
+      chairs: [
+        baseEntry({
+          succession: { enabled: true, charterPath: '/repo/CHARTER.md', charterMode: 'embed' },
+          launchArgs: ['--autocompact', '200000']
+        })
+      ]
+    }
+    const result = parseChairsManifest(raw)
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(JSON.stringify(result.manifest)).toBe(JSON.stringify(raw))
+    }
+  })
+
+  it('refuses succession.enabled non-boolean, succession.charterPath missing, and a launchArgs element with a newline', () => {
+    expect(
+      parseChairsManifest({
+        version: 1,
+        chairs: [baseEntry({ succession: { enabled: 'yes', charterPath: '/x' } })]
+      }).ok
+    ).toBe(false)
+    expect(
+      parseChairsManifest({
+        version: 1,
+        chairs: [baseEntry({ succession: { enabled: true } })]
+      }).ok
+    ).toBe(false)
+    expect(
+      parseChairsManifest({
+        version: 1,
+        chairs: [baseEntry({ launchArgs: ['ok', 'bad\narg'] })]
+      }).ok
+    ).toBe(false)
+  })
 })

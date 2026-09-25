@@ -252,4 +252,33 @@ describe('executeChairsRestorePlan', () => {
     const summary = await runChairsRestore(m, deps)
     expect(summary.rows[0]).toMatchObject({ attested: null })
   })
+
+  // [S10-22a Wave 2 contract, D-R217] launchArgs threads verbatim from the manifest entry into
+  // requestChairRestore's request.
+  it('threads manifest launchArgs verbatim into requestChairRestore', async () => {
+    const seen: (string[] | undefined)[] = []
+    const { deps } = fakeDeps({
+      requestChairRestore: async (request) => {
+        seen.push(request.launchArgs)
+        return {
+          ok: true,
+          paneKey: 'tab:a',
+          agentId: 'agent-a',
+          holderPaneKey: null,
+          adoptionSignal: null
+        }
+      }
+    })
+    const m = manifest([
+      {
+        name: 'a',
+        worktree: 'path:/repo/a',
+        agent: 'claude',
+        conversationId: 'sess-a',
+        launchArgs: ['--autocompact', '200000']
+      }
+    ])
+    await runChairsRestore(m, deps)
+    expect(seen).toEqual([['--autocompact', '200000']])
+  })
 })

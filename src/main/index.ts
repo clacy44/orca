@@ -187,6 +187,8 @@ import {
   type RestoreSweepSummary
 } from './startup/restore-registered-agent-panes'
 import { acquireRestoreSweepLock, releaseRestoreSweepLock } from './runtime/restore-sweep-lock'
+import { scanSuccessionsAtStartup } from './runtime/orchestration/chair-succession-startup-scan'
+import { loadRetiredHandlesIndexSync } from './runtime/orchestration/chair-succession-retired-index'
 import { resolveResumeTranscript } from './startup/resolve-resume-transcript'
 import { createWslCliReconciliationStartupBarrier } from './startup/wsl-cli-reconciliation-startup-barrier'
 import { getDevInstanceIdentity } from './startup/dev-instance-identity'
@@ -1152,6 +1154,17 @@ async function runStartupRestoreSweepBody(runtimeService: OrcaRuntimeService): P
     logRestoreSweepDeferrals(summary)
   } catch (error) {
     console.error('[restore-sweep] HARNESS: the startup restore sweep threw:', error)
+  }
+  // [S10-22a Wave 2 contract, "Startup scan (A10)"] Thin call site beside the ordinary pane
+  // restore sweep above — never launches anything (see chair-succession-startup-scan.ts). The
+  // retired-handle mail-rewrite index (Mail A3) is loaded from the same `<ORCA_HOME>/chairs/`
+  // tree in the same place.
+  try {
+    const orcaHome = join(os.homedir(), '.orca')
+    loadRetiredHandlesIndexSync(orcaHome)
+    await scanSuccessionsAtStartup({ runtime: runtimeService, orcaHome })
+  } catch (error) {
+    console.error('[chair-succession] HARNESS: the startup succession scan threw:', error)
   }
 }
 
