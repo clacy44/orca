@@ -16,7 +16,8 @@ vi.mock('child_process', () => ({
 import {
   bestEffortRestrictWindowsPath,
   restrictWindowsPathSync,
-  resetSecureFileWindowsUserSidForTests
+  resetSecureFileWindowsUserSidForTests,
+  buildWindowsRestrictAclScriptForTests
 } from './secure-path-windows-acl'
 
 const VALID_SID = 'S-1-5-21-1000'
@@ -372,5 +373,50 @@ describe('secure-path-windows-acl P1/F4 (P1 REPAIR)', () => {
 
       expect(verifyBeforeSetAclViolations(mutated).alreadyRestrictedFalseOutsideCatch).toBe(true)
     })
+  })
+
+  // G1 attempt-4 blocking 2(a): the syntax/decision-table/acl/secure-file tests all decode the
+  // TEST-ONLY builder's own output (buildWindowsRestrictAclScriptForTests), never the payload
+  // either launcher actually encodes (:55-63 above) — a launcher-only mutation (e.g. appending
+  // unparseable text, or neutralising the pre-check only in the encoded copy) survives all four
+  // files untouched. Pin the two payloads to the same builder output directly.
+  describe('launcher payload equals the test-only builder (G1 attempt-4 blocking 2a)', () => {
+    it.each([
+      ['file', false],
+      ['directory', true]
+    ] as const)(
+      'async launcher payload for a %s equals buildWindowsRestrictAclScriptForTests',
+      async (_label, isDirectory) => {
+        const targetPath = isDirectory
+          ? 'C:\\Users\\me\\.orca'
+          : 'C:\\Users\\me\\.orca\\secret.json'
+        await bestEffortRestrictWindowsPath(targetPath, isDirectory)
+        const call = execFileMock.mock.calls.find((c) => String(c[0]).endsWith('powershell.exe'))
+        expect(call).toBeDefined()
+        const shipped = decodeEncodedCommand(call![1] as string[])
+        const expected = buildWindowsRestrictAclScriptForTests(targetPath, VALID_SID, isDirectory)
+        expect(shipped).toBe(expected)
+      }
+    )
+
+    it.each([
+      ['file', false],
+      ['directory', true]
+    ] as const)(
+      'sync launcher payload for a %s equals buildWindowsRestrictAclScriptForTests',
+      (_label, isDirectory) => {
+        const targetPath = isDirectory
+          ? 'C:\\Users\\me\\.orca'
+          : 'C:\\Users\\me\\.orca\\secret.json'
+        restrictWindowsPathSync(targetPath, isDirectory)
+        const call = execFileSyncMock.mock.calls.find((c) =>
+          String(c[0]).endsWith('powershell.exe')
+        )
+        expect(call).toBeDefined()
+        const shipped = decodeEncodedCommand(call![1] as string[])
+        const expected = buildWindowsRestrictAclScriptForTests(targetPath, VALID_SID, isDirectory)
+        expect(shipped).toBe(expected)
+      }
+    )
   })
 })

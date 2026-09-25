@@ -75,4 +75,27 @@ describe('secure-path-windows-acl script syntax (G1 round-3 item 1)', () => {
       expect(errorCount, detail).toBe(0)
     })
   })
+
+  // G1 attempt-4 residuals (cheap): the tests above parse with PowerShell 7, but production
+  // runs Windows PowerShell 5.1, which lacks the null-coalescing (??), null-conditional (?.),
+  // ternary (?:) and short-circuit (&&, ||) operators — a 7-only construct would parse here and
+  // still fail silently on 5.1. Denylist them directly in the emitted text.
+  it('item 4: the emitted script uses no PowerShell-7-only operators', () => {
+    const fileScript = buildWindowsRestrictAclScriptForTests(
+      'C:\\Users\\me\\.orca\\secret.json',
+      VALID_SID,
+      false
+    )
+    const dirScript = buildWindowsRestrictAclScriptForTests('C:\\Users\\me\\.orca', VALID_SID, true)
+
+    for (const script of [fileScript, dirScript]) {
+      expect(script).not.toContain('??')
+      expect(script).not.toContain('?.')
+      expect(script).not.toContain('&&')
+      expect(script).not.toContain('||')
+      // Ternary `cond ? a : b` — the script has no `?` at all outside this construct today, so
+      // a bare '?' is the denylist signal.
+      expect(script).not.toContain('?')
+    }
+  })
 })

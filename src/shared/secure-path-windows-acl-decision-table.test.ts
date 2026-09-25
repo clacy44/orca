@@ -148,7 +148,23 @@ const FILE_CASES: FileCase[] = [
     specs: [spec(VALID_SID), spec('S-1-5-18'), spec('S-1-5-32-544', RX)],
     expectSetAcl: 1
   },
-  { name: 'protected EMPTY', protectedFlag: true, specs: [], expectSetAcl: 1 }
+  { name: 'protected EMPTY', protectedFlag: true, specs: [], expectSetAcl: 1 },
+  // G1 attempt-4 blocking 2(b): no existing case isolates the allowed-SID check — the two
+  // extra-SID cases above are either unprotected (RX, caught earlier by the inheritance
+  // throw) or read-only, so a mutant that widens the allowed set or keys the check on the
+  // wrong SID never gets exercised (M-a7b, M-a7c both survive all four files).
+  {
+    name: 'protected + Users FullControl',
+    protectedFlag: true,
+    specs: [...ownerOnly(), spec('S-1-5-32-545', FC)],
+    expectSetAcl: 1
+  },
+  {
+    name: 'protected + Everyone FullControl',
+    protectedFlag: true,
+    specs: [...ownerOnly(), spec('S-1-1-0', FC)],
+    expectSetAcl: 1
+  }
 ]
 
 function replaceOnce(haystack: string, needle: string, replacement: string): string {
@@ -198,6 +214,21 @@ const MUTATIONS: Record<string, (script: string) => string> = {
       script,
       '$foundCurrentUserFullControl = $false',
       '$foundCurrentUserFullControl = $true'
+    ),
+  // G1 attempt-4 blocking 2(b): the allowed-SID check keyed on the wrong SID — never throws.
+  'M-a7b': (script) =>
+    replaceOnce(
+      script,
+      '    if (-not $allowedSids.ContainsKey($sid)) {\n',
+      '    if (-not $allowedSids.ContainsKey($currentUserSid)) {\n'
+    ),
+  // G1 attempt-4 blocking 2(b): the pre-check silently admits BUILTIN\Users while the rebuild
+  // (which reads $allowedSidTexts, not $allowedSids) is unchanged.
+  'M-a7c': (script) =>
+    replaceOnce(
+      script,
+      'foreach ($sidText in $allowedSidTexts) {\n  $allowedSids[$sidText] = $true\n}\n',
+      "foreach ($sidText in $allowedSidTexts) {\n  $allowedSids[$sidText] = $true\n}\n$allowedSids['S-1-5-32-545'] = $true\n"
     )
 }
 
@@ -209,7 +240,9 @@ const KILL_TABLE: { mutation: string; caseName: string }[] = [
   { mutation: 'M-a8', caseName: 'inherited owner-only (unprotected)' },
   { mutation: 'M-a9', caseName: 'protected Admins RX' },
   { mutation: 'M-a10', caseName: 'protected + user DENY' },
-  { mutation: 'M-a11', caseName: 'protected SYSTEM+Admins only (no user ACE)' }
+  { mutation: 'M-a11', caseName: 'protected SYSTEM+Admins only (no user ACE)' },
+  { mutation: 'M-a7b', caseName: 'protected + Everyone FullControl' },
+  { mutation: 'M-a7c', caseName: 'protected + Users FullControl' }
 ]
 
 describe('secure-path-windows-acl decision-table harness (G1 round-3 item 3, pwsh-gated)', () => {
@@ -254,7 +287,7 @@ describe('secure-path-windows-acl decision-table harness (G1 round-3 item 3, pws
   )
 
   it.skipIf(!pwshAvailable)(
-    `the harness kills M-a4, M-a5, M-a6, M-a8, M-a9, M-a10 and M-a11${pwshSkipNote}`,
+    `the harness kills M-a4, M-a5, M-a6, M-a7b, M-a7c, M-a8, M-a9, M-a10 and M-a11${pwshSkipNote}`,
     () => {
       const script = buildWindowsRestrictAclScriptForTests(
         'C:\\Users\\me\\.orca\\secret.json',
@@ -271,7 +304,12 @@ describe('secure-path-windows-acl decision-table harness (G1 round-3 item 3, pws
           expect(mutatedResult.final, mutation).not.toBe(FINAL_HARDENED)
           expect(mutatedResult.final, mutation).toContain('S-1-5-32-545')
         } else {
-          expect(mutatedResult.setAclCalls, mutation).not.toBe(testCase.expectSetAcl)
+          // G1 attempt-4 nit: `not.toBe(expected)` also passes if the mutant crashes and
+          // returns null (setAclCalls: null !== 1). Assert the specific wrong outcome instead —
+          // every KILL_TABLE case here neutralizes the pre-check's throw, so the wrongly
+          // "already restricted" DACL skips Set-Acl entirely (0, not the expected 1).
+          expect(testCase.expectSetAcl, mutation).toBe(1)
+          expect(mutatedResult.setAclCalls, mutation).toBe(0)
         }
       }
     }
