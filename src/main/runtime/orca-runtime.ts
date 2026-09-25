@@ -28326,12 +28326,18 @@ export class OrcaRuntimeService {
    * `agentArgs`/`launchConfig.agentArgs`/a caller-supplied raw command — the surfaces this
    * function's THREE callers can see. Admission (§C.4, `agent-launch-admission.ts`) is the second,
    * unconditional line for the surfaces this one cannot: the built command string and
-   * `launchConfig.agentCommand` (D-R101 F-3's three channels). */
+   * `launchConfig.agentCommand` (D-R101 F-3's three channels). [G1-10z attempt-2 N11 repair]
+   * `appendAgentArgs` is a fourth surface this function can see — it is appended after the lane's
+   * own agentArgs (chair restore/succession launches, `appendAgentArgs()` below) but this refusal
+   * previously read only `agentArgs`, so a `--resume`/`-r`/`--continue`/`-c`/`--session-id`/
+   * `--fork-session` placed there instead reached the plan unrefused. Scanned as its own subject
+   * now, alongside `agentArgs`/`command`. */
   private assertNoCoveredLaunchSelectorAtRequestBoundary(args: {
     agent: TuiAgent | undefined
     shell: AgentStartupShell | undefined
     agentArgs?: string | null
     command?: string | null
+    appendAgentArgs?: string | null
   }): void {
     if (!isCoveredLaunchAgent(args.agent)) {
       return
@@ -28340,7 +28346,7 @@ export class OrcaRuntimeService {
     // on a remote host, where POSIX word-splitting rules are the correct tokenizer (same default
     // `agent-launch-classification.ts#resolveAdmissionShell` uses for a non-win32 platform).
     const shell = args.shell ?? 'posix'
-    for (const subject of [args.agentArgs, args.command]) {
+    for (const subject of [args.agentArgs, args.command, args.appendAgentArgs]) {
       if (!subject) {
         continue
       }
@@ -28409,14 +28415,19 @@ export class OrcaRuntimeService {
     this.assertNoCoveredLaunchSelectorAtRequestBoundary({
       agent: request.agent,
       shell,
-      agentArgs: request.agentArgs
+      agentArgs: request.agentArgs,
+      appendAgentArgs: request.appendAgentArgs
     })
     // Why resolved here and not at the createTerminal call below: the launch is BUILT here, and
     // a peer's host-wide defaults may not shape this principal's lane (§2 rows 13/14).
     const credentialLane = this.resolveCallerCredentialLane(caller.pairedDeviceId)
+    // [G1-10z attempt-2 N11 repair] the lane-args check previously read only `agentArgs` —
+    // `appendAgentArgs()` here mirrors the append-after-host-defaults construction below so a
+    // covered selector placed in `appendAgentArgs` is scanned exactly as if the caller had put
+    // it in `agentArgs` directly.
     assertLaneAgentArgsAllowed({
       lane: credentialLane,
-      agentArgs: request.agentArgs,
+      agentArgs: appendAgentArgs(request.agentArgs ?? '', request.appendAgentArgs),
       platform
     })
     const laneScoped = laneScopedAgentLaunchInputs({
@@ -28505,6 +28516,9 @@ export class OrcaRuntimeService {
           request.promptDelivery ?? null,
           request.agentArgs ?? null,
           request.agentArgs === undefined ? 'host-default' : 'client-override',
+          // [G1-10z attempt-2 N11 repair] omitted before — a replay whose only difference was
+          // `appendAgentArgs` fingerprinted identically and was treated as the same operation.
+          request.appendAgentArgs ?? null,
           request.launchPreferences?.model ?? null,
           request.launchPreferences?.effort ?? null,
           request.launchPreferences?.mode ?? null,
@@ -28571,6 +28585,8 @@ export class OrcaRuntimeService {
             request.promptDelivery ?? null,
             request.agentArgs ?? null,
             request.agentArgs === undefined ? 'host-default' : 'client-override',
+            // [G1-10z attempt-2 N11 repair] omitted before — see requestFingerprint above.
+            request.appendAgentArgs ?? null,
             request.launchPreferences?.model ?? null,
             request.launchPreferences?.effort ?? null,
             request.launchPreferences?.mode ?? null,
@@ -28599,12 +28615,15 @@ export class OrcaRuntimeService {
       this.assertNoCoveredLaunchSelectorAtRequestBoundary({
         agent: request.agent,
         shell,
-        agentArgs: request.agentArgs
+        agentArgs: request.agentArgs,
+        appendAgentArgs: request.appendAgentArgs
       })
       const credentialLane = this.resolveCallerCredentialLane(caller.pairedDeviceId)
+      // [G1-10z attempt-2 N11 repair] same appendAgentArgs merge as ensureAgentSession's lane-args
+      // check above.
       assertLaneAgentArgsAllowed({
         lane: credentialLane,
-        agentArgs: request.agentArgs,
+        agentArgs: appendAgentArgs(request.agentArgs ?? '', request.appendAgentArgs),
         platform
       })
       const laneScoped = laneScopedAgentLaunchInputs({

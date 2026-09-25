@@ -200,6 +200,26 @@ describe('agent-session create operation ledger', () => {
     expect(createTerminal).toHaveBeenCalledOnce()
   })
 
+  // [G1-10z attempt-2 N11 repair] the fingerprint omitted `appendAgentArgs` before the repair —
+  // a replay whose only difference was `appendAgentArgs` fingerprinted identically to the
+  // original and was silently treated as the same operation instead of conflicting.
+  it('conflicts on a changed appendAgentArgs, not just agentArgs', async () => {
+    const runtime = createRuntime()
+    vi.spyOn(runtime, 'createTerminal').mockResolvedValue(terminal())
+    const id = operationId()
+
+    await expect(
+      runtime.createAgentSession(request(id, { appendAgentArgs: '--autocompact 200000' }), {
+        clientId: 'device-a'
+      })
+    ).resolves.toMatchObject({ disposition: 'created' })
+    await expect(
+      runtime.createAgentSession(request(id, { appendAgentArgs: '--autocompact 999999' }), {
+        clientId: 'device-a'
+      })
+    ).rejects.toThrow('agent_session_operation_conflict')
+  })
+
   it('isolates operation ids by authenticated caller', async () => {
     const runtime = createRuntime()
     const createTerminal = vi.spyOn(runtime, 'createTerminal').mockResolvedValue(terminal())

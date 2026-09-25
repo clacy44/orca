@@ -1,9 +1,14 @@
-// [S10-22a Wave 2 contract, D-R215 §Protocol step 6 A3; G1-10z B7 repair] End-to-end proof that
-// the retired-handle -> agent:<id> rewrite happens in the RPC address-resolution block (send,
-// reply, peer-question), BEFORE the C4 attested-sender checks and the wake — not in the choke
-// (message-gate-writer.ts), which ran too late to enforce either. Mirrors
-// orchestration-bare-name-send.test.ts's fixture shape.
+// [S10-22a Wave 2 contract, D-R215 §Protocol step 6 A3; G1-10z attempt-2 N2 repair] End-to-end
+// proof that the retired-handle -> agent:<id> rewrite happens in the RPC address-resolution
+// block (send, reply, peer-question), BEFORE the display-name/getTerminalPaneKey gate, the C4
+// attested-sender checks, and the wake — not in the choke (message-gate-writer.ts), which ran
+// too late to enforce either. Real handles are minted as `term_${randomUUID()}` (orca-runtime.ts
+// issueHandle/issuePtyHandle) — 41 chars with an underscore, so they never match
+// DISPLAY_NAME_PATTERN. A rewrite gated on that pattern (attempt-2 N2) never fires for a real
+// retired handle; only a display-name-shaped fixture (kept below as a control) would pass.
+// Mirrors orchestration-bare-name-send.test.ts's fixture shape.
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { randomUUID } from 'node:crypto'
 import { ORCHESTRATION_METHODS } from './orchestration'
 import { OrchestrationDb } from '../../orchestration/db'
 import { OrcaRuntimeService } from '../../orca-runtime'
@@ -13,7 +18,9 @@ import {
   refreshRetiredHandlesIndexSync
 } from '../../orchestration/chair-succession-retired-index'
 
-const RETIRED_HANDLE = 'chair-succ-incumbent-handle'
+const DISPLAY_NAME_RETIRED_HANDLE = 'chair-succ-incumbent-handle'
+const REAL_RETIRED_HANDLE = `term_${randomUUID()}`
+const RETIRED_HANDLE = DISPLAY_NAME_RETIRED_HANDLE
 const CHAIR_NAME = 'chair-succ'
 
 describe('B7 repair: retired-handle resolution runs in the RPC address-resolution block (not the choke)', () => {
@@ -30,7 +37,7 @@ describe('B7 repair: retired-handle resolution runs in the RPC address-resolutio
     return found
   }
 
-  async function writeRetiredHandlesFixture(): Promise<void> {
+  async function writeRetiredHandlesFixture(handle: string = RETIRED_HANDLE): Promise<void> {
     const { mkdtemp, mkdir, writeFile } = await import('node:fs/promises')
     const { tmpdir } = await import('node:os')
     const { join } = await import('node:path')
@@ -39,9 +46,7 @@ describe('B7 repair: retired-handle resolution runs in the RPC address-resolutio
     await mkdir(chairDir, { recursive: true })
     await writeFile(
       join(chairDir, 'retired-handles.json'),
-      JSON.stringify([
-        { handle: RETIRED_HANDLE, succession: 'succ_test000001', at: '2026-01-01T00:00:00Z' }
-      ])
+      JSON.stringify([{ handle, succession: 'succ_test000001', at: '2026-01-01T00:00:00Z' }])
     )
     refreshRetiredHandlesIndexSync(orcaHome)
     cleanupOrcaHome = async () => {
@@ -191,47 +196,53 @@ describe('B7 repair: retired-handle resolution runs in the RPC address-resolutio
     await cleanupOrcaHome?.()
   })
 
-  it('send: a `to` matching a retired chair handle resolves to agent:<successor>, runs C4 sender attestation, and wakes the resolved handle', async () => {
-    await writeRetiredHandlesFixture()
-    const { callerHandle, callerPaneKey, successorPaneKey, successorAgentId } = await setup()
+  it.each([
+    ['positive control: display-name-shaped retired handle', DISPLAY_NAME_RETIRED_HANDLE],
+    ['real term_<uuid> retired handle (attempt-2 N2)', REAL_RETIRED_HANDLE]
+  ])(
+    'send: a `to` matching a retired chair handle (%s) resolves to agent:<successor>, runs C4 sender attestation, and wakes a REAL parked waiter',
+    async (_label, retiredHandle) => {
+      await writeRetiredHandlesFixture(retiredHandle)
+      const { callerHandle, callerPaneKey, successorPaneKey, successorAgentId } = await setup()
 
-    const wakeSpy = vi.spyOn(runtime, 'notifyMessageArrived')
+      // A REAL parked waiter — not a spy on notifyMessageArrived — proves the resolved handle
+      // is the one the send path actually wakes (p2).
+      const waiting = runtime.waitForMessage(`agent:${successorAgentId}`, {
+        typeFilter: ['status'],
+        timeoutMs: 5_000
+      })
 
-    const ctx: RpcContext = {
-      runtime,
-      orchestrationCompatibilityEvidence: {
-        terminalHandle: callerHandle,
-        paneKey: callerPaneKey,
-        launchToken: 'token-caller'
-      }
-    } as RpcContext
+      const ctx: RpcContext = {
+        runtime,
+        orchestrationCompatibilityEvidence: {
+          terminalHandle: callerHandle,
+          paneKey: callerPaneKey,
+          launchToken: 'token-caller'
+        }
+      } as RpcContext
 
-    const m = method('orchestration.send')
-    const sent = (await m.handler(
-      m.params!.parse({
-        from: callerHandle,
-        to: RETIRED_HANDLE,
-        subject: 'status after succession'
-      }),
-      ctx
-    )) as { message: { id: string } }
+      const m = method('orchestration.send')
+      const sent = (await m.handler(
+        m.params!.parse({
+          from: callerHandle,
+          to: retiredHandle,
+          subject: 'status after succession'
+        }),
+        ctx
+      )) as { message: { id: string } }
 
-    const stored = db.getMessageById(sent.message.id)
-    // B7: the row lands in agent:<id>, not the stale retired handle.
-    expect(stored?.to_handle).toBe(`agent:${successorAgentId}`)
-    expect(stored?.recipient_pane_key).toBe(successorPaneKey)
-    // C4: the sender's real directory identity was stamped (attested, not the choke's bare from).
-    expect(stored?.sender_agent_id).not.toBeNull()
+      const stored = db.getMessageById(sent.message.id)
+      // B7/N2: the row lands in agent:<id>, not the stale retired handle.
+      expect(stored?.to_handle).toBe(`agent:${successorAgentId}`)
+      expect(stored?.recipient_pane_key).toBe(successorPaneKey)
+      // C4: the sender's real directory identity was stamped (attested, not the choke's bare from).
+      expect(stored?.sender_agent_id).not.toBeNull()
 
-    // The wake is keyed to the RESOLVED handle — a parked successor waiting on
-    // `agent:<successorAgentId>` (never the stale retired handle) is the one notified.
-    expect(wakeSpy).toHaveBeenCalledWith(
-      `agent:${successorAgentId}`,
-      'status',
-      expect.any(String),
-      null
-    )
-  })
+      // The real waiter parked on the resolved `agent:<successorAgentId>` handle actually wakes.
+      const result = await waiting
+      expect(result).toBe('notified')
+    }
+  )
 
   it('send: a forged --from against a retired-handle target is refused forbidden (proves C4 ran, not skipped)', async () => {
     await writeRetiredHandlesFixture()

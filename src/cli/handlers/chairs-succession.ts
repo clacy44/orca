@@ -40,6 +40,11 @@ type SuccessionAcceptResult = {
   generation: number
   resumeContext?: string
   obligations: SuccessionAcceptObligations
+  /** G1 repair N7: a post-takeover step failed but was audited and swallowed, not thrown. */
+  warnings?: string[]
+  /** G1 repair N16: the manifest write failed — a reboot's `chairs restore` will resume the
+   * pre-succession session until this is fixed by hand. */
+  manifestWriteFailed?: boolean
 }
 
 type ResumeContextResult =
@@ -105,6 +110,25 @@ const SUCCESSION_NEXT_STEPS: Record<string, string[]> = {
   ],
   succession_takeover_failed: [
     'Both panes may be down: run `orca chairs restore` twice, ten seconds apart, then retry from the restored chair.'
+  ],
+  // G1 repair round (attempt 2), N8: five refusals reachable after the wave-2 pass with no map
+  // entry — the runtime sent no `nextSteps` for any of them, so a caller saw a bare error code.
+  succession_incumbent_exit_timeout: [
+    'stand down: this pane is not the chair — do not send or receive chair traffic from it',
+    'ask the incumbent (or a human) to check whether the old pane is actually dead',
+    'once confirmed dead, a fresh `orca chairs succeed` from the incumbent (if reachable) or manual recovery can retry'
+  ],
+  succession_run_moved: [
+    'The incumbent no longer holds the Run this succession was sealed for; ask the incumbent to re-run `orca chairs succeed` against its CURRENT Run.'
+  ],
+  succession_unknown_ack: [
+    '--ack named an id with no outstanding delivery; drop it (or fix the typo) and retry.'
+  ],
+  succession_lane_unsupported: [
+    'Chair succession (slice 1) only supports the host default lane; move this pane off its named credential lane before retrying.'
+  ],
+  resume_context_too_large: [
+    'Shorten the checkpoint or the board state so the rendered resume context fits the size cap, then retry.'
   ]
 }
 
@@ -137,6 +161,12 @@ function formatSuccessionAccept(result: SuccessionAcceptResult): string {
     `ACCEPTED ${result.successionId} chair=${result.chair} agent=${result.agentId} ` +
       `run=${result.runId} generation=${result.generation}`
   ]
+  // G1 repair N7/N16: a post-takeover step (bindRun, retired-handle append, the manifest write,
+  // the confirm transition, the post-confirm purge) can fail without failing the whole accept —
+  // print what to check by hand rather than staying silent about it.
+  if (result.warnings && result.warnings.length > 0) {
+    lines.push(`WARNINGS ${result.warnings.join(',')}`)
+  }
   if (result.resumeContext) {
     lines.push('', result.resumeContext)
   }

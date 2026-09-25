@@ -47,9 +47,11 @@ function sealedInput() {
 function fakeRuntime(overrides: {
   live?: Set<string>
   closed?: string[]
+  cancelledWaiters?: string[]
 }): SuccessionStartupScanRuntime {
   const live = overrides.live ?? new Set<string>()
   const closed = overrides.closed ?? []
+  const cancelledWaiters = overrides.cancelledWaiters ?? []
   return {
     getAgentDirectoryLivenessSignals: (paneKey: string) => ({
       terminalHandle: live.has(paneKey) ? `handle:${paneKey}` : null,
@@ -58,12 +60,18 @@ function fakeRuntime(overrides: {
     closeTerminal: async (handle: string) => {
       closed.push(handle)
       return { closed: true } as never
+    },
+    cancelMessageWaiters: (handle: string) => {
+      cancelledWaiters.push(handle)
     }
   } as unknown as SuccessionStartupScanRuntime
 }
 
 function dbFacade(): SuccessionStartupScanDb {
-  return { getAgentByName: (hostId, name) => db.getAgentByName(hostId, name) }
+  return {
+    getAgentByName: (hostId, name) => db.getAgentByName(hostId, name),
+    bindRun: (params) => db.bindRun(params)
+  }
 }
 
 beforeEach(() => {
@@ -255,6 +263,68 @@ describe('scanSuccessionsAtStartup', () => {
 
     const after = await read(storeDeps, 'chair-confirmed', meta.id)
     expect(after?.state).toBe('confirmed')
+  })
+
+  // [G1-10z attempt-2 N10 repair] the startup confirm previously only confirmed the record and
+  // the manifest — the Run stayed bound to the dead incumbent pane, and the retired handle was
+  // never appended to retired-handles.json (only `meta.retiredHandle`, set by the `confirmed`
+  // transition itself, which this test does not rely on).
+  it('M4/N10: the startup confirm rebinds the Run to the successor and appends the retired handle', async () => {
+    const chair = 'chair-startup-confirm-tail'
+    const run = db.createRun({
+      objective: 'ship it',
+      coordinatorHandle: 'handle-incumbent',
+      coordinatorPaneKey: 'pane-incumbent'
+    })
+    const meta = await createSealed(storeDeps, chair, { ...sealedInput(), runId: run.id })
+    await transition(storeDeps, chair, meta.id, 'launching', {
+      successor: {
+        paneKey: 'pane-successor',
+        terminalHandle: 'handle-successor',
+        sessionId: 'sess-2'
+      }
+    })
+    const registered = db.upsertAgentByPaneSuffix({
+      displayName: chair,
+      role: null,
+      hostId: 'local',
+      paneKey: 'pane-successor',
+      terminalHandle: 'handle-successor',
+      processIncarnation: null,
+      worktreeId: null,
+      worktreePath: null,
+      branch: null,
+      title: null,
+      agentLabel: null,
+      originHandle: 'handle-successor',
+      originHostId: 'local'
+    })
+    if (registered.outcome === 'name_taken') {
+      throw new Error('fixture setup failed')
+    }
+    const cancelledWaiters: string[] = []
+    const runtime = fakeRuntime({ live: new Set(['pane-successor']), cancelledWaiters })
+
+    await scanSuccessionsAtStartup({ runtime, db: dbFacade(), orcaHome: tempDir })
+
+    const after = await read(storeDeps, chair, meta.id)
+    expect(after?.state).toBe('confirmed')
+
+    // The Run now binds to the successor, not the dead incumbent.
+    const boundRun = db.getRun(run.id)
+    expect(boundRun?.coordinator_handle).toBe('handle-successor')
+    expect(boundRun?.coordinator_pane_key).toBe('pane-successor')
+    expect(cancelledWaiters).toContain(`run:${run.id}`)
+
+    // The retired handle landed in retired-handles.json, not just meta.retiredHandle.
+    const retiredHandlesPath = join(tempDir, 'chairs', chair, 'retired-handles.json')
+    const retired = JSON.parse(readFileSync(retiredHandlesPath, 'utf8')) as {
+      handle: string
+      succession: string
+    }[]
+    expect(retired).toEqual([
+      { handle: 'handle-incumbent', succession: meta.id, at: expect.any(String) }
+    ])
   })
 
   it('a missing chairs/ directory is a silent no-op', async () => {

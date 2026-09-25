@@ -181,6 +181,26 @@ describe('S10-22a chair-succession-store: lock contention between two createSeal
     const active = await listActive(deps, 'chair-lock')
     expect(active.map((m) => m.id)).toEqual([firstMeta.id])
   })
+
+  // G1 repair N5: `confirming` must count as in flight too — both `listActive`'s read and
+  // `createSealed`'s in-lock re-check previously stopped at `sealed`/`launching`, admitting a
+  // second seal while an accept was still finishing its takeover.
+  it('N5: a record in `confirming` still counts as in flight for both listActive and a concurrent createSealed', async () => {
+    const first = await createSealed(deps, 'chair-confirming', sealedInput())
+    await transition(deps, 'chair-confirming', first.id, 'launching', {
+      successor: { paneKey: 'tabB:b', terminalHandle: 'term_b' }
+    })
+    await transition(deps, 'chair-confirming', first.id, 'confirming')
+
+    const active = await listActive(deps, 'chair-confirming')
+    expect(active.map((m) => m.id)).toEqual([first.id])
+
+    await expect(createSealed(deps, 'chair-confirming', sealedInput())).rejects.toMatchObject({
+      code: 'succession_in_flight',
+      successionId: first.id,
+      state: 'confirming'
+    })
+  })
 })
 
 describe('S10-22a chair-succession-store: ORCA_HOME injection', () => {

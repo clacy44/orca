@@ -29,6 +29,7 @@ let db: OrchestrationDb
 function fakeRuntime(): ChairSuccessionStartupHookRuntime {
   return {
     closeTerminal: async () => ({ closed: true }) as never,
+    cancelMessageWaiters: () => {},
     getOrchestrationDb: () => db
   } as unknown as ChairSuccessionStartupHookRuntime
 }

@@ -3,11 +3,11 @@
 // for every peer-facing send — so this index is a synchronous, pre-populated cache rather than
 // an IO call on the hot path. Populated once at runtime start (`refreshRetiredHandlesIndexSync`,
 // called from the same startup site `scanSuccessionsAtStartup` is, per the Wave 2 contract) and
-// meant to be refreshed after every `chair-succession-store.ts` `appendRetiredHandle` — this
-// dispatch could not wire that second call site: `chair-succession-accept.ts` (the only current
-// caller of `appendRetiredHandle`) is under another worker's edit lock for this dispatch. Exported
-// here so that worker (or a follow-up) can add one `refreshRetiredHandlesIndexSync(deps.orcaHome)`
-// call right after its own `appendRetiredHandle` — flagged, not silently skipped.
+// refreshed after every `chair-succession-store.ts` `appendRetiredHandle` call — both current
+// callers (`chair-succession-accept.ts`'s confirm tail and this scan's own startup confirm,
+// `chair-succession-startup-scan.ts`'s `confirmAlreadyTakenOver`) call
+// `refreshRetiredHandlesIndexSync(deps.orcaHome)` right after their own `appendRetiredHandle`.
+// [G1-10z attempt-2 N15 header fix]
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 

@@ -1,7 +1,8 @@
-// S10-22a WAVE 2 (D-R215 §Protocol steps 4/7): launch the successor, hold the incumbent's `succeed`
-// call open like a parking wait, and abort (timeout or the incumbent's connection dropping first).
-// The confirm ("Act") tail lives in chair-succession-accept.ts, which calls `settleHold` directly
-// once it finishes — this file never itself transitions a succession to `confirmed`.
+// S10-22a WAVE 2 (D-R215 §Protocol steps 4/7): hold the incumbent's `succeed` call open like a
+// parking wait, and abort (timeout or the incumbent's connection dropping first). The launch
+// itself lives in chair-succession-launch-successor.ts (line ratchet); the confirm ("Act") tail
+// lives in chair-succession-accept.ts, which calls `settleHold` directly once it finishes — this
+// file never itself transitions a succession to `confirmed`.
 //
 // G1 repair B5: `holds` is the SOURCE OF TRUTH for the incumbent's pane/handle/chair/runId once a
 // hold is registered — `getHoldRecord` is what `chair-succession-accept.ts` reads instead of
@@ -9,100 +10,18 @@
 // path; it cannot forge an in-process Map entry). The record is populated from `meta` at
 // `holdSealRequest` registration time, i.e. straight from `sealSuccession`'s own just-created,
 // fully-trusted return value — never from a later disk re-read.
-import { randomBytes } from 'node:crypto'
 import {
   chairLockKey,
   read,
-  transition,
   transitionLocked,
   withPaneLock,
   type ChairSuccessionStoreDeps
 } from './chair-succession-store'
 import type { SuccessionMeta } from './chair-succession-types'
-import type { ManifestEntryWithSuccession } from './chair-succession-manifest-entry'
 import type { ChairSuccessionDeps } from './chair-succession-execute'
 
 function storeDepsFor(deps: ChairSuccessionDeps): ChairSuccessionStoreDeps {
   return { orcaHome: deps.orcaHome }
-}
-
-/** D-R215 §Protocol step 4. `createAgentSession` (orca-runtime.ts:28469 — the primitive
- * `requestChairRestore`'s own `ensureAgentSession` call sits beside, cited in chair-restore.ts)
- * spawns a NEW background tab, first prompt exactly `orca chairs succession-accept <id>`, launch
- * prefs from the manifest. Recording the successor pane/handle/session and transitioning
- * sealed → launching happen in the SAME store write (wave 1's `LEGAL_TRANSITIONS` has no legal
- * launching → launching patch, so there is no earlier point to record a partial successor). A
- * spawn failure aborts immediately (`settleHold`) rather than waiting out the 150 s hold.
- *
- * G1 repair M8: `model`/`effort` fall back to the INCUMBENT's own last-recorded launch prefs
- * (`pref_model`/`pref_effort`) when the manifest entry sets neither — "manifest else the row"
- * (D-R215 §Protocol step 4). Slice 1 never passes a lane (A9); `sealSuccession` now refuses to
- * seal an incumbent that is not already on the host default lane, so the successor always lands
- * on the same (default) lane it would have landed on anyway. */
-export async function launchSuccessor(
-  deps: ChairSuccessionDeps,
-  hostId: string,
-  entry: ManifestEntryWithSuccession,
-  meta: SuccessionMeta
-): Promise<void> {
-  try {
-    const incumbentLaunch = deps.db.newestLaunchForPane(hostId, meta.incumbent.paneKey)
-    const model = entry.model ?? incumbentLaunch?.pref_model ?? undefined
-    const effort = entry.effort ?? incumbentLaunch?.pref_effort ?? undefined
-    const clientOperationId = `${Date.now()}-${randomBytes(16).toString('hex')}`
-    const created = await deps.runtime.createAgentSession({
-      clientOperationId,
-      worktree: entry.worktree,
-      agent: 'claude',
-      prompt: `orca chairs succession-accept ${meta.id}`,
-      promptDelivery: 'auto-submit',
-      ...(entry.launchArgs ? { appendAgentArgs: entry.launchArgs.join(' ') } : {}),
-      ...(model || effort
-        ? {
-            launchPreferences: {
-              ...(model ? { model } : {}),
-              ...(effort ? { effort } : {})
-            }
-          }
-        : {}),
-      presentation: 'background'
-    })
-    const paneKey = created.terminal.paneKey
-    const terminalHandle = created.terminal.handle
-    if (!paneKey) {
-      throw new Error('succession_launch_no_pane_key')
-    }
-    const sessionId = deps.db.newestLaunchForPane(hostId, paneKey)?.session_id
-    await transition(storeDepsFor(deps), meta.chair, meta.id, 'launching', {
-      successor: { paneKey, terminalHandle, sessionId }
-    })
-    // The successor pane is now the record's own — mirror it onto the hold so accept can read it
-    // without a disk re-read (B5).
-    const holdEntry = holds.get(meta.id)
-    if (holdEntry) {
-      holdEntry.record.successor = { paneKey, terminalHandle }
-    }
-    deps.db.writeAgentAudit({
-      agentId: null,
-      actorPaneKey: paneKey,
-      actorHostId: hostId,
-      verb: 'succession_launch',
-      outcome: 'launched',
-      reasonCode: `succession=${meta.id}`.slice(0, 200)
-    })
-  } catch (err) {
-    const reason = `launch_failed:${err instanceof Error ? err.message : String(err)}`.slice(0, 200)
-    await transition(storeDepsFor(deps), meta.chair, meta.id, 'aborted', { abortReason: reason })
-    deps.db.writeAgentAudit({
-      agentId: null,
-      actorPaneKey: meta.incumbent.paneKey,
-      actorHostId: hostId,
-      verb: 'succession_abort',
-      outcome: 'aborted',
-      reasonCode: reason
-    })
-    settleHold(meta.id, { ok: false, code: 'succession_aborted', successionId: meta.id, reason })
-  }
 }
 
 const SEAL_HOLD_TIMEOUT_MS = 150_000
@@ -148,6 +67,19 @@ function clearHold(id: string): void {
 export function getHoldRecord(id: string): HoldRecord | undefined {
   const entry = holds.get(id)
   return entry && !entry.settled ? entry.record : undefined
+}
+
+/** Mirrors the successor pane/handle onto a still-live hold once `launchSuccessor`
+ * (chair-succession-launch-successor.ts) records it in the store — a no-op once
+ * settled/never registered. Keeps `holds` itself private to this module (B5). */
+export function setHoldSuccessor(
+  id: string,
+  successor: { paneKey: string; terminalHandle: string }
+): void {
+  const entry = holds.get(id)
+  if (entry && !entry.settled) {
+    entry.record.successor = successor
+  }
 }
 
 /** Resolves a still-open hold — a no-op once already settled or never registered. The confirm
@@ -229,6 +161,14 @@ export async function holdSealRequest(
         runId: meta.runId
       }
     })
+    // A signal already aborted before the hold registers never fires its 'abort' event (Node's
+    // AbortSignal does not replay past events to a listener added after the fact) — without this
+    // check the hold stays live for the full 150s timeout although the incumbent's connection was
+    // already gone at registration time (chair ruling: "a pre-aborted signal finishes
+    // immediately").
+    if (signal?.aborted) {
+      finish('incumbent_dropped')
+    }
   })
 }
 
@@ -249,10 +189,13 @@ export async function runAbortTail(
 ): Promise<HoldOutcome> {
   return withPaneLock(chairLockKey(chair), async () => {
     const current = await read(storeDepsFor(deps), chair, successionId)
-    if (!current || current.state !== 'launching') {
+    // N1: `sealed` is NOT terminal — createAgentSession may still be in flight (no successor
+    // pane recorded yet). Abort it here too (sealed→aborted is legal); `launchSuccessor`'s own
+    // re-read under this same lock is what closes the pane once it lands.
+    if (!current || (current.state !== 'launching' && current.state !== 'sealed')) {
       return { ok: false, code: 'succession_aborted', successionId, reason: 'already_terminal' }
     }
-    if (current.successor.terminalHandle) {
+    if (current.state === 'launching' && current.successor.terminalHandle) {
       try {
         await deps.runtime.closeTerminal(current.successor.terminalHandle)
       } catch {

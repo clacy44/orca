@@ -538,6 +538,12 @@ function longPollClassOf(request: RpcRequest): LongPollClass | null {
   if (request.method === 'orchestration.chairs.succeed') {
     return 'wait'
   }
+  // N9: successionAccept's worst case (a chair-lock wait up to 30s, plus a bounded 10s exit
+  // wait, plus a manifest-lock wait up to 30s behind a restore) can exceed the 30s socket idle
+  // bound the same way `succeed` above can — same classification, same reason.
+  if (request.method === 'orchestration.chairs.successionAccept') {
+    return 'wait'
+  }
   return null
 }
 

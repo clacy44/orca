@@ -19,7 +19,8 @@ import {
   sealSuccession,
   type ChairSuccessionDeps
 } from '../../orchestration/chair-succession-execute'
-import { holdSealRequest, launchSuccessor } from '../../orchestration/chair-succession-hold'
+import { holdSealRequest } from '../../orchestration/chair-succession-hold'
+import { launchSuccessor } from '../../orchestration/chair-succession-launch-successor'
 import { acceptSuccession } from '../../orchestration/chair-succession-accept'
 import {
   findSuccessionById,
@@ -73,6 +74,15 @@ export const CHAIRS_SUCCESSION_METHODS: RpcMethod[] = [
       const { runtime, orchestrationCompatibilityEvidence, signal } = ctx
       const db = runtime.getOrchestrationDb()
       const caller = resolveCallerAgent(db, runtime, orchestrationCompatibilityEvidence)
+      // G1 repair N12: the attested LIVE handle, not the agents row's stored `terminal_handle`
+      // (which can be null → '' when the row is stale) — `resolveCallerAgent` already required
+      // this same evidence to attest successfully, so this call is deterministic given it.
+      const attested = runtime.verifyOrchestrationCompatibilityCaller(
+        orchestrationCompatibilityEvidence,
+        {
+          currentRuntimeLaunchSufficient: true
+        }
+      )
       if (!params.checkpointPath || !params.checkpointSha256) {
         throw new OrchestrationError(
           'invalid_argument',
@@ -92,7 +102,7 @@ export const CHAIRS_SUCCESSION_METHODS: RpcMethod[] = [
         callerAgentId: caller.id,
         chairName: agentRow.display_name,
         paneKey: caller.pane_key,
-        terminalHandle: caller.terminal_handle ?? '',
+        terminalHandle: attested?.terminalHandle ?? caller.terminal_handle ?? '',
         hostId,
         checkpointPath: params.checkpointPath,
         checkpointSha256: params.checkpointSha256,

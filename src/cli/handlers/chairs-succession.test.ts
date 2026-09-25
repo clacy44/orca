@@ -294,6 +294,65 @@ describe('chairs-succession handlers', () => {
         data: { nextSteps: [expect.stringContaining('acceptance window passed')] }
       })
     })
+
+    // G1 repair N8: five refusals reachable after the wave-2 pass had no next-steps map entry —
+    // the runtime sends none for any of them, so a caller previously saw a bare error code.
+    it.each([
+      'succession_incumbent_exit_timeout',
+      'succession_run_moved',
+      'succession_unknown_ack',
+      'succession_lane_unsupported',
+      'resume_context_too_large'
+    ])('adds a next step for %s when the runtime sent none', async (code) => {
+      const call = vi.fn().mockRejectedValue(new RuntimeClientError(code, 'refused'))
+
+      await expect(
+        CHAIRS_SUCCESSION_HANDLERS['chairs succession-accept']({
+          flags: new Map<string, string | boolean>([['id', 'succ_xyz']]),
+          client: { call },
+          cwd: '/tmp',
+          json: false
+        } as never)
+      ).rejects.toMatchObject({
+        code,
+        data: { nextSteps: expect.arrayContaining([expect.any(String)]) }
+      })
+    })
+
+    // G1 repair N7/N16: a post-takeover step can fail without failing the whole accept — the CLI
+    // must still surface it, not stay silent about a chair that may need manual attention.
+    it('prints a WARNINGS line when the runtime result carries warnings', async () => {
+      const call = vi.fn().mockResolvedValue({
+        result: {
+          successionId: 'succ_xyz',
+          chair: 'chair-a',
+          agentId: 'agent_1',
+          runId: 'run_1',
+          generation: 3,
+          warnings: ['manifestWriteFailed'],
+          manifestWriteFailed: true,
+          obligations: {
+            ackedDeliveryIds: [],
+            outstandingDeliveryIds: [],
+            retiredHandle: null,
+            pendingPeerQuestionThreadIds: [],
+            pactTurnsHeld: 0
+          }
+        }
+      })
+
+      await CHAIRS_SUCCESSION_HANDLERS['chairs succession-accept']({
+        flags: new Map<string, string | boolean>([['id', 'succ_xyz']]),
+        client: { call },
+        cwd: '/tmp',
+        json: false
+      } as never)
+
+      expect(logSpy).toHaveBeenCalledWith(
+        'ACCEPTED succ_xyz chair=chair-a agent=agent_1 run=run_1 generation=3\n' +
+          'WARNINGS manifestWriteFailed'
+      )
+    })
   })
 
   describe('chairs resume-context', () => {

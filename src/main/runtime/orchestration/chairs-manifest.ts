@@ -142,6 +142,28 @@ function hasForbiddenLaunchArgControlChar(value: string): boolean {
   return false
 }
 
+// [G1-10z attempt-2 N11 repair] `launchArgs` is appended after the host's own resume/session
+// selectors (orca-runtime.ts appendAgentArgs) and reaches the shell unfiltered by spawn-time
+// admission's --session-id/--fork-session refusal (ipc/agent-launch-admission.ts:181-184),
+// which only inspects the tokens IT constructs, never a manifest's launchArgs. A manifest-
+// supplied `--resume`, `-r`, `--continue`, `-c`, `--session-id` or `--fork-session` (bare or
+// `=value` form) would let the manifest itself pick which prior session a chair launch resumes
+// — refused here, at parse time, before any of this ever reaches a shell.
+const FORBIDDEN_LAUNCH_ARG_SELECTORS = new Set([
+  '--resume',
+  '-r',
+  '--continue',
+  '-c',
+  '--session-id',
+  '--fork-session'
+])
+
+function isForbiddenLaunchArgSelector(element: string): boolean {
+  const eq = element.indexOf('=')
+  const bare = eq === -1 ? element : element.slice(0, eq)
+  return FORBIDDEN_LAUNCH_ARG_SELECTORS.has(bare)
+}
+
 function validateLaunchArgs(raw: unknown, index: number): string | null {
   if (!Array.isArray(raw)) {
     return `chairs[${index}].launchArgs must be an array of strings`
@@ -153,6 +175,9 @@ function validateLaunchArgs(raw: unknown, index: number): string | null {
     }
     if (hasForbiddenLaunchArgControlChar(element)) {
       return `chairs[${index}].launchArgs[${i}] must not contain a C0/C1 control character or DEL`
+    }
+    if (isForbiddenLaunchArgSelector(element)) {
+      return `chairs[${index}].launchArgs[${i}] must not be a resume/session/fork selector (--resume, -r, --continue, -c, --session-id, --fork-session)`
     }
   }
   return null

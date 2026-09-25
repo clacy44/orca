@@ -1,10 +1,10 @@
-// [G1-10z Q8 repair] `<orcaHome>/chairs/<chair>/successions/<id>/` was never deleted (confirmed
-// or aborted, up to 32+48 KiB + an embedded charter each) and `retired-handles.json` was
-// append-only forever — unbounded on-disk growth over a chair's lifetime. Run from the startup
-// hook (chair-succession-startup-hook.ts) and, per the contract, after every confirm — this
-// dispatch could not wire the post-confirm call site: `chair-succession-accept.ts`'s confirm tail
-// is under another worker's edit lock for this dispatch (same flagged-gap shape
-// chair-succession-retired-index.ts's own header already uses for its second call site).
+// [G1-10z Q8 repair; G1-10z attempt-2 N15 header fix] `<orcaHome>/chairs/<chair>/successions/
+// <id>/` was never deleted (confirmed or aborted, up to 32+48 KiB + an embedded charter each) and
+// `retired-handles.json` was append-only forever — unbounded on-disk growth over a chair's
+// lifetime. Run from the startup hook (chair-succession-startup-hook.ts) and, per the contract,
+// after every confirm — wired at both post-confirm call sites: `chair-succession-accept.ts`'s
+// confirm tail (:320) and this scan's own startup confirm (chair-succession-startup-scan.ts's
+// `confirmAlreadyTakenOver`).
 import { readdir, readFile, rm, writeFile, rename } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
@@ -133,8 +133,9 @@ export async function purgeSuccessionsAtStartup(
   return summary
 }
 
-/** Purges ONE chair — the shape the (not-yet-wired, see file header) post-confirm call site
- * needs: a confirm just finished for exactly this chair, no reason to walk every other one. */
+/** Purges ONE chair — the shape a post-confirm call site needs: a confirm just finished for
+ * exactly this chair, no reason to walk every other one. Both wired call sites are named in the
+ * file header. */
 export async function purgeSuccessionsForChair(
   deps: ChairSuccessionStoreDeps,
   chair: string

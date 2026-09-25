@@ -6,14 +6,16 @@
 import { createHash } from 'node:crypto'
 import { readFile, access } from 'node:fs/promises'
 import type { OrchestrationDb } from './db'
+import { resolveSealRun } from './chair-succession-seal-run-lookup'
 import type { OrcaRuntimeService } from '../orca-runtime'
 import { OrchestrationError } from './orchestration-error'
-import { parseChairCheckpoint } from './chair-checkpoint'
+import { parseChairCheckpoint, validateEmbeddedCharterText } from './chair-checkpoint'
 import { renderResumeContext } from './chair-resume-context'
 import {
   createSealed,
   generateSuccessionId,
   listActive,
+  transition,
   SuccessionInFlightError,
   type ChairSuccessionStoreDeps
 } from './chair-succession-store'
@@ -67,17 +69,9 @@ export async function sealSuccession(
 ): Promise<SealResult> {
   const entry = await readManifestEntry(deps.manifestPath, params.chairName)
 
-  // `getCurrentRunForPane` filters `legacy = 0` internally (db.ts's `runsBoundToPane`), so it
-  // cannot distinguish "no Run at all" from "bound, but legacy" — the two refusals this contract
-  // requires distinctly. `listRuns` is unfiltered; scoped to this pane here instead.
-  const boundRuns = deps.db.listRuns().runs.filter((r) => r.coordinator_pane_key === params.paneKey)
-  if (boundRuns.length === 0) {
-    refuse('succession_no_run', 'No Run is bound to this pane; succession requires a bound Run.')
-  }
-  const run = boundRuns.find((r) => r.legacy === 0)
-  if (!run) {
-    refuse('succession_legacy_run', 'This pane is bound to a legacy Run.')
-  }
+  // G1 repair N12: leaf-equivalent pane match, not exact string — see
+  // chair-succession-seal-run-lookup.ts for why.
+  const run = resolveSealRun(deps.db, params.paneKey)
 
   // G1 repair M8 / D-R215 A9: slice 1 never launches onto a named lane — refuse to seal an
   // incumbent that is not itself on the host default lane (a named lane's launch would silently
@@ -130,6 +124,18 @@ export async function sealSuccession(
   const charterMode: CharterMode = succ.charterMode ?? 'reference'
   const charterText = await readFile(succ.charterPath, 'utf8')
   const charterSha = createHash('sha256').update(charterText, 'utf8').digest('hex')
+  // G1 repair N3: embed mode renders the charter verbatim into the SAME fenced resume context
+  // the checkpoint is (chair-resume-context.ts) — it must be refused by the same
+  // fence/backtick-run rules, or a charter with a closing fence or a tag line breaks the render.
+  if (charterMode === 'embed') {
+    const charterValidation = validateEmbeddedCharterText(charterText)
+    if (!charterValidation.ok) {
+      refuse('charter_invalid', charterValidation.error.reason, {
+        line: charterValidation.error.line,
+        code: charterValidation.error.code
+      })
+    }
+  }
 
   let checkpointText: string
   try {
@@ -212,17 +218,10 @@ export async function sealSuccession(
     refuse(rendered.error.code, rendered.error.reason)
   }
 
-  if (agentDelivery && ack.has(agentDelivery.id)) {
-    deps.db.acknowledgeMailboxDelivery(agentDelivery.id, agentMailbox)
-  }
-  if (runDelivery && ack.has(runDelivery.id)) {
-    deps.db.acknowledgeRunDelivery({
-      runId: run.id,
-      consumerGeneration: run.consumer_generation,
-      deliveryId: runDelivery.id
-    })
-  }
-
+  // G1 repair N13 (Q3 breach on the race path): the acks used to run BEFORE `createSealed`'s
+  // own in-lock `succession_in_flight` refusal — a caller could lose a real delivery ack to a
+  // seal attempt that never actually sealed anything. Mint nothing, mutate nothing, until
+  // `createSealed` itself has committed.
   let meta: SuccessionMeta
   try {
     meta = await createSealed(storeDepsFor(deps), params.chairName, {
@@ -240,9 +239,9 @@ export async function sealSuccession(
       runId: run.id
     })
   } catch (err) {
-    // G1 repair M2: the in-lock re-check inside `createSealed` — the ack mutations above already
-    // ran, but nothing was sealed/launched under the stale id, and the ORIGINAL in-flight record
-    // (surfaced here) is untouched, so retrying `--ack` against IT is safe.
+    // G1 repair M2: the in-lock re-check inside `createSealed` — nothing was acked or sealed
+    // under the stale id, and the ORIGINAL in-flight record (surfaced here) is untouched, so
+    // retrying `--ack` against IT is safe.
     if (err instanceof SuccessionInFlightError) {
       refuse('succession_in_flight', `A succession is already ${err.state} for this chair.`, {
         successionId: err.successionId,
@@ -252,14 +251,45 @@ export async function sealSuccession(
     throw err
   }
 
-  deps.db.writeAgentAudit({
-    agentId: params.callerAgentId,
-    actorPaneKey: params.paneKey,
-    actorHostId: params.hostId,
-    verb: 'succession_seal',
-    outcome: 'sealed',
-    reasonCode: `succession=${meta.id} reason=${params.reason}`.slice(0, 200)
-  })
+  if (agentDelivery && ack.has(agentDelivery.id)) {
+    deps.db.acknowledgeMailboxDelivery(agentDelivery.id, agentMailbox)
+  }
+  if (runDelivery && ack.has(runDelivery.id)) {
+    deps.db.acknowledgeRunDelivery({
+      runId: run.id,
+      consumerGeneration: run.consumer_generation,
+      deliveryId: runDelivery.id
+    })
+  }
+
+  // G1 repair N14: this write sits BETWEEN `createSealed` succeeding and the RPC caller
+  // registering the hold (rpc/methods/chairs-succession.ts) — unguarded, a DB failure here would
+  // reject this whole call while leaving a `sealed` record with no hold ever registered for it,
+  // wedging the chair until restart. Guard it and move the record to `aborted` on failure.
+  try {
+    deps.db.writeAgentAudit({
+      agentId: params.callerAgentId,
+      actorPaneKey: params.paneKey,
+      actorHostId: params.hostId,
+      verb: 'succession_seal',
+      outcome: 'sealed',
+      reasonCode: `succession=${meta.id} reason=${params.reason}`.slice(0, 200)
+    })
+  } catch (err) {
+    const reason = `audit_write_failed:${err instanceof Error ? err.message : String(err)}`.slice(
+      0,
+      200
+    )
+    try {
+      await transition(storeDepsFor(deps), params.chairName, meta.id, 'aborted', {
+        abortReason: reason
+      })
+    } catch {
+      // best-effort — if this also fails, the record is left `sealed` with no hold; a later
+      // restart's startup scan (or a human) still has to recover it either way.
+    }
+    throw err
+  }
 
   // Launch is the RPC caller's job now (fix #1) — see this function's own doc comment.
   return { meta, entry }

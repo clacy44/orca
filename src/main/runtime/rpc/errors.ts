@@ -201,7 +201,9 @@ const STRUCTURED_RUNTIME_PASSTHROUGH_CODES: ReadonlySet<string> = new Set([
   'checkpoint_tag_line',
   'checkpoint_too_large',
   'checkpoint_secret_shape',
-  'checkpoint_unsupported_claim'
+  'checkpoint_unsupported_claim',
+  // N3: validateEmbeddedCharterText's refusal at seal time (data.line/data.code).
+  'charter_invalid'
 ])
 
 export function mapRuntimeError(id: string, meta: RpcEnvelopeMeta, error: unknown): RpcFailure {

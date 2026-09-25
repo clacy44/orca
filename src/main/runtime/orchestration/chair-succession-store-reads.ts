@@ -4,7 +4,9 @@ import { readdir } from 'node:fs/promises'
 import { read, successionsRoot, type ChairSuccessionStoreDeps } from './chair-succession-store'
 import type { SuccessionMeta } from './chair-succession-types'
 
-/** All successions for `chair` currently in `sealed` or `launching` state. Read-only, no lock. */
+/** All successions for `chair` currently in `sealed`, `launching` or `confirming` state.
+ * Read-only, no lock. G1 repair N5: `confirming` counts as in flight too — a second seal must
+ * not be admitted while an accept is still finishing its takeover. */
 export async function listActive(
   deps: ChairSuccessionStoreDeps,
   chair: string
@@ -21,7 +23,10 @@ export async function listActive(
   const active: SuccessionMeta[] = []
   for (const id of entries) {
     const meta = await read(deps, chair, id)
-    if (meta && (meta.state === 'sealed' || meta.state === 'launching')) {
+    if (
+      meta &&
+      (meta.state === 'sealed' || meta.state === 'launching' || meta.state === 'confirming')
+    ) {
       active.push(meta)
     }
   }

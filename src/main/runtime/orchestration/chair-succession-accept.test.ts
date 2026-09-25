@@ -2,7 +2,7 @@
 // accept/confirm half of the DB-backed harness (real `OrchestrationDb` + real
 // `OrcaRuntimeService`, `createAgentSession`/`closeTerminal`/`waitForTerminal` mocked per test).
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdir, mkdtemp, rm, writeFile, readFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, rm, writeFile, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
@@ -119,11 +119,12 @@ describe('S10-22a WAVE 2: chair-succession-accept', () => {
   function registerChair(
     chairName: string,
     paneKey: string,
-    terminalHandle: string
+    terminalHandle: string,
+    role: string | null = null
   ): { agentId: string } {
     const result = db.upsertAgentByPaneSuffix({
       displayName: chairName,
-      role: null,
+      role,
       hostId,
       paneKey,
       terminalHandle,
@@ -552,6 +553,182 @@ describe('S10-22a WAVE 2: chair-succession-accept', () => {
         code: 'succession_aborted',
         reason: 'incumbent_exit_timeout'
       })
+    })
+
+    // G1 repair N4: a non-`timeout` rejection (e.g. a renderer graph sync dropping the leaf) does
+    // NOT by itself prove the incumbent exited — before this fix, accept treated any rejection
+    // other than the literal string `timeout` as "exited, proceed", even while the takeover's own
+    // liveness predicate still reports the incumbent alive.
+    // Real timers deliberately — the liveness poll bound is 10s of REAL Date.now() (accept.ts's
+    // own `INCUMBENT_EXIT_TIMEOUT_MS`), and interleaving it with fake timers against a real-I/O
+    // async chain (chair-lock, fs reads/writes) is unreliable; this test's own timeout is raised
+    // to allow the real ~10s to elapse.
+    it('N4: a stale-handle rejection with the incumbent still live aborts exactly like a timeout, never proceeds', async () => {
+      await writeManifest('chair-x')
+      registerChair('chair-x', PANE_A, HANDLE_A)
+      const runId = bindRunTo(PANE_A, HANDLE_A)
+      const meta = await sealedLaunching('chair-x', runId)
+      const closeSpy = vi.spyOn(runtime, 'closeTerminal').mockResolvedValue({} as never)
+      vi.spyOn(runtime, 'waitForTerminal').mockRejectedValue(new Error('terminal_handle_stale'))
+      // The leaf vanished from the graph, but the runtime's own liveness predicate still
+      // reports a connected handle — the PTY never actually exited.
+      vi.spyOn(runtime, 'getAgentDirectoryLivenessSignals').mockReturnValue({
+        terminalHandle: HANDLE_A,
+        lastAgentStatus: 'working',
+        observedLive: true
+      })
+      const holdPromise = holdSealRequest(deps, hostId, meta, undefined)
+      await expect(
+        acceptSuccession(deps, {
+          successionId: meta.id,
+          callerPaneKey: SUCCESSOR_PANE,
+          callerTerminalHandle: SUCCESSOR_HANDLE,
+          callerSessionId: 'sess-succ',
+          hostId
+        })
+      ).rejects.toMatchObject({ code: 'succession_incumbent_exit_timeout' })
+      expect(closeSpy).toHaveBeenCalledWith(HANDLE_A)
+      expect(closeSpy).not.toHaveBeenCalledWith(SUCCESSOR_HANDLE)
+      const finalMeta = await read({ orcaHome: tmp }, 'chair-x', meta.id)
+      expect(finalMeta?.state).toBe('aborted')
+      expect(finalMeta?.abortReason).toBe('incumbent_exit_timeout')
+      await holdPromise
+    }, 15_000)
+
+    // Positive control for N4: a stale-handle rejection where the liveness predicate DOES confirm
+    // the incumbent is gone must still proceed with the takeover (not every non-timeout rejection
+    // is now treated as a failure).
+    it('N4: a stale-handle rejection confirmed dead by the liveness predicate still proceeds with the takeover', async () => {
+      await writeManifest('chair-x')
+      registerChair('chair-x', PANE_A, HANDLE_A)
+      const runId = bindRunTo(PANE_A, HANDLE_A)
+      const meta = await sealedLaunching('chair-x', runId)
+      vi.spyOn(runtime, 'closeTerminal').mockResolvedValue({} as never)
+      vi.spyOn(runtime, 'waitForTerminal').mockRejectedValue(new Error('terminal_handle_stale'))
+      vi.spyOn(runtime, 'getAgentDirectoryLivenessSignals').mockReturnValue({
+        terminalHandle: null,
+        lastAgentStatus: null,
+        observedLive: false
+      })
+      void holdSealRequest(deps, hostId, meta, undefined)
+      const result = await acceptSuccession(deps, {
+        successionId: meta.id,
+        callerPaneKey: SUCCESSOR_PANE,
+        callerTerminalHandle: SUCCESSOR_HANDLE,
+        callerSessionId: 'sess-succ',
+        hostId
+      })
+      expect(result.chair).toBe('chair-x')
+    })
+
+    // G1 repair N7: steps after the takeover (bindRun, retired-handle append, the `confirmed`
+    // transition, the post-confirm purge) must never throw past the caller — the identity has
+    // already moved. Before this fix, a `bindRun` throw (consumer_fenced/legacy_read_only)
+    // propagated straight out of `acceptSuccession`, leaving the record stuck `confirming` and
+    // the new chair with an error instead of ACCEPTED.
+    it('N7: a bindRun failure after the takeover is swallowed into a warning, not thrown — still ACCEPTED', async () => {
+      await writeManifest('chair-x')
+      registerChair('chair-x', PANE_A, HANDLE_A)
+      const runId = bindRunTo(PANE_A, HANDLE_A)
+      const meta = await sealedLaunching('chair-x', runId)
+      vi.spyOn(runtime, 'closeTerminal').mockResolvedValue({} as never)
+      vi.spyOn(runtime, 'waitForTerminal').mockResolvedValue({
+        handle: HANDLE_A,
+        condition: 'exit'
+      } as never)
+      vi.spyOn(db, 'bindRun').mockImplementation(() => {
+        throw new Error('consumer_fenced')
+      })
+      void holdSealRequest(deps, hostId, meta, undefined)
+      const result = await acceptSuccession(deps, {
+        successionId: meta.id,
+        callerPaneKey: SUCCESSOR_PANE,
+        callerTerminalHandle: SUCCESSOR_HANDLE,
+        callerSessionId: 'sess-succ',
+        hostId
+      })
+      expect(result.chair).toBe('chair-x')
+      expect(result.warnings).toContain('runBindFailed')
+      const finalMeta = await read({ orcaHome: tmp }, 'chair-x', meta.id)
+      expect(finalMeta?.state).toBe('confirmed')
+    })
+
+    // G1 repair N15: the manifest is not the only role source — a chair whose role exists only on
+    // its (incumbent) agents row must not lose it just because the manifest never set one.
+    it('N15: a role present only on the incumbent agents row survives the takeover when the manifest sets none', async () => {
+      await writeManifest('chair-x')
+      registerChair('chair-x', PANE_A, HANDLE_A, 'facilitator')
+      const runId = bindRunTo(PANE_A, HANDLE_A)
+      const meta = await sealedLaunching('chair-x', runId)
+      vi.spyOn(runtime, 'closeTerminal').mockResolvedValue({} as never)
+      vi.spyOn(runtime, 'waitForTerminal').mockResolvedValue({
+        handle: HANDLE_A,
+        condition: 'exit'
+      } as never)
+      void holdSealRequest(deps, hostId, meta, undefined)
+      const result = await acceptSuccession(deps, {
+        successionId: meta.id,
+        callerPaneKey: SUCCESSOR_PANE,
+        callerTerminalHandle: SUCCESSOR_HANDLE,
+        callerSessionId: 'sess-succ',
+        hostId
+      })
+      const row = db.getAgentByName(hostId, 'chair-x')
+      expect(row?.id).toBe(result.agentId)
+      expect(row?.role).toBe('facilitator')
+    })
+
+    // G1 repair N16: a manifest write failure must surface to the caller, not just an audit row —
+    // silence here left the next reboot's `chairs restore` resuming the pre-succession session.
+    it('N16: a manifest write failure surfaces as manifestWriteFailed + a warning, still ACCEPTED', async () => {
+      // A SEPARATE, chmod'd-read-only directory for the manifest — isolates the failure to the
+      // manifest write alone; `tmp` (orcaHome) stays writable so the confirm transition and
+      // retired-handle append (also under `tmp`) can still land normally.
+      const manifestDir = await mkdtemp(join(tmpdir(), 'orca-succession-manifest-ro-'))
+      const manifestPath = join(manifestDir, 'chairs.json')
+      await writeFile(join(tmp, 'CHARTER.md'), 'the charter\n')
+      await writeFile(
+        manifestPath,
+        JSON.stringify({
+          version: 1,
+          chairs: [
+            {
+              name: 'chair-x',
+              worktree: 'id:wt-1',
+              agent: 'claude',
+              conversationId: 'sess-orig',
+              succession: { enabled: true, charterPath: join(tmp, 'CHARTER.md') }
+            }
+          ]
+        })
+      )
+      registerChair('chair-x', PANE_A, HANDLE_A)
+      const runId = bindRunTo(PANE_A, HANDLE_A)
+      const meta = await sealedLaunching('chair-x', runId)
+      vi.spyOn(runtime, 'closeTerminal').mockResolvedValue({} as never)
+      vi.spyOn(runtime, 'waitForTerminal').mockResolvedValue({
+        handle: HANDLE_A,
+        condition: 'exit'
+      } as never)
+      deps.manifestPath = manifestPath
+      await chmod(manifestDir, 0o500) // read+execute only — writeFileAtomic's tmp-write cannot land
+      try {
+        void holdSealRequest(deps, hostId, meta, undefined)
+        const result = await acceptSuccession(deps, {
+          successionId: meta.id,
+          callerPaneKey: SUCCESSOR_PANE,
+          callerTerminalHandle: SUCCESSOR_HANDLE,
+          callerSessionId: 'sess-succ',
+          hostId
+        })
+        expect(result.manifestWriteFailed).toBe(true)
+        expect(result.warnings).toContain('manifestWriteFailed')
+        const finalMeta = await read({ orcaHome: tmp }, 'chair-x', meta.id)
+        expect(finalMeta?.state).toBe('confirmed')
+      } finally {
+        await chmod(manifestDir, 0o700)
+        await rm(manifestDir, { recursive: true, force: true })
+      }
     })
   })
 })

@@ -14,7 +14,13 @@ import { scanSuccessionsAtStartup } from '../runtime/orchestration/chair-success
 import { loadRetiredHandlesIndexSync } from '../runtime/orchestration/chair-succession-retired-index'
 import { purgeSuccessionsAtStartup } from '../runtime/orchestration/chair-succession-purge'
 
-export type ChairSuccessionStartupHookRuntime = Pick<OrcaRuntimeService, 'closeTerminal'> & {
+// [G1-10z attempt-2 N10 repair] `cancelMessageWaiters` added — the startup scan's own confirm
+// tail now rebinds the Run (chair-succession-startup-scan.ts's `confirmAlreadyTakenOver`), the
+// same step accept.ts's confirm tail takes.
+export type ChairSuccessionStartupHookRuntime = Pick<
+  OrcaRuntimeService,
+  'closeTerminal' | 'cancelMessageWaiters'
+> & {
   getOrchestrationDb: OrcaRuntimeService['getOrchestrationDb']
 }
 

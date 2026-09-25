@@ -15,29 +15,20 @@
 // lock and re-reads state inside it, so the two can never both act on the same record.
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import {
-  transition,
-  appendRetiredHandle,
-  type ChairSuccessionStoreDeps
-} from './chair-succession-store'
+import { transition, type ChairSuccessionStoreDeps } from './chair-succession-store'
 import { OrchestrationError } from './orchestration-error'
 import { registerAgentForPane } from './register-agent-for-pane'
 import type { ChairSuccessionDeps } from './chair-succession-execute'
 import { readManifestEntry } from './chair-succession-manifest-entry'
 import { getHoldRecord, settleHold } from './chair-succession-hold'
-import { refreshRetiredHandlesIndexSync } from './chair-succession-retired-index'
 import { purgeSuccessionsForChair } from './chair-succession-purge'
-import { writeManifestLastSessionId } from './chair-succession-manifest-session-write'
 import { enterConfirming } from './chair-succession-accept-confirm-lock'
+import { closeIncumbentAndWaitForExit } from './chair-succession-accept-exit-wait'
+import { runPostTakeoverSteps } from './chair-succession-accept-post-takeover'
 
 function storeDepsFor(deps: ChairSuccessionDeps): ChairSuccessionStoreDeps {
   return { orcaHome: deps.orcaHome }
 }
-
-// G1 repair B6: bounded wait for the incumbent's PTY to actually exit before the dead-pane
-// takeover reads liveness — `closeTerminal` returns as soon as the kill is issued, not once the
-// process has actually gone (orca-runtime.ts's async exit handler sets `connected = false` later).
-const INCUMBENT_EXIT_TIMEOUT_MS = 10_000
 
 export type AcceptParams = {
   successionId: string
@@ -66,6 +57,15 @@ export type AcceptResult = {
   generation: number
   resumeContext?: string
   obligations: AcceptObligations
+  /** G1 repair N7: a step after the takeover (bindRun, retired-handle append, the `confirmed`
+   * transition, the post-confirm purge) failed but was audited and swallowed rather than
+   * thrown — the caller IS the new chair regardless; these name what to check manually. Absent
+   * when every post-takeover step succeeded. */
+  warnings?: string[]
+  /** G1 repair N16: the manifest write (chairs.json's lastSessionId) failed — the successor is
+   * ACCEPTED, but a reboot's `chairs restore` will resume the pre-succession session until this
+   * is fixed by hand. Also present in `warnings` as `'manifestWriteFailed'`. */
+  manifestWriteFailed?: boolean
 }
 
 /** D-R215 §Protocol step 5 "the successor's accept call must arrive from the new pane with its
@@ -92,48 +92,11 @@ export async function acceptSuccession(
     params.callerPaneKey
   )
 
-  // Act (D-R215 §Protocol step 6). Close the incumbent FIRST — the dead-pane takeover below
-  // depends on its pane no longer being live. Sourced from the HOLD, never meta.json (B5).
-  try {
-    await deps.runtime.closeTerminal(hold.incumbent.terminalHandle)
-  } catch {
-    // best-effort — the incumbent pane may already be gone (e.g. it crashed mid-hold).
-  }
-
-  // G1 repair B6: wait for the PTY to actually exit, bounded — never report success on a takeover
-  // racing a still-live incumbent.
-  try {
-    await deps.runtime.waitForTerminal(hold.incumbent.terminalHandle, {
-      condition: 'exit',
-      timeoutMs: INCUMBENT_EXIT_TIMEOUT_MS
-    })
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    if (message === 'timeout') {
-      await transition(storeDepsFor(deps), chair, params.successionId, 'aborted', {
-        abortReason: 'incumbent_exit_timeout'
-      })
-      deps.db.writeAgentAudit({
-        agentId: null,
-        actorPaneKey: params.callerPaneKey,
-        actorHostId: params.hostId,
-        verb: 'succession_abort',
-        outcome: 'aborted',
-        reasonCode: `succession=${params.successionId} reason=incumbent_exit_timeout`.slice(0, 200)
-      })
-      settleHold(params.successionId, {
-        ok: false,
-        code: 'succession_aborted',
-        successionId: params.successionId,
-        reason: 'incumbent_exit_timeout'
-      })
-      throw new OrchestrationError(
-        'succession_incumbent_exit_timeout',
-        `The incumbent pane did not exit within ${INCUMBENT_EXIT_TIMEOUT_MS}ms; the successor pane is left open for manual recovery (orca chairs restore).`
-      )
-    }
-    // terminal_handle_stale / terminal_exited / already-gone — treat as exited, proceed.
-  }
+  // Act (D-R215 §Protocol step 6): close the incumbent, bound the wait for it to actually exit
+  // (G1 repair B6), and — on anything short of confirmed-dead (a real timeout, or a non-timeout
+  // rejection the liveness predicate still calls live, N4) — abort + settle + throw, telling the
+  // successor pane to stand down (N8). Sourced from the HOLD, never meta.json (B5).
+  await closeIncumbentAndWaitForExit(deps, hold, chair, params)
 
   const entry = await readManifestEntry(deps.manifestPath, chair).catch(() => undefined)
 
@@ -142,9 +105,14 @@ export async function acceptSuccession(
     terminalHandle: params.callerTerminalHandle,
     processIncarnation: deps.runtime.getTerminalProcessIncarnation(params.callerTerminalHandle),
     displayName: chair,
-    // G1 repair M6: pass the manifest's role through — `registerAgentForPane` writes `role`
-    // unconditionally, so leaving this `undefined` erases the chair's role on every takeover.
-    role: entry?.role
+    // G1 repair M6 / N15: pass the manifest's role through — `registerAgentForPane` writes
+    // `role` unconditionally, so leaving this `undefined` erases the chair's role on every
+    // takeover. N15: the manifest is not the only source — a chair whose role exists only on
+    // its (incumbent) agents row must not lose it just because the manifest never set one.
+    role:
+      entry?.role ??
+      deps.db.getAgentByPaneKey(params.hostId, hold.incumbent.paneKey)?.role ??
+      undefined
   })
   if (!registration.ok) {
     // Chair review fix #3: the incumbent's pane is ALREADY closed at this point — leaving the
@@ -172,59 +140,18 @@ export async function acceptSuccession(
     )
   }
 
+  // N7: the identity has already moved — a fresh chair agent row is registered and the
+  // incumbent's pane is closed. From here on, nothing may throw past the caller: every step
+  // (bindRun, the retired handle, the manifest write, the `confirmed` transition) is audited on
+  // failure and folded into `warnings` instead, and ACCEPTED is still returned.
   const runId = hold.runId
-  if (runId) {
-    deps.db.bindRun({
-      runId,
-      coordinatorHandle: params.callerTerminalHandle,
-      coordinatorPaneKey: params.callerPaneKey
-    })
-    deps.runtime.cancelMessageWaiters(`run:${runId}`)
-  }
-
-  await appendRetiredHandle(storeDepsFor(deps), chair, {
-    handle: hold.incumbent.terminalHandle,
-    succession: params.successionId,
-    at: new Date().toISOString()
-  })
-  refreshRetiredHandlesIndexSync(deps.orcaHome)
-
-  // G1 repair M5: BEFORE `confirmed`, and never allowed to throw past it — a manifest I/O hiccup
-  // must not strand a successfully-taken-over successor with neither ACCEPTED nor context.
-  try {
-    await writeManifestLastSessionId(
-      deps.manifestPath,
-      params.hostId,
-      chair,
-      params.callerSessionId
-    )
-  } catch (err) {
-    deps.db.writeAgentAudit({
-      agentId: registration.agent.id,
-      actorPaneKey: params.callerPaneKey,
-      actorHostId: params.hostId,
-      verb: 'succession_confirm',
-      outcome: 'manifest_write_failed',
-      reasonCode:
-        `succession=${params.successionId} ${err instanceof Error ? err.message : String(err)}`.slice(
-          0,
-          200
-        )
-    })
-  }
-
-  const confirmed = await transition(storeDepsFor(deps), chair, params.successionId, 'confirmed', {
-    retiredHandle: hold.incumbent.terminalHandle
-  })
-
-  deps.db.writeAgentAudit({
-    agentId: registration.agent.id,
-    actorPaneKey: params.callerPaneKey,
-    actorHostId: params.hostId,
-    verb: 'succession_confirm',
-    outcome: 'confirmed',
-    reasonCode: `succession=${params.successionId}`.slice(0, 200)
-  })
+  const { confirmedId, warnings, manifestWriteFailed } = await runPostTakeoverSteps(
+    deps,
+    hold,
+    chair,
+    params,
+    registration.agent.id
+  )
 
   // Never actually reaches the incumbent (its pane is already closed) — released here only so
   // the held `succeed` Promise doesn't leak forever.
@@ -247,6 +174,7 @@ export async function acceptSuccession(
           200
         )
     })
+    warnings.push('purgeFailed')
   }
 
   // D-R219 (chair ruling, G1 repair M3): the "served" set is gone — accept ALWAYS returns the
@@ -277,12 +205,14 @@ export async function acceptSuccession(
 
   return {
     ok: true,
-    successionId: confirmed.id,
+    successionId: confirmedId,
     chair,
     agentId: registration.agent.id,
     runId: runId ?? '',
     generation: runId ? (deps.db.getRun(runId)?.consumer_generation ?? 0) : 0,
     resumeContext: resumeContextText,
-    obligations
+    obligations,
+    ...(warnings.length > 0 ? { warnings } : {}),
+    ...(manifestWriteFailed ? { manifestWriteFailed: true } : {})
   }
 }

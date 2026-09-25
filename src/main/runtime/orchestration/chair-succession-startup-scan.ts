@@ -21,18 +21,21 @@ import {
   withPaneLock,
   type ChairSuccessionStoreDeps
 } from './chair-succession-store'
+import { appendRetiredHandle } from './chair-succession-retired-handles'
+import { refreshRetiredHandlesIndexSync } from './chair-succession-retired-index'
+import { writeManifestLastSessionId } from './chair-succession-manifest-session-write'
 import type { SuccessionMeta, SuccessionState } from './chair-succession-types'
-import { parseChairsManifest, type ChairsManifest } from './chairs-manifest'
-import { defaultChairsManifestPath } from './chair-succession-manifest-entry'
-import { writeFileAtomic, pathExists } from '../rpc/methods/chairs-restore'
 import { purgeSuccessionsForChair } from './chair-succession-purge'
 
-// Narrowed to exactly the two runtime primitives this scan needs (same pattern
+// Narrowed to exactly the runtime primitives this scan needs (same pattern
 // chairs-restore-execute.ts's `ChairsRestoreExecutorDeps` uses) — a real `OrcaRuntimeService`
 // satisfies this trivially; tests supply a narrow fake instead of the whole class.
-export type SuccessionStartupScanRuntime = Pick<OrcaRuntimeService, 'closeTerminal'>
+export type SuccessionStartupScanRuntime = Pick<
+  OrcaRuntimeService,
+  'closeTerminal' | 'cancelMessageWaiters'
+>
 
-export type SuccessionStartupScanDb = Pick<OrchestrationDb, 'getAgentByName'>
+export type SuccessionStartupScanDb = Pick<OrchestrationDb, 'getAgentByName' | 'bindRun'>
 
 export type SuccessionStartupScanDeps = {
   runtime: SuccessionStartupScanRuntime
@@ -62,60 +65,23 @@ async function closeSuccessorPaneBestEffort(
   }
 }
 
-/** [G1 repair L5] Mirrors chair-succession-accept.ts's `writeManifestLastSessionId` (not itself
- * exported — this dispatch is scoped away from that file). Duplicated here rather than imported,
- * flagged: a follow-up should hoist one shared helper once both worker locks release. Same A7
- * lock key (`chairs-manifest:<host>`), same "no manifest / bad JSON / unknown chair / no-op
- * write" tolerances — a startup scan must never throw for a manifest quirk it did not cause. */
-async function confirmManifestEntryAtStartup(
-  manifestPath: string | undefined,
-  hostId: string,
-  chair: string,
-  sessionId: string | undefined
-): Promise<void> {
-  if (!sessionId) {
-    return
-  }
-  const path = manifestPath ?? defaultChairsManifestPath()
-  await withPaneLock(`chairs-manifest:${hostId}`, async () => {
-    if (!(await pathExists(path))) {
-      return
-    }
-    let raw: string
-    try {
-      const { readFile } = await import('node:fs/promises')
-      raw = await readFile(path, 'utf8')
-    } catch {
-      return
-    }
-    let parsedJson: unknown
-    try {
-      parsedJson = JSON.parse(raw)
-    } catch {
-      return
-    }
-    const parsed = parseChairsManifest(parsedJson)
-    if (!parsed.ok) {
-      return
-    }
-    const manifest: ChairsManifest = parsed.manifest
-    const entry = manifest.chairs.find((c) => c.name === chair)
-    if (!entry || entry.lastSessionId === sessionId) {
-      return
-    }
-    entry.lastSessionId = sessionId
-    await writeFileAtomic(path, `${JSON.stringify(manifest, null, 2)}\n`)
-  })
-}
-
-/** [G1 repair M4, chair ruling] Confirms a `launching`/`confirming` record whose chair identity
+/** [G1-10z attempt-2 N10 repair] Confirms a `launching`/`confirming` record whose chair identity
  * already sits on the successor pane — under the per-chair lock, re-reading the record inside it
- * (the same shape B3's confirming-transition takes) so a concurrent writer is never raced. */
+ * (the same shape B3's confirming-transition takes) so a concurrent writer is never raced. Runs
+ * the REST of accept's confirm tail too, idempotently — previously this only confirmed the
+ * record and the manifest: the Run stayed bound to the dead incumbent pane, and the retired
+ * handle was never appended to retired-handles.json (only `meta.retiredHandle` was set, by the
+ * `confirmed` transition above). Each step is best-effort (swallowed, never thrown past this
+ * scan — a crash-recovery path must never itself crash on a stale Run or a bad manifest), same
+ * as `closeSuccessorPaneBestEffort` above. [G1-10z attempt-2 N15] Dedupes onto the now-exported
+ * `writeManifestLastSessionId` (chair-succession-manifest-session-write.ts) instead of a second
+ * hand-written copy of accept's manifest write. */
 async function confirmAlreadyTakenOver(
   deps: SuccessionStartupScanDeps,
   meta: SuccessionMeta
 ): Promise<void> {
   const storeDeps = storeDepsFor(deps)
+  const hostId = deps.hostId ?? 'local'
   await withPaneLock(chairLockKey(meta.chair), async () => {
     const current = await read(storeDeps, meta.chair, meta.id)
     if (!current) {
@@ -133,15 +99,47 @@ async function confirmAlreadyTakenOver(
       })
     }
   })
-  await confirmManifestEntryAtStartup(
+
+  // Rebind the Run to the successor pane — without this, the Run stays bound to the dead
+  // incumbent (N10). The successor's own agent row is the chair by construction (the caller's
+  // `successorIsChair` check), so it carries the coordinator handle/pane key to bind to.
+  const runId = meta.runId
+  if (runId) {
+    const chairAgent = deps.db.getAgentByName(hostId, meta.chair)
+    const coordinatorHandle = chairAgent?.terminal_handle ?? meta.successor.terminalHandle
+    const coordinatorPaneKey = chairAgent?.pane_key ?? meta.successor.paneKey
+    if (coordinatorHandle && coordinatorPaneKey) {
+      try {
+        deps.db.bindRun({ runId, coordinatorHandle, coordinatorPaneKey })
+        deps.runtime.cancelMessageWaiters(`run:${runId}`)
+      } catch {
+        // best-effort — a startup confirm must never throw for a stale/adopted Run.
+      }
+    }
+  }
+
+  try {
+    await appendRetiredHandle(storeDeps, meta.chair, {
+      handle: meta.incumbent.terminalHandle,
+      succession: meta.id,
+      at: new Date().toISOString()
+    })
+    refreshRetiredHandlesIndexSync(deps.orcaHome)
+  } catch {
+    // best-effort — see above.
+  }
+
+  await writeManifestLastSessionId(
     deps.manifestPath,
-    deps.hostId ?? 'local',
+    hostId,
     meta.chair,
-    meta.successor.sessionId
-  )
+    meta.successor.sessionId ?? null
+  ).catch(() => {
+    // best-effort — see above.
+  })
+
   // [G1-10z Q8 repair] "after every confirm" — this scan's own confirm path is one such site;
-  // the RPC accept path's confirm (chair-succession-accept.ts) is the other, not wired here (see
-  // chair-succession-purge.ts's header).
+  // the RPC accept path's confirm (chair-succession-accept.ts) is the other.
   await purgeSuccessionsForChair(storeDeps, meta.chair)
 }
 

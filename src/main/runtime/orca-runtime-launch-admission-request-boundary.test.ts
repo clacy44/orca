@@ -136,6 +136,34 @@ describe('request-boundary launch-selector refusal (T29)', () => {
     )
     expect(createTerminal).toHaveBeenCalledOnce()
   })
+
+  // [G1-10z attempt-2 N11 repair] appendAgentArgs (chair restore/succession launchArgs) is a
+  // fourth surface this refusal can see, bypassing it before the repair because only
+  // `agentArgs`/`command` were scanned.
+  it('createAgentSession refuses --session-id carried in appendAgentArgs, not just agentArgs', async () => {
+    const { runtime, createTerminal } = createRuntime()
+
+    const error = await runtime
+      .createAgentSession({
+        ...createRequest(operationId('a005'), '--model opus'),
+        appendAgentArgs: '--session-id deadbeef'
+      })
+      .catch((thrown: unknown) => thrown)
+
+    expect((error as { reasonCode?: string }).reasonCode).toBe('launch_session_id_forbidden')
+    expect(createTerminal).not.toHaveBeenCalled()
+  })
+
+  it('ensureAgentSession refuses --fork-session carried in appendAgentArgs', async () => {
+    const { runtime, createTerminal } = createRuntime()
+
+    const error = await runtime
+      .ensureAgentSession({ ...resumeRequest('--model opus'), appendAgentArgs: '--fork-session' })
+      .catch((thrown: unknown) => thrown)
+
+    expect((error as { reasonCode?: string }).reasonCode).toBe('launch_fork_forbidden')
+    expect(createTerminal).not.toHaveBeenCalled()
+  })
 })
 
 // [D-R104 (ii), Ruling 34 Addendum 15] The third named site: runCreateMobileSessionTerminal's

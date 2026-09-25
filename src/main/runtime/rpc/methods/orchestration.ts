@@ -1062,22 +1062,27 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         // Peers cannot reach this: `remoteRunMailbox`/`from` are refused for accessProfile ===
         // 'peer' well above (S10-19 §8.1/§8.2), so `senderHostId` here is always this host's own
         // directory, never a peer-supplied id.
-        // [S10-22a Wave 2 contract, D-R215 §Protocol step 6 A3; G1-10z B7 repair] A retired
-        // chair handle (the incumbent's terminal handle before a dead-pane takeover) resolves to
-        // `agent:<chair's current agent id>` here, in the address-resolution block beside A1/
-        // F-5b — BEFORE the C4 attested-sender checks below, so `send` runs the same
+        // [S10-22a Wave 2 contract, D-R215 §Protocol step 6 A3; G1-10z attempt-2 N2 repair] A
+        // retired chair handle (the incumbent's terminal handle before a dead-pane takeover)
+        // resolves to `agent:<chair's current agent id>` here, in the address-resolution block
+        // beside A1/F-5b — BEFORE the C4 attested-sender checks below, so `send` runs the same
         // requireAddressableAgentRecipient + sender-attestation gauntlet an explicit
-        // `agent:<id>` target gets, and the wake below keys off the resolved handle. The choke
-        // (message-gate-writer.ts) no longer performs this rewrite itself — moved here per the
-        // attacker review (a rewrite after these checks let an unauthenticated `from` land in
+        // `agent:<id>` target gets, and the wake below keys off the resolved handle. Resolved
+        // BEFORE and OUTSIDE the display-name/getTerminalPaneKey gate below — a retired handle
+        // is dead by definition (no live pane key), so a real `term_<uuid>` handle must still be
+        // caught even though it never matches DISPLAY_NAME_PATTERN and `getTerminalPaneKey`
+        // returns null for it. Mirrors reply's block (:2617-2619) and ask's (:3135, :3620). The
+        // choke (message-gate-writer.ts) no longer performs this rewrite itself — moved here per
+        // the attacker review (a rewrite after these checks let an unauthenticated `from` land in
         // agent:<id> and keyed the wake to a stale handle nobody parks on).
+        const retiredChair =
+          !agentRecipient && isBarePeerHandle(to) ? retiredHandleChair(to) : undefined
         if (
           !agentRecipient &&
           isBarePeerHandle(to) &&
-          validateDisplayNameCandidate(to).ok &&
-          runtime.getTerminalPaneKey(to) == null
+          (retiredChair ||
+            (validateDisplayNameCandidate(to).ok && runtime.getTerminalPaneKey(to) == null))
         ) {
-          const retiredChair = retiredHandleChair(to)
           const successor = retiredChair ? db.getAgentByName(senderHostId, retiredChair) : undefined
           const named = successor ?? db.getAgentByName(senderHostId, to)
           if (named) {

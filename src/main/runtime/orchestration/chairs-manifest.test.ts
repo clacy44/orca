@@ -133,4 +133,35 @@ describe('parseChairsManifest', () => {
       }).ok
     ).toBe(true)
   })
+
+  // [G1-10z attempt-2 N11 repair] a manifest-supplied resume/session/fork selector in launchArgs
+  // bypasses spawn-time admission's --session-id/--fork-session refusal, which only inspects the
+  // tokens it constructs itself — never a manifest's launchArgs.
+  it.each([
+    '--resume',
+    '-r',
+    '--continue',
+    '-c',
+    '--session-id',
+    '--fork-session',
+    '--resume=sess-123',
+    '--session-id=sess-123',
+    '--fork-session=sess-123'
+  ])('refuses a launchArgs element that is the resume/session/fork selector "%s"', (selector) => {
+    expect(
+      parseChairsManifest({
+        version: 1,
+        chairs: [baseEntry({ launchArgs: ['ok', selector] })]
+      }).ok
+    ).toBe(false)
+  })
+
+  it('accepts a launchArgs element that merely contains "resume" as a substring, not the selector itself', () => {
+    expect(
+      parseChairsManifest({
+        version: 1,
+        chairs: [baseEntry({ launchArgs: ['--autoresume', 'resume-note'] })]
+      }).ok
+    ).toBe(true)
+  })
 })

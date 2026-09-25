@@ -23,10 +23,10 @@
 // rejection — different from the fallback's fail-fast shape; `chair-succession-store.test.ts`
 // documents this.
 import { randomBytes } from 'node:crypto'
-import { randomUUID } from 'node:crypto'
-import { mkdir, chmod, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { withPaneLock } from '../../ipc/agent-launch-admission-lock'
+import { ensureDirMode0700, writeAtomic } from './chair-succession-store-atomic-write'
 import {
   SuccessionBadTransitionError,
   SuccessionInFlightError
@@ -115,27 +115,9 @@ export function retiredHandlesPath(deps: ChairSuccessionStoreDeps, chair: string
   return join(chairRoot(deps, chair), 'retired-handles.json')
 }
 
-/** Creates `dir` (and any missing parents) then forces its own mode to 0700 — `mkdir`'s
- * `recursive` option only reliably applies `mode` to the final path segment across Node
- * versions/umasks, so this `chmod`s explicitly rather than trusting that. */
-export async function ensureDirMode0700(dir: string): Promise<void> {
-  await mkdir(dir, { recursive: true })
-  await chmod(dir, 0o700)
-}
-
-/** Atomic write: unique tmp name in the same directory, write, rename over the target, and clean
- * up the tmp file if anything before the rename throws — never leaves a partial target and never
- * leaves a stray tmp file behind on failure. */
-export async function writeAtomic(target: string, contents: string): Promise<void> {
-  const tmp = `${target}.${process.pid}.${randomUUID()}.tmp`
-  try {
-    await writeFile(tmp, contents, { encoding: 'utf8', mode: 0o600 })
-    await rename(tmp, target)
-  } catch (error) {
-    await rm(tmp, { force: true }).catch(() => undefined)
-    throw error
-  }
-}
+// ensureDirMode0700 / writeAtomic moved to chair-succession-store-atomic-write.ts (line ratchet)
+// — re-exported below so existing importers don't churn.
+export { ensureDirMode0700, writeAtomic } from './chair-succession-store-atomic-write'
 
 async function readMeta(
   deps: ChairSuccessionStoreDeps,
@@ -180,7 +162,14 @@ export async function createSealed(
     }
     for (const existingId of existingIds) {
       const existing = await readMeta(deps, chair, existingId)
-      if (existing && (existing.state === 'sealed' || existing.state === 'launching')) {
+      // G1 repair N5: `confirming` counts as in flight too — admitted here previously, letting a
+      // second seal slip through while an accept is still finishing its takeover.
+      if (
+        existing &&
+        (existing.state === 'sealed' ||
+          existing.state === 'launching' ||
+          existing.state === 'confirming')
+      ) {
         throw new SuccessionInFlightError(existing.id, existing.state)
       }
     }
