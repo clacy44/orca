@@ -126,12 +126,26 @@ describe('secure-file Windows read-path re-harden throttle', () => {
     await Promise.resolve()
   }
 
+  // Why: values are embedded into the -EncodedCommand payload (P1), not passed as trailing
+  // argv, so recover the script text to tell which path a spawn targeted.
+  function decodeEncodedCommandScript(args: string[]): string {
+    const index = args.indexOf('-EncodedCommand')
+    const encoded = index !== -1 ? args[index + 1] : undefined
+    if (!encoded) {
+      return ''
+    }
+    return Buffer.from(encoded, 'base64').toString('utf16le')
+  }
+
   // Why: only count spawns targeting TARGET_PATH — the parent directory is hardened once via
   // the separate (already-fixed, #4901) path-cached directory mechanism, out of item C's scope.
   function powerShellSpawnCount(): number {
     return execFileMock.mock.calls.filter((call: unknown[]) => {
       const [file, args] = call as [string, string[]]
-      return String(file).endsWith('powershell.exe') && args[6] === TARGET_PATH
+      return (
+        String(file).endsWith('powershell.exe') &&
+        decodeEncodedCommandScript(args).includes(`$path = '${TARGET_PATH}'`)
+      )
     }).length
   }
 
@@ -171,4 +185,8 @@ describe('secure-file Windows read-path re-harden throttle', () => {
     await flushOnePendingHardening()
     expect(powerShellSpawnCount()).toBe(1)
   })
+
+  // B1 REPAIR's own regression test lives in secure-path-windows-read-throttle.test.ts, which
+  // exercises hardenWindowsFileOnce directly (a mocked ACL call, no dir-hardening noise) so the
+  // "2 spawns" count isn't muddied by this file's separate, path-cached directory hardening.
 })

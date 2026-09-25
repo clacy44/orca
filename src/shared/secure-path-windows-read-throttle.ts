@@ -7,9 +7,14 @@ import { bestEffortRestrictWindowsPath } from './secure-path-windows-acl'
 
 // Item C (D-23-1 section (c)): the Windows async read path caches file IDENTITY only
 // (dev/ino/birthtime), never ctime — a Set-Acl rewrite bumps ctime even as a no-op, which
-// previously defeated any ctime-based cache. Identity is recorded when hardening FINISHES
-// (not before it starts), and at most one hardening runs in flight per path.
+// previously defeated any ctime-based cache. Identity is captured BEFORE the spawn; the
+// finally block stores it as hardened only if the identity at completion still matches —
+// otherwise the path was replaced mid-flight, so the entry is dropped and the replacement
+// gets hardened by its own next read. At most one hardening runs in flight per path.
 export const SECURE_PATH_REHARDEN_FLOOR_MS = 600_000
+// F6: a failed/timed-out hardening must not be cached as hardened for the full 10 min floor —
+// retry it soon instead of leaving the path unrestricted for SECURE_PATH_REHARDEN_FLOOR_MS.
+export const SECURE_PATH_REHARDEN_RETRY_FLOOR_MS = 30_000
 
 const DEFAULT_BOUNDS: SecurePathHardeningCacheBounds = {
   maxEntries: 1024,
@@ -18,7 +23,7 @@ const DEFAULT_BOUNDS: SecurePathHardeningCacheBounds = {
 }
 
 type WindowsFileIdentity = { dev: number; ino: number; birthtimeMs: number }
-type WindowsHardenedFileEntry = WindowsFileIdentity & { hardenedAt: number }
+type WindowsHardenedFileEntry = WindowsFileIdentity & { hardenedAt: number; succeeded: boolean }
 
 let hardenedWindowsFilesThisProcess = new SecurePathHardeningCache<WindowsHardenedFileEntry>(
   DEFAULT_BOUNDS
@@ -50,28 +55,50 @@ export function hardenWindowsFileOnce(targetPath: string): boolean {
   }
   const cached = hardenedWindowsFilesThisProcess.get(targetPath)
   const identityUnchanged = cached !== undefined && identityMatches(currentIdentity, cached)
-  if (identityUnchanged && Date.now() - cached!.hardenedAt < SECURE_PATH_REHARDEN_FLOOR_MS) {
-    return true
+  if (identityUnchanged) {
+    const floor = cached!.succeeded
+      ? SECURE_PATH_REHARDEN_FLOOR_MS
+      : SECURE_PATH_REHARDEN_RETRY_FLOOR_MS
+    if (Date.now() - cached!.hardenedAt < floor) {
+      return true
+    }
   }
   if (pendingWindowsFileHardenings.has(targetPath)) {
     return true
   }
   pendingWindowsFileHardenings.add(targetPath)
-  void bestEffortRestrictWindowsPath(targetPath, false).finally(() => {
+  const startIdentity = currentIdentity
+  void bestEffortRestrictWindowsPath(targetPath, false).then((succeeded) => {
     pendingWindowsFileHardenings.delete(targetPath)
-    // Why: record identity when hardening FINISHES, not before it starts — recording
-    // pre-completion races Set-Acl and re-arms a re-harden on every subsequent read.
+    // Why: only the identity present at spawn was actually hardened. If the path still
+    // holds that identity at completion, cache it; otherwise the file was replaced
+    // mid-flight, so drop the entry and let the replacement's next read re-harden.
     const finishedIdentity = getWindowsFileIdentity(targetPath)
-    if (finishedIdentity) {
+    if (finishedIdentity && identityMatches(finishedIdentity, startIdentity)) {
       hardenedWindowsFilesThisProcess.set(targetPath, {
         ...finishedIdentity,
-        hardenedAt: Date.now()
+        hardenedAt: Date.now(),
+        succeeded
       })
     } else {
       hardenedWindowsFilesThisProcess.delete(targetPath)
     }
   })
   return true
+}
+
+/** F7: seed the identity cache once a caller has already hardened the path synchronously
+ *  (e.g. the write path), so the next read spawns nothing instead of hardening again. */
+export function markWindowsFileHardened(targetPath: string): void {
+  const identity = getWindowsFileIdentity(targetPath)
+  if (!identity) {
+    return
+  }
+  hardenedWindowsFilesThisProcess.set(targetPath, {
+    ...identity,
+    hardenedAt: Date.now(),
+    succeeded: true
+  })
 }
 
 export function resetWindowsFileHardeningForTests(bounds: SecurePathHardeningCacheBounds): void {

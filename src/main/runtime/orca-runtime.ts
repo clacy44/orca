@@ -37788,11 +37788,19 @@ export class OrcaRuntimeService {
           if (fg && !isShellProcess(fg)) {
             const quietMs = leaf.lastOutputAt ? Date.now() - leaf.lastOutputAt : 0
             if (quietMs >= TUI_IDLE_QUIESCENCE_MS) {
-              if (waiter.pollInterval) {
-                clearInterval(waiter.pollInterval)
-                waiter.pollInterval = null
+              // B3: one FRESH scan at the resolve edge (never per poll) — getForegroundProcess
+              // above can serve a Windows-cached agent identity (pty-subprocess.ts:1117-1127)
+              // even after the agent has actually exited to a bare shell.
+              const confirmed = this.ptyController.confirmForegroundProcess
+                ? await this.ptyController.confirmForegroundProcess(leaf.ptyId)
+                : fg
+              if (confirmed && !isShellProcess(confirmed)) {
+                if (waiter.pollInterval) {
+                  clearInterval(waiter.pollInterval)
+                  waiter.pollInterval = null
+                }
+                this.resolveWaiter(waiter, buildTerminalWaitResult(waiter.handle, 'tui-idle', leaf))
               }
-              this.resolveWaiter(waiter, buildTerminalWaitResult(waiter.handle, 'tui-idle', leaf))
             }
           }
         }
@@ -37864,11 +37872,22 @@ export class OrcaRuntimeService {
           if (fg && !isShellProcess(fg)) {
             const quietMs = pty.lastOutputAt ? Date.now() - pty.lastOutputAt : 0
             if (quietMs >= TUI_IDLE_QUIESCENCE_MS) {
-              if (waiter.pollInterval) {
-                clearInterval(waiter.pollInterval)
-                waiter.pollInterval = null
+              // B3: one FRESH scan at the resolve edge (never per poll) — getForegroundProcess
+              // above can serve a Windows-cached agent identity (pty-subprocess.ts:1117-1127)
+              // even after the agent has actually exited to a bare shell.
+              const confirmed = this.ptyController.confirmForegroundProcess
+                ? await this.ptyController.confirmForegroundProcess(pty.ptyId)
+                : fg
+              if (confirmed && !isShellProcess(confirmed)) {
+                if (waiter.pollInterval) {
+                  clearInterval(waiter.pollInterval)
+                  waiter.pollInterval = null
+                }
+                this.resolveWaiter(
+                  waiter,
+                  buildPtyTerminalWaitResult(waiter.handle, 'tui-idle', pty)
+                )
               }
-              this.resolveWaiter(waiter, buildPtyTerminalWaitResult(waiter.handle, 'tui-idle', pty))
             }
           }
         }

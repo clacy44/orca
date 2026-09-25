@@ -24,6 +24,7 @@ import {
 import {
   getWindowsFileHardeningStateForTests,
   hardenWindowsFileOnce,
+  markWindowsFileHardened,
   resetWindowsFileHardeningForTests
 } from './secure-path-windows-read-throttle'
 
@@ -131,6 +132,10 @@ export function writeSecureFile(
     // Why: these hold auth credentials, so the published path must stay current-user only; cache only on confirmed success so failures retry.
     if (applySecurePathRestriction(targetPath, false, process.platform, true)) {
       rememberHardenedPath(targetPath, false)
+      // F7: seed the Windows read-path identity cache too, so the next read spawns nothing.
+      if (process.platform === 'win32') {
+        markWindowsFileHardened(targetPath)
+      }
     }
     if (options.durable) {
       bestEffortFsyncDirectorySync(dir)

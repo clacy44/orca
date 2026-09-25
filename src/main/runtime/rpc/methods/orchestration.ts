@@ -2963,6 +2963,17 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
               'or dispatch without --inject and send the prompt manually.'
           )
         }
+        // B3: one FRESH scan at this decision's resolve edge — isTerminalRunningAgent above can
+        // fall back to a cached foreground read (orca-runtime.ts getForegroundProcess), so a pane
+        // whose agent already exited to a bare shell must be re-proven here, not per poll.
+        const stillAgent = await runtime.isPeerPaneForegroundAgentLive(to)
+        if (!stillAgent) {
+          throw new Error(
+            `Cannot dispatch --inject to terminal ${to}: the foreground process is no longer a ` +
+              'recognized agent (a fresh scan found a bare shell or unconfirmed state). ' +
+              'Dispatch without --inject and send the prompt manually.'
+          )
+        }
       }
 
       const dispatchAuthority = runtime.getOrchestrationDispatchAuthority(to)

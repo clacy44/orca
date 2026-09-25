@@ -9095,6 +9095,47 @@ describe('OrcaRuntimeService', () => {
     })
   })
 
+  // B3 REPAIR: the foreground-fallback branch's per-poll getForegroundProcess read can be
+  // Windows-cached (pty-subprocess.ts:1117-1127); the RESOLVE edge takes one additional FRESH
+  // confirmForegroundProcess scan before actually resolving 'ready', so a pane whose agent
+  // already exited to a bare shell by the time the cache catches up must not resolve.
+  it('B3: does not resolve tui-idle when the fresh confirm proves the pane fell back to a shell', async () => {
+    vi.useFakeTimers()
+    try {
+      const confirmForegroundProcess = vi.fn(async () => 'zsh')
+      const runtime = createRuntime()
+      runtime.setPtyController({
+        write: () => true,
+        kill: () => true,
+        // Stale/cached per-poll read still reports the agent as foreground.
+        getForegroundProcess: async () => 'claude',
+        confirmForegroundProcess
+      })
+      syncSinglePty(runtime)
+      // No OSC title ever lands, so lastAgentStatus stays null and the foreground-fallback
+      // branch (not the title-driven fast path) is the only route to 'ready'.
+      runtime.onPtyData('pty-1', 'agent output, no title\r\n', Date.now())
+
+      const [terminal] = (await runtime.listTerminals()).terminals
+      const wait = runtime.waitForTerminal(terminal.handle, {
+        condition: 'tui-idle',
+        timeoutMs: 6_000
+      })
+      wait.catch(() => {})
+
+      // Past TUI_IDLE_QUIESCENCE_MS (3s) and a poll tick (2s) — the per-poll cached read alone
+      // would already call this idle-and-ready.
+      await vi.advanceTimersByTimeAsync(5_500)
+
+      expect(confirmForegroundProcess).toHaveBeenCalled()
+      await expect(Promise.race([wait, Promise.resolve('still-pending')])).resolves.toBe(
+        'still-pending'
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('ignores the bare cursor-agent native title so synthesized spinner state survives', async () => {
     const ptyId = `${TEST_REPO_ID}::/tmp/worktree-a@@pty-bg`
     const runtime = createRuntime()

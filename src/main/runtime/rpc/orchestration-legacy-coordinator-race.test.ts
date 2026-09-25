@@ -668,6 +668,9 @@ describe('legacy coordinator takeover races', () => {
     const sendPrompt = vi
       .spyOn(harness.runtime, 'sendTerminalAgentPrompt')
       .mockResolvedValue({ handle: targetHandle, accepted: true, bytesWritten: 1 })
+    // B3 REPAIR: the --inject gate's own fresh confirmForegroundProcess scan is unrelated to
+    // this test's legacy-coordinator race; keep it live so it isn't what refuses the dispatch.
+    vi.spyOn(harness.runtime, 'isPeerPaneForegroundAgentLive').mockResolvedValue(true)
 
     const pending = harness.dispatcher.dispatch(
       request(

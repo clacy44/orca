@@ -84,21 +84,22 @@ describe('hardenSecurePath', () => {
       ['/user', '/fo', 'csv', '/nh'],
       expect.objectContaining({ encoding: 'utf-8' })
     )
-    // PowerShell called asynchronously
+    // PowerShell called asynchronously. P1: path/sid/flag are embedded as literals inside the
+    // -EncodedCommand payload (not trailing argv) — decode it to inspect the script.
     const [powershellFile, powershellArgs, powershellOptions] = vi.mocked(execFile).mock.calls[0]!
     expect(powershellFile).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
-    expect(powershellArgs).toEqual(
-      expect.arrayContaining([
-        '-NoProfile',
-        '-NonInteractive',
-        '-ExecutionPolicy',
-        'Bypass',
-        'C:\\Users\\me\\.orca\\secret.json',
-        'S-1-5-21-1000',
-        '0'
-      ])
-    )
-    const script = (powershellArgs as string[])[5]!
+    expect(powershellArgs).toEqual([
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-EncodedCommand',
+      expect.any(String)
+    ])
+    const script = decodeEncodedCommand((powershellArgs as string[])[5]!)
+    expect(script).toContain("$path = 'C:\\Users\\me\\.orca\\secret.json'")
+    expect(script).toContain("$currentUserSid = 'S-1-5-21-1000'")
+    expect(script).toContain("$isDirectory = '0' -eq '1'")
     expect(script).toContain('SetAccessRuleProtection($true, $false)')
     expect(script).toContain('RemoveAccessRuleSpecific')
     expect(script).toContain('Unexpected ACL entry')
@@ -109,9 +110,10 @@ describe('hardenSecurePath', () => {
     hardenSecurePath('C:\\Users\\me\\.orca', { isDirectory: true, platform: 'win32' })
 
     const powershellArgs = vi.mocked(execFile).mock.calls[0]![1] as string[]
-    expect(powershellArgs.at(-1)).toBe('1')
-    expect(powershellArgs[5]).toContain('ContainerInherit')
-    expect(powershellArgs[5]).toContain('ObjectInherit')
+    const script = decodeEncodedCommand(powershellArgs.at(-1)!)
+    expect(script).toContain("$isDirectory = '1' -eq '1'")
+    expect(script).toContain('ContainerInherit')
+    expect(script).toContain('ObjectInherit')
   })
 
   it('keeps Windows hardening best-effort when ACL rewriting fails', () => {
@@ -459,8 +461,19 @@ function getSyncPowerShellCalls(): unknown[][] {
     .mock.calls.filter(([file]) => String(file).endsWith(POWERSHELL_SUFFIX))
 }
 
+function decodeEncodedCommand(base64: string): string {
+  return Buffer.from(base64, 'base64').toString('utf16le')
+}
+
+// P1: path/sid/flag are embedded as literals inside the -EncodedCommand payload, not passed
+// as trailing argv — recover the path by decoding the script and reading its `$path` literal.
 function getPowerShellTarget(call: unknown[]): string {
-  return (call[1] as string[])[6]!
+  const args = call[1] as string[]
+  const index = args.indexOf('-EncodedCommand')
+  const encoded = index !== -1 ? args[index + 1] : undefined
+  const script = encoded ? Buffer.from(encoded, 'base64').toString('utf16le') : ''
+  const match = /\$path = '((?:[^']|'')*)'/.exec(script)
+  return match ? match[1]!.replace(/''/g, "'") : ''
 }
 
 async function waitForFileTimestampTick(): Promise<void> {
