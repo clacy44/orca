@@ -193,7 +193,14 @@ describe('artifact create intent store', () => {
         .mocked(execFileSync)
         .mock.calls.filter(([file]) => String(file).endsWith('powershell.exe'))
       expect(powershellCalls).toHaveLength(1)
-      expect((powershellCalls[0]![1] as string[]).at(-1)).toBe('1')
+      // Scenario correction: secure-path-windows-acl.ts no longer passes the directory flag as a
+      // trailing argv element — it's embedded in the -EncodedCommand script (see that file's P1 note).
+      const args = powershellCalls[0]![1] as string[]
+      const encodedIndex = args.indexOf('-EncodedCommand')
+      expect(encodedIndex).toBeGreaterThanOrEqual(0)
+      const script = Buffer.from(args[encodedIndex + 1]!, 'base64').toString('utf16le')
+      expect(script).toContain("$isDirectory = '1' -eq '1'")
+      expect(script).not.toContain('$args')
     } finally {
       if (originalPlatform) {
         Object.defineProperty(process, 'platform', originalPlatform)
