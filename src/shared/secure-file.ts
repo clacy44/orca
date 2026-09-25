@@ -21,6 +21,12 @@ import {
   resetSecureFileWindowsUserSidForTests,
   restrictWindowsPathSync
 } from './secure-path-windows-acl'
+import {
+  getWindowsFileHardeningStateForTests,
+  hardenWindowsFileOnce,
+  markWindowsFileHardened,
+  resetWindowsFileHardeningForTests
+} from './secure-path-windows-read-throttle'
 
 type HardenedPathCacheEntry = {
   isDirectory: boolean
@@ -70,6 +76,9 @@ function hardenSecurePathOnce(targetPath: string, isDirectory: boolean): boolean
   if (isDirectory && process.platform === 'win32') {
     hardenSecureDirectoryOnce(targetPath)
     return true
+  }
+  if (!isDirectory && process.platform === 'win32') {
+    return hardenWindowsFileOnce(targetPath)
   }
 
   const currentEntry = getHardenedPathCacheEntry(targetPath, isDirectory)
@@ -123,6 +132,10 @@ export function writeSecureFile(
     // Why: these hold auth credentials, so the published path must stay current-user only; cache only on confirmed success so failures retry.
     if (applySecurePathRestriction(targetPath, false, process.platform, true)) {
       rememberHardenedPath(targetPath, false)
+      // F7: seed the Windows read-path identity cache too, so the next read spawns nothing.
+      if (process.platform === 'win32') {
+        markWindowsFileHardened(targetPath)
+      }
     }
     if (options.durable) {
       bestEffortFsyncDirectorySync(dir)
@@ -204,7 +217,7 @@ function applySecurePathRestriction(
       return restrictWindowsPathSync(targetPath, isDirectory)
     }
     // Why: dir/read-path re-harden runs async to avoid blocking the main thread (#4901); return true optimistically since it's best-effort.
-    bestEffortRestrictWindowsPath(targetPath, isDirectory)
+    void bestEffortRestrictWindowsPath(targetPath, isDirectory)
     return true
   }
   chmodSync(targetPath, isDirectory ? 0o700 : 0o600)
@@ -275,14 +288,17 @@ export function __resetSecureFileHardenedPathsForTests(
 ): void {
   hardenedPathsThisProcess = new SecurePathHardeningCache(bounds)
   hardenedDirectoryPathsThisProcess = new SecurePathHardeningCache(bounds)
+  resetWindowsFileHardeningForTests(bounds)
 }
 
 export function __getSecureFileHardeningCacheStateForTests(): {
   paths: ReturnType<SecurePathHardeningCache<HardenedPathCacheEntry>['state']>
   directories: ReturnType<SecurePathHardeningCache<true>['state']>
+  windowsFiles: ReturnType<typeof getWindowsFileHardeningStateForTests>
 } {
   return {
     paths: hardenedPathsThisProcess.state(),
-    directories: hardenedDirectoryPathsThisProcess.state()
+    directories: hardenedDirectoryPathsThisProcess.state(),
+    windowsFiles: getWindowsFileHardeningStateForTests()
   }
 }

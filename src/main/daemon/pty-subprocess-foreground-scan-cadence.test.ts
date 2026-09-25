@@ -3,8 +3,16 @@
 // forks a powershell.exe/CIM whole-table scan (the daemon-side analogue of
 // #6288), so an idle shell with no agent identity and no recent output must
 // retry slowly no matter how often readers poll getForegroundProcess; PTY
-// output re-arms the fast retry so agent starts still resolve promptly, and
-// sessions with a cached agent identity keep the 1s refresh unrelaxed.
+// output re-arms the fast retry so agent starts still resolve promptly.
+//
+// SCENARIO CORRECTION (B2, D-23-1 item A): this file originally pinned a
+// cached-agent identity to the unrelaxed 1s refresh. The design deliberately
+// relaxes a cached Windows agent to 30s idle / 5s active once past the startup
+// bootstrap window (below, and pty-subprocess-cached-agent-refresh-cadence.test.ts)
+// to cut whole-table CIM scans. The replacement invariant that must hold under
+// that relaxation is B2(e): an agent exit is still detected within ~5s of its
+// last output — see 'retires a cached agent within ~5s of its last output once
+// the pane falls back to the bare shell' in pty-subprocess-cached-agent-exit-detection.test.ts.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -162,7 +170,7 @@ describe('daemon pty foreground scan cadence', () => {
     expect(await readForegroundAt(handle, 8_500)).toBe('claude')
   })
 
-  it('keeps the fast identity refresh for a Windows session with a cached agent', async () => {
+  it('relaxes a cached Windows agent to the 30s idle tier once output goes quiet', async () => {
     resolveAgentForegroundProcessMock.mockResolvedValue('codex')
     const { handle } = spawnShellSubprocess('powershell.exe', 'win32')
 
@@ -171,9 +179,46 @@ describe('daemon pty foreground scan cadence', () => {
     await readForegroundAt(handle, 3_000)
     await readForegroundAt(handle, 5_000)
 
-    // Every read past the 1s cache TTL refreshes (t=0s, 1s, 3s, 5s): agent-exit
-    // detection through the identity cache must not be relaxed by the idle tier.
-    expect(resolveAgentForegroundProcessMock).toHaveBeenCalledTimes(4)
+    // Item A: past the startup window a cached agent with no output relaxes to the
+    // 30s idle tier, so the 1s/3s/5s reads serve the cache without a fresh scan.
+    expect(resolveAgentForegroundProcessMock).toHaveBeenCalledTimes(1)
+    expect(await readForegroundAt(handle, 30_500)).toBe('codex')
+    expect(resolveAgentForegroundProcessMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps a cached Windows agent on the 5s active tier while output flows', async () => {
+    resolveAgentForegroundProcessMock.mockResolvedValue('claude')
+    const { proc, handle } = spawnShellSubprocess('powershell.exe', 'win32')
+
+    await readForegroundAt(handle, 0)
+    expect(resolveAgentForegroundProcessMock).toHaveBeenCalledTimes(1)
+
+    for (let atMs = 500; atMs <= 60_000; atMs += 500) {
+      vi.setSystemTime(BASE_TIME_MS + atMs)
+      proc._simulateData('x')
+      expect(await readForegroundAt(handle, atMs)).toBe('claude')
+    }
+
+    // Output flowing every 500ms for 60s on the 5s active tier: ceil(60/5)+1 = 13.
+    expect(resolveAgentForegroundProcessMock.mock.calls.length).toBeLessThanOrEqual(13)
+  })
+
+  it('B2(d): POSIX never takes the Windows cached-agent relaxed cadence (mutating away the win32 guard must fail this test)', async () => {
+    resolveAgentForegroundProcessMock.mockResolvedValue('claude')
+    const { handle } = spawnShellSubprocess('zsh', 'darwin')
+
+    await readForegroundAt(handle, 0)
+    expect(await readForegroundAt(handle, 1_000)).toBe('claude')
+
+    // No output past this point. On Windows a cached agent behind a shell-reporting pty
+    // relaxes to the 30s idle / 5s active tiers (cachedAgentOutsideStartup, win32-gated);
+    // POSIX must stay on the base FOREGROUND_AGENT_CACHE_TTL_MS (1s) cadence instead.
+    for (let atMs = 2_000; atMs <= 10_000; atMs += 1_000) {
+      expect(await readForegroundAt(handle, atMs)).toBe('claude')
+    }
+
+    // 1s cadence over 10s => ~9-10 scans; the Windows-relaxed tiers would cap this at 1-2.
+    expect(resolveAgentForegroundProcessMock.mock.calls.length).toBeGreaterThanOrEqual(8)
   })
 
   it('keeps the 5s retry for an idle POSIX shell with no output', async () => {

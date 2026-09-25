@@ -3218,6 +3218,18 @@ export class OrcaRuntimeService {
   // Why: provider exit can beat surface registration; that exact dead incarnation must never publish.
   private earlyExitedPtyIncarnations = new Map<string, PtyIncarnationId | null>()
   private pendingPtyRegistrationIncarnations = new Map<string, PtyIncarnationId | null>()
+  // G1 repair (attempt 4 + round-4 recheck): last confirmForegroundProcess call that
+  // definitively confirmed a live agent, per ptyId — see TUI_IDLE_FOREGROUND_CONFIRM_TRUST_MS.
+  // monoAt (performance.now) gates the trust window's own age, immune to wall-clock steps.
+  // outputSeq pins ptyOutputSequenceById at confirm time: a captured leaf/pty object goes stale
+  // across a renderer graph resync, so voiding trust must key on the live sequence, not a
+  // record's lastOutputAt.
+  // generation pins the pty lifecycle generation at confirm time: a confirm still in flight
+  // when the pty exits, then settling positive, must not re-seed trust for the next waiter.
+  private lastPositiveForegroundConfirmAt = new Map<
+    string,
+    { monoAt: number; outputSeq: number; generation: number }
+  >()
   // Why: exact-stop is the current sleep transaction boundary; its exit must
   // leave the renderer's intentional sleeping surface available for wake.
   private intentionalHandlelessPtyStops = new Map<string, string | null>()
@@ -16207,6 +16219,10 @@ export class OrcaRuntimeService {
     this.terminalFileUriHostnameByPtyId.delete(ptyId)
     this.wslDistroByPtyId.delete(ptyId)
     this.clearAgentRowSnapshotsForPty(ptyId)
+    // G1 repair (attempt 4, blocking 1): a same-id respawn within the trust window must not
+    // inherit the exited process's positive confirm — pane session ids are stable across cold
+    // restore.
+    this.lastPositiveForegroundConfirmAt.delete(ptyId)
     // Why: a Claude agent-team leader whose PTY exits naturally (agent finished,
     // process died, renderer reload) must release its team + nested panes map.
     // Previously only explicit closeTerminal evicted it, so natural exits leaked
@@ -33944,6 +33960,9 @@ export class OrcaRuntimeService {
       this.agentTurnBoundaryLastFiredAtByPaneKey.delete(droppedPaneKey)
     }
     this.ptysById.delete(ptyId)
+    // G1 repair (non-blocking 4): a dropped ptyId must not keep a stale positive-confirm trust
+    // entry that a later, unrelated reuse of the same id could read.
+    this.lastPositiveForegroundConfirmAt.delete(ptyId)
     this.recentPtyOutputById.delete(ptyId)
     this.setupCompletionTokenByPtyId.delete(ptyId)
     this.clearWaitBlockedCheckState(ptyId)
@@ -35955,6 +35974,31 @@ export class OrcaRuntimeService {
     return 'not_agent'
   }
 
+  // S10-23a G1 repair: the --inject gate's resolve edge. isPeerPaneForegroundAgentLive
+  // (:4619) is the W-3 beforeWrite check and returns false for every renderer leaf handle
+  // (it only resolves a `pty:` tab-id record) — dispatch handles are overwhelmingly renderer
+  // leaves, so that check refused every live agent. This resolves the ptyId for either handle
+  // kind and runs confirmDeliveryForegroundIsAgent's three-valued rule instead: 'not_agent' is
+  // the only verdict that refuses; 'unknown' (no confirm support, e.g. SSH) is not a refusal.
+  async confirmDispatchInjectForegroundIsAgent(
+    handle: string
+  ): Promise<'agent' | 'not_agent' | 'unknown'> {
+    let ptyId: string | null | undefined
+    try {
+      ptyId =
+        this.getLivePtyForHandle(handle)?.pty.ptyId ?? this.getLiveLeafForHandle(handle).leaf.ptyId
+    } catch {
+      // Neither a live pty nor a live leaf resolved (e.g. getLiveLeafForHandle throwing
+      // terminal_handle_stale) is not proof of absence — same three-valued rule as below.
+      return 'unknown'
+    }
+    if (!ptyId) {
+      // No ptyId to confirm against (e.g. a not-yet-spawned leaf) is not proof of absence.
+      return 'unknown'
+    }
+    return this.confirmDeliveryForegroundIsAgent(ptyId)
+  }
+
   private async isRecognizedForegroundAgentProcess(
     ptyId: string,
     foregroundProcess: string,
@@ -36281,6 +36325,23 @@ export class OrcaRuntimeService {
       }
     }
     return false
+  }
+
+  // G1 repair (attempt 4, blocking 1; round-4 recheck): a positive confirm is trusted only
+  // while it is younger than TUI_IDLE_FOREGROUND_CONFIRM_TRUST_MS AND the pty's output sequence
+  // has not advanced since it completed — otherwise a second waiter on the same ptyId can
+  // resolve on a confirm that predates the agent's exit. Keyed on ptyOutputSequenceById rather
+  // than a record's lastOutputAt because a renderer graph resync swaps in a fresh leaf/pty
+  // object that never sees output again, freezing a stale lastOutputAt.
+  private hasRecentPositiveForegroundConfirm(ptyId: string): boolean {
+    const stamp = this.lastPositiveForegroundConfirmAt.get(ptyId)
+    if (stamp === undefined) {
+      return false
+    }
+    const fresh = performance.now() - stamp.monoAt < TUI_IDLE_FOREGROUND_CONFIRM_TRUST_MS
+    const noOutputSinceConfirm = (this.ptyOutputSequenceById.get(ptyId) ?? 0) === stamp.outputSeq
+    const sameGeneration = this.getPtyLifecycleGeneration(ptyId) === stamp.generation
+    return fresh && noOutputSinceConfirm && sameGeneration
   }
 
   // [R197] INV-P-LAUNCH-EDGE: while a launch command sits in the pane and the launched agent
@@ -37843,15 +37904,66 @@ export class OrcaRuntimeService {
         ) {
           foregroundPollInFlight = true
           startedForegroundPoll = true
-          const fg = await this.ptyController.getForegroundProcess(leaf.ptyId)
+          const leafPtyId = leaf.ptyId
+          const fg = await this.ptyController.getForegroundProcess(leafPtyId)
           if (fg && !isShellProcess(fg)) {
             const quietMs = leaf.lastOutputAt ? Date.now() - leaf.lastOutputAt : 0
             if (quietMs >= TUI_IDLE_QUIESCENCE_MS) {
-              if (waiter.pollInterval) {
-                clearInterval(waiter.pollInterval)
-                waiter.pollInterval = null
+              // G1 repair (non-blocking 4): a confirm inside the trust window means this
+              // already-quiet tick can resolve on its own premises, with no new forced scan —
+              // otherwise output recurring faster than the confirm latency defers forever.
+              if (this.hasRecentPositiveForegroundConfirm(leafPtyId)) {
+                if (!fenceHolds) {
+                  if (waiter.pollInterval) {
+                    clearInterval(waiter.pollInterval)
+                    waiter.pollInterval = null
+                  }
+                  this.resolveWaiter(
+                    waiter,
+                    buildTerminalWaitResult(waiter.handle, 'tui-idle', leaf)
+                  )
+                }
+              } else {
+                // B3: one FRESH scan at the resolve edge (never per poll) — getForegroundProcess
+                // above can serve a Windows-cached agent identity (pty-subprocess.ts:1117-1127)
+                // even after the agent has actually exited to a bare shell.
+                const preConfirmGeneration = this.getPtyLifecycleGeneration(leafPtyId)
+                const confirmed = this.ptyController.confirmForegroundProcess
+                  ? await this.ptyController.confirmForegroundProcess(leafPtyId)
+                  : fg
+                if (
+                  confirmed !== null &&
+                  !isShellProcess(confirmed) &&
+                  this.getPtyLifecycleGeneration(leafPtyId) === preConfirmGeneration
+                ) {
+                  this.lastPositiveForegroundConfirmAt.set(leafPtyId, {
+                    monoAt: performance.now(),
+                    outputSeq: this.ptyOutputSequenceById.get(leafPtyId) ?? 0,
+                    generation: preConfirmGeneration
+                  })
+                }
+                // G1 repair: null means "cannot prove it's a shell" (no confirm support, e.g.
+                // SSH/degraded providers) and must resolve, not hold forever. Premises computed
+                // before this await are stale during it (2-6s on Windows) — output or a fence
+                // arriving meanwhile must still be able to defer the resolve.
+                if (
+                  (confirmed === null || !isShellProcess(confirmed)) &&
+                  this.getPtyLifecycleGeneration(leafPtyId) === preConfirmGeneration
+                ) {
+                  const freshFenceHolds = this.launchPromptFenceHolds(this.ptysById.get(leafPtyId))
+                  const freshQuietMs = leaf.lastOutputAt ? Date.now() - leaf.lastOutputAt : 0
+                  if (!freshFenceHolds && freshQuietMs >= TUI_IDLE_QUIESCENCE_MS) {
+                    if (waiter.pollInterval) {
+                      clearInterval(waiter.pollInterval)
+                      waiter.pollInterval = null
+                    }
+                    this.resolveWaiter(
+                      waiter,
+                      buildTerminalWaitResult(waiter.handle, 'tui-idle', leaf)
+                    )
+                  }
+                }
               }
-              this.resolveWaiter(waiter, buildTerminalWaitResult(waiter.handle, 'tui-idle', leaf))
             }
           }
         }
@@ -37923,11 +38035,61 @@ export class OrcaRuntimeService {
           if (fg && !isShellProcess(fg)) {
             const quietMs = pty.lastOutputAt ? Date.now() - pty.lastOutputAt : 0
             if (quietMs >= TUI_IDLE_QUIESCENCE_MS) {
-              if (waiter.pollInterval) {
-                clearInterval(waiter.pollInterval)
-                waiter.pollInterval = null
+              // G1 repair (non-blocking 4): a confirm inside the trust window means this
+              // already-quiet tick can resolve on its own premises, with no new forced scan —
+              // otherwise output recurring faster than the confirm latency defers forever.
+              if (this.hasRecentPositiveForegroundConfirm(pty.ptyId)) {
+                if (!fenceHolds) {
+                  if (waiter.pollInterval) {
+                    clearInterval(waiter.pollInterval)
+                    waiter.pollInterval = null
+                  }
+                  this.resolveWaiter(
+                    waiter,
+                    buildPtyTerminalWaitResult(waiter.handle, 'tui-idle', pty)
+                  )
+                }
+              } else {
+                // B3: one FRESH scan at the resolve edge (never per poll) — getForegroundProcess
+                // above can serve a Windows-cached agent identity (pty-subprocess.ts:1117-1127)
+                // even after the agent has actually exited to a bare shell.
+                const preConfirmGeneration = this.getPtyLifecycleGeneration(pty.ptyId)
+                const confirmed = this.ptyController.confirmForegroundProcess
+                  ? await this.ptyController.confirmForegroundProcess(pty.ptyId)
+                  : fg
+                if (
+                  confirmed !== null &&
+                  !isShellProcess(confirmed) &&
+                  this.getPtyLifecycleGeneration(pty.ptyId) === preConfirmGeneration
+                ) {
+                  this.lastPositiveForegroundConfirmAt.set(pty.ptyId, {
+                    monoAt: performance.now(),
+                    outputSeq: this.ptyOutputSequenceById.get(pty.ptyId) ?? 0,
+                    generation: preConfirmGeneration
+                  })
+                }
+                // G1 repair: null means "cannot prove it's a shell" (no confirm support, e.g.
+                // SSH/degraded providers) and must resolve, not hold forever. Premises computed
+                // before this await are stale during it (2-6s on Windows) — output or a fence
+                // arriving meanwhile must still be able to defer the resolve.
+                if (
+                  (confirmed === null || !isShellProcess(confirmed)) &&
+                  this.getPtyLifecycleGeneration(pty.ptyId) === preConfirmGeneration
+                ) {
+                  const freshFenceHolds = this.launchPromptFenceHolds(pty)
+                  const freshQuietMs = pty.lastOutputAt ? Date.now() - pty.lastOutputAt : 0
+                  if (!freshFenceHolds && freshQuietMs >= TUI_IDLE_QUIESCENCE_MS) {
+                    if (waiter.pollInterval) {
+                      clearInterval(waiter.pollInterval)
+                      waiter.pollInterval = null
+                    }
+                    this.resolveWaiter(
+                      waiter,
+                      buildPtyTerminalWaitResult(waiter.handle, 'tui-idle', pty)
+                    )
+                  }
+                }
               }
-              this.resolveWaiter(waiter, buildPtyTerminalWaitResult(waiter.handle, 'tui-idle', pty))
             }
           }
         }
@@ -42852,6 +43014,11 @@ async function assertTerminalInputWithinLimitWithYield(text: string | undefined)
 const TUI_IDLE_DEFAULT_TIMEOUT_MS = 5 * 60 * 1000
 const TUI_IDLE_POLL_INTERVAL_MS = 2000
 const TUI_IDLE_QUIESCENCE_MS = 3000
+// G1 repair (non-blocking 4): a positive confirmForegroundProcess result (2-6s on Windows) is
+// trusted for this long, so a pane whose output recurs faster than the confirm latency (e.g.
+// every 4.5s) can still resolve on an already-quiet tick instead of re-arming a fresh forced
+// scan every time and deferring forever.
+const TUI_IDLE_FOREGROUND_CONFIRM_TRUST_MS = 10_000
 // Why (S10-9 review): how long a probe-observed idle authorizes this fallback's OWN
 // follow-up pushes on the same pty identity/generation before it must re-probe — short
 // enough that it can never stand in for a real live title observation, long enough to

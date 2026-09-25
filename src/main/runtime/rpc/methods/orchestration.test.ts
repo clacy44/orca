@@ -2334,6 +2334,14 @@ describe('orchestration RPC methods', () => {
             } as never)
           : null
       )
+      // B3 REPAIR default: the --inject gate takes one fresh confirm scan at its resolve edge
+      // (rpc/methods/orchestration.ts, confirmDispatchInjectForegroundIsAgent) on top of
+      // isTerminalRunningAgent. Tests exercising the happy path stub it live here; the refusal
+      // test below overrides it to 'not_agent'. G1 repair: THIS suite stubs the handle
+      // resolution the helper depends on (getLivePtyForHandle/getLiveLeafForHandle both need a
+      // real graph, which these mock-heavy fixtures don't have) — the real-runtime, unstubbed
+      // behavior of the helper itself is covered by orchestration-dispatch-inject-live-gate.test.ts.
+      vi.spyOn(runtime, 'confirmDispatchInjectForegroundIsAgent').mockResolvedValue('agent')
     }
 
     it('dispatches a task to a terminal', async () => {
@@ -2516,6 +2524,30 @@ describe('orchestration RPC methods', () => {
           inject: true
         })
       ).rejects.toThrow('no recognized agent detected')
+    })
+
+    // B3 REPAIR: isTerminalRunningAgent's own foreground read can be Windows-cached
+    // (pty-subprocess.ts). The gate takes one additional FRESH scan at the resolve edge —
+    // a pane whose agent has since exited to a bare shell must still be refused/held.
+    it('B3: refuses --inject when the fresh foreground scan finds the pane is no longer an agent', async () => {
+      setup()
+      provideInjectIdentity()
+      const task = db.createTask({ spec: 'work' })
+      vi.spyOn(runtime, 'isTerminalRunningAgent').mockResolvedValue(true)
+      vi.spyOn(runtime, 'confirmDispatchInjectForegroundIsAgent').mockResolvedValue('not_agent')
+      const agentPrompt = vi.spyOn(runtime, 'sendTerminalAgentPrompt')
+
+      await expect(
+        call('orchestration.dispatch', {
+          task: task.id,
+          to: 'term_a',
+          inject: true
+        })
+      ).rejects.toThrow('no longer a recognized agent')
+
+      expect(agentPrompt).not.toHaveBeenCalled()
+      expect(db.getTask(task.id)?.status).toBe('ready')
+      expect(db.getActiveDispatchForTerminal('term_a')).toBeUndefined()
     })
 
     it('rejects dispatch to occupied terminal', async () => {

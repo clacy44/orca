@@ -9095,6 +9095,392 @@ describe('OrcaRuntimeService', () => {
     })
   })
 
+  // B3 REPAIR: the foreground-fallback branch's per-poll getForegroundProcess read can be
+  // Windows-cached (pty-subprocess.ts:1117-1127); the RESOLVE edge takes one additional FRESH
+  // confirmForegroundProcess scan before actually resolving 'ready', so a pane whose agent
+  // already exited to a bare shell by the time the cache catches up must not resolve.
+  // G1 attempt-4 blocking 1 (M-trS): extended past 7s (up to the poll interval's 4th tick,
+  // still inside TUI_IDLE_FOREGROUND_CONFIRM_TRUST_MS) — a shell confirm must never seed the
+  // trust map, so every later quiet tick pays for its own fresh confirm rather than resolving
+  // on stale trust.
+  it('B3: does not resolve tui-idle when the fresh confirm proves the pane fell back to a shell', async () => {
+    vi.useFakeTimers()
+    try {
+      const confirmForegroundProcess = vi.fn(async () => 'zsh')
+      const runtime = createRuntime()
+      runtime.setPtyController({
+        write: () => true,
+        kill: () => true,
+        // Stale/cached per-poll read still reports the agent as foreground.
+        getForegroundProcess: async () => 'claude',
+        confirmForegroundProcess
+      })
+      syncSinglePty(runtime)
+      // No OSC title ever lands, so lastAgentStatus stays null and the foreground-fallback
+      // branch (not the title-driven fast path) is the only route to 'ready'.
+      runtime.onPtyData('pty-1', 'agent output, no title\r\n', Date.now())
+
+      const [terminal] = (await runtime.listTerminals()).terminals
+      const wait = runtime.waitForTerminal(terminal.handle, {
+        condition: 'tui-idle',
+        timeoutMs: 20_000
+      })
+      wait.catch(() => {})
+
+      // Past TUI_IDLE_QUIESCENCE_MS (3s) and a poll tick (2s) — the per-poll cached read alone
+      // would already call this idle-and-ready.
+      await vi.advanceTimersByTimeAsync(5_500)
+
+      expect(confirmForegroundProcess).toHaveBeenCalled()
+      await expect(Promise.race([wait, Promise.resolve('still-pending')])).resolves.toBe(
+        'still-pending'
+      )
+
+      // Extended past 7s, still inside the 10s trust window: a shell confirm must never have
+      // seeded lastPositiveForegroundConfirmAt, so this tick re-confirms instead of trusting.
+      await vi.advanceTimersByTimeAsync(4_000)
+
+      expect(confirmForegroundProcess.mock.calls.length).toBeGreaterThanOrEqual(3)
+      await expect(Promise.race([wait, Promise.resolve('still-pending')])).resolves.toBe(
+        'still-pending'
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // G1 repair: a confirm() that returns null (no confirm support, e.g. SSH/degraded providers,
+  // or the local provider's own "cannot confirm") is not proof of absence and must resolve —
+  // reading null as "not an agent" would time out every such pane on this arm.
+  it('G1 repair: resolves tui-idle when the fresh confirm returns null, with exactly one confirm call', async () => {
+    vi.useFakeTimers()
+    try {
+      const confirmForegroundProcess = vi.fn(async () => null)
+      const runtime = createRuntime()
+      runtime.setPtyController({
+        write: () => true,
+        kill: () => true,
+        getForegroundProcess: async () => 'claude',
+        confirmForegroundProcess
+      })
+      syncSinglePty(runtime)
+      runtime.onPtyData('pty-1', 'agent output, no title\r\n', Date.now())
+
+      const [terminal] = (await runtime.listTerminals()).terminals
+      const wait = runtime.waitForTerminal(terminal.handle, {
+        condition: 'tui-idle',
+        timeoutMs: 6_000
+      })
+
+      await vi.advanceTimersByTimeAsync(5_500)
+
+      await expect(wait).resolves.toMatchObject({
+        handle: terminal.handle,
+        condition: 'tui-idle'
+      })
+      expect(confirmForegroundProcess).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // G1 repair: quietMs is stale by the time the confirm await settles (2-6s on Windows) —
+  // output arriving during that await must still be able to defer the resolve.
+  it('G1 repair: output arriving during the confirm await defers the resolve', async () => {
+    vi.useFakeTimers()
+    try {
+      let resolveConfirm: ((value: string | null) => void) | undefined
+      const confirmForegroundProcess = vi.fn(
+        () =>
+          new Promise<string | null>((resolve) => {
+            resolveConfirm = resolve
+          })
+      )
+      const runtime = createRuntime()
+      runtime.setPtyController({
+        write: () => true,
+        kill: () => true,
+        getForegroundProcess: async () => 'claude',
+        confirmForegroundProcess
+      })
+      syncSinglePty(runtime)
+      runtime.onPtyData('pty-1', 'agent output, no title\r\n', Date.now())
+
+      const [terminal] = (await runtime.listTerminals()).terminals
+      const wait = runtime.waitForTerminal(terminal.handle, {
+        condition: 'tui-idle',
+        timeoutMs: 6_000
+      })
+      wait.catch(() => {})
+
+      await vi.advanceTimersByTimeAsync(3_500)
+      await vi.waitFor(() => expect(confirmForegroundProcess).toHaveBeenCalledTimes(1))
+
+      // Fresh output lands while the confirm is still in flight.
+      runtime.onPtyData('pty-1', 'more agent output\r\n', Date.now())
+      resolveConfirm?.('claude')
+      await vi.advanceTimersByTimeAsync(0)
+
+      await expect(Promise.race([wait, Promise.resolve('still-pending')])).resolves.toBe(
+        'still-pending'
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // G1 repair: same staleness as above, but for the launch-prompt fence — a fence armed
+  // while the confirm is in flight must still be able to hold the waiter.
+  it('G1 repair: a fence arriving during the confirm await defers the resolve', async () => {
+    vi.useFakeTimers()
+    try {
+      let resolveConfirm: ((value: string | null) => void) | undefined
+      const confirmForegroundProcess = vi.fn(
+        () =>
+          new Promise<string | null>((resolve) => {
+            resolveConfirm = resolve
+          })
+      )
+      const runtime = createRuntime()
+      runtime.setPtyController({
+        write: () => true,
+        kill: () => true,
+        getForegroundProcess: async () => 'claude',
+        confirmForegroundProcess
+      })
+      syncSinglePty(runtime)
+      setPtyLaunchAgent(runtime, 'pty-1', 'claude')
+      runtime.onPtyData('pty-1', 'agent output, no title\r\n', Date.now())
+
+      const [terminal] = (await runtime.listTerminals()).terminals
+      const wait = runtime.waitForTerminal(terminal.handle, {
+        condition: 'tui-idle',
+        timeoutMs: 6_000
+      })
+      wait.catch(() => {})
+
+      await vi.advanceTimersByTimeAsync(3_500)
+      await vi.waitFor(() => expect(confirmForegroundProcess).toHaveBeenCalledTimes(1))
+
+      // The launch-prompt fence arms while the confirm is still in flight.
+      runtime.noteTerminalSpawnCommand('pty-1', 'claude')
+      resolveConfirm?.('claude')
+      await vi.advanceTimersByTimeAsync(0)
+
+      await expect(Promise.race([wait, Promise.resolve('still-pending')])).resolves.toBe(
+        'still-pending'
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // G1 round-3 non-blocking 4: output recurring faster than the confirm latency (2-6s on
+  // Windows) previously deferred the resolve forever, because every quiet tick paid for its
+  // own fresh forced scan. A positive confirm is now trusted for ~10s so a later quiet tick can
+  // resolve without repeating the scan.
+  it('G1 repair (non-blocking 4): periodic output every 4.5s with a 3s confirm still resolves, not times out', async () => {
+    vi.useFakeTimers()
+    try {
+      const confirmForegroundProcess = vi.fn(
+        () =>
+          new Promise<string | null>((resolve) => {
+            setTimeout(() => resolve('claude'), 3_000)
+          })
+      )
+      const runtime = createRuntime()
+      runtime.setPtyController({
+        write: () => true,
+        kill: () => true,
+        getForegroundProcess: async () => 'claude',
+        confirmForegroundProcess
+      })
+      syncSinglePty(runtime)
+      runtime.onPtyData('pty-1', 'agent output, no title\r\n', Date.now())
+
+      const [terminal] = (await runtime.listTerminals()).terminals
+      const wait = runtime.waitForTerminal(terminal.handle, {
+        condition: 'tui-idle',
+        timeoutMs: 20_000
+      })
+
+      const start = Date.now()
+      while (Date.now() - start < 20_000) {
+        await vi.advanceTimersByTimeAsync(500)
+        if ((Date.now() - start) % 4_500 === 0) {
+          runtime.onPtyData('pty-1', 'status tick\r\n', Date.now())
+        }
+      }
+      await vi.advanceTimersByTimeAsync(600)
+
+      await expect(wait).resolves.toMatchObject({
+        handle: terminal.handle,
+        condition: 'tui-idle'
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // G1 attempt-4 blocking 1: a second waiter on the same ptyId must not resolve on a positive
+  // confirm that predates fresh output — the confirm never moves the daemon's cache-refresh
+  // clock, so trusting it after new output lands can resolve on an exited agent (leaf edge).
+  it('G1 repair (attempt 4): output after the confirm voids trust, so a later waiter re-confirms', async () => {
+    vi.useFakeTimers()
+    try {
+      const confirmForegroundProcess = vi
+        .fn<() => Promise<string | null>>()
+        .mockResolvedValueOnce('claude')
+        .mockResolvedValueOnce('zsh')
+      const runtime = createRuntime()
+      runtime.setPtyController({
+        write: () => true,
+        kill: () => true,
+        getForegroundProcess: async () => 'claude',
+        confirmForegroundProcess
+      })
+      syncSinglePty(runtime)
+      runtime.onPtyData('pty-1', 'agent output, no title\r\n', Date.now())
+
+      const [terminal] = (await runtime.listTerminals()).terminals
+      const w1 = runtime.waitForTerminal(terminal.handle, {
+        condition: 'tui-idle',
+        timeoutMs: 20_000
+      })
+
+      // W1 resolves on the first (positive) confirm at the first quiet tick, which also seeds
+      // lastPositiveForegroundConfirmAt for this ptyId.
+      await vi.advanceTimersByTimeAsync(4_000)
+      await expect(w1).resolves.toMatchObject({ condition: 'tui-idle' })
+      expect(confirmForegroundProcess).toHaveBeenCalledTimes(1)
+
+      // Fresh output lands strictly after the confirm completed — the caller's next wait is
+      // armed at once.
+      await vi.advanceTimersByTimeAsync(1)
+      runtime.onPtyData('pty-1', 'agent working again\r\n', Date.now())
+      const w2 = runtime.waitForTerminal(terminal.handle, {
+        condition: 'tui-idle',
+        timeoutMs: 20_000
+      })
+      w2.catch(() => {})
+
+      // Past the next quiescence window; still well inside the 10s trust window's age bound.
+      await vi.advanceTimersByTimeAsync(4_000)
+
+      // The stale trust must not resolve W2: a fresh confirm ran and saw the pane fell to a
+      // shell, so W2 stays pending.
+      expect(confirmForegroundProcess).toHaveBeenCalledTimes(2)
+      await expect(Promise.race([w2, Promise.resolve('still-pending')])).resolves.toBe(
+        'still-pending'
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // G1 round-4 recheck, blocking 1: a renderer graph resync swaps in a fresh leaf object that
+  // never sees output again, so voiding trust must key on ptyOutputSequenceById, not the
+  // captured leaf's frozen lastOutputAt.
+  it('G1N: output after the confirm voids trust even after a renderer graph resync (leaf edge)', async () => {
+    vi.useFakeTimers()
+    try {
+      const confirmForegroundProcess = vi
+        .fn<() => Promise<string | null>>()
+        .mockResolvedValueOnce('claude')
+        .mockResolvedValueOnce('zsh')
+      const runtime = createRuntime()
+      runtime.setPtyController({
+        write: () => true,
+        kill: () => true,
+        getForegroundProcess: async () => 'claude',
+        confirmForegroundProcess
+      })
+      syncSinglePty(runtime)
+      runtime.onPtyData('pty-1', 'agent output, no title\r\n', Date.now())
+
+      const [terminal] = (await runtime.listTerminals()).terminals
+      const w1 = runtime.waitForTerminal(terminal.handle, {
+        condition: 'tui-idle',
+        timeoutMs: 20_000
+      })
+
+      await vi.advanceTimersByTimeAsync(4_000)
+      await expect(w1).resolves.toMatchObject({ condition: 'tui-idle' })
+      expect(confirmForegroundProcess).toHaveBeenCalledTimes(1)
+
+      const w2 = runtime.waitForTerminal(terminal.handle, {
+        condition: 'tui-idle',
+        timeoutMs: 20_000
+      })
+      w2.catch(() => {})
+
+      // A renderer graph sync (any title/focus/layout change) republishes the same leaf as a
+      // new object; the fix must not trust it just because the object never saw new output.
+      syncSinglePty(runtime)
+      await vi.advanceTimersByTimeAsync(1)
+      runtime.onPtyData('pty-1', 'agent working again\r\n', Date.now())
+
+      await vi.advanceTimersByTimeAsync(4_000)
+
+      expect(confirmForegroundProcess.mock.calls.length).toBeGreaterThanOrEqual(2)
+      await expect(Promise.race([w2, Promise.resolve('still-pending')])).resolves.toBe(
+        'still-pending'
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // G1 attempt-4 blocking 1: a stamp older than TUI_IDLE_FOREGROUND_CONFIRM_TRUST_MS (10s) must
+  // not be trusted even with no intervening output (leaf edge).
+  it('G1 repair (attempt 4): trust expires after TUI_IDLE_FOREGROUND_CONFIRM_TRUST_MS', async () => {
+    vi.useFakeTimers()
+    try {
+      const confirmForegroundProcess = vi
+        .fn<() => Promise<string | null>>()
+        .mockResolvedValueOnce('claude')
+        .mockResolvedValueOnce('zsh')
+      const runtime = createRuntime()
+      runtime.setPtyController({
+        write: () => true,
+        kill: () => true,
+        getForegroundProcess: async () => 'claude',
+        confirmForegroundProcess
+      })
+      syncSinglePty(runtime)
+      runtime.onPtyData('pty-1', 'agent output, no title\r\n', Date.now())
+
+      const [terminal] = (await runtime.listTerminals()).terminals
+      const w1 = runtime.waitForTerminal(terminal.handle, {
+        condition: 'tui-idle',
+        timeoutMs: 20_000
+      })
+
+      await vi.advanceTimersByTimeAsync(4_000)
+      await expect(w1).resolves.toMatchObject({ condition: 'tui-idle' })
+      expect(confirmForegroundProcess).toHaveBeenCalledTimes(1)
+
+      // No further output; let the confirm's stamp age past the 10s trust window before the
+      // next wait is even armed.
+      await vi.advanceTimersByTimeAsync(11_000)
+
+      const w2 = runtime.waitForTerminal(terminal.handle, {
+        condition: 'tui-idle',
+        timeoutMs: 20_000
+      })
+      w2.catch(() => {})
+      await vi.advanceTimersByTimeAsync(3_000)
+
+      // Expired trust must force a fresh confirm rather than resolving on the stale stamp.
+      expect(confirmForegroundProcess).toHaveBeenCalledTimes(2)
+      await expect(Promise.race([w2, Promise.resolve('still-pending')])).resolves.toBe(
+        'still-pending'
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('ignores the bare cursor-agent native title so synthesized spinner state survives', async () => {
     const ptyId = `${TEST_REPO_ID}::/tmp/worktree-a@@pty-bg`
     const runtime = createRuntime()
@@ -16877,6 +17263,350 @@ describe('OrcaRuntimeService', () => {
       handle,
       condition: 'tui-idle',
       status: 'running'
+    })
+  })
+
+  // G1 round-3 item 4: the leaf-edge foreground-fallback tests above (~9142, ~9176, ~9221) only
+  // exercise startTuiIdleFallbackPoll. startPtyTuiIdleFallbackPoll runs the same fresh-confirm
+  // logic on a runtime-owned pty: handle (createTerminal, not syncWindowGraph) and had no
+  // failing test of its own (G1 attempt-3 blocking 3).
+  describe('G1 repair (pty: handle foreground-fallback edge)', () => {
+    it('resolves tui-idle when the fresh confirm returns null, with exactly one confirm call', async () => {
+      vi.useFakeTimers()
+      try {
+        const confirmForegroundProcess = vi.fn(async () => null)
+        const runtime = new OrcaRuntimeService(store)
+        runtime.setPtyController({
+          spawn: vi.fn().mockResolvedValue({ id: 'pty-bg' }),
+          write: () => true,
+          kill: () => true,
+          getForegroundProcess: async () => 'claude',
+          confirmForegroundProcess
+        })
+        const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+          restoreProvenance: { kind: 'none' },
+          credentialLane: { kind: 'shared' }
+        })
+        runtime.onPtyData('pty-bg', 'agent output, no title\r\n', Date.now())
+
+        const wait = runtime.waitForTerminal(handle, { condition: 'tui-idle', timeoutMs: 6_000 })
+
+        await vi.advanceTimersByTimeAsync(5_500)
+
+        await expect(wait).resolves.toMatchObject({ handle, condition: 'tui-idle' })
+        expect(confirmForegroundProcess).toHaveBeenCalledTimes(1)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('defers the resolve when output arrives during the confirm await', async () => {
+      vi.useFakeTimers()
+      try {
+        let resolveConfirm: ((value: string | null) => void) | undefined
+        const confirmForegroundProcess = vi.fn(
+          () =>
+            new Promise<string | null>((resolve) => {
+              resolveConfirm = resolve
+            })
+        )
+        const runtime = new OrcaRuntimeService(store)
+        runtime.setPtyController({
+          spawn: vi.fn().mockResolvedValue({ id: 'pty-bg' }),
+          write: () => true,
+          kill: () => true,
+          getForegroundProcess: async () => 'claude',
+          confirmForegroundProcess
+        })
+        const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+          restoreProvenance: { kind: 'none' },
+          credentialLane: { kind: 'shared' }
+        })
+        runtime.onPtyData('pty-bg', 'agent output, no title\r\n', Date.now())
+
+        const wait = runtime.waitForTerminal(handle, { condition: 'tui-idle', timeoutMs: 6_000 })
+        wait.catch(() => {})
+
+        await vi.advanceTimersByTimeAsync(3_500)
+        await vi.waitFor(() => expect(confirmForegroundProcess).toHaveBeenCalledTimes(1))
+
+        runtime.onPtyData('pty-bg', 'more agent output\r\n', Date.now())
+        resolveConfirm?.('claude')
+        await vi.advanceTimersByTimeAsync(0)
+
+        await expect(Promise.race([wait, Promise.resolve('still-pending')])).resolves.toBe(
+          'still-pending'
+        )
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('defers the resolve when a launch-prompt fence arrives during the confirm await', async () => {
+      vi.useFakeTimers()
+      try {
+        let resolveConfirm: ((value: string | null) => void) | undefined
+        const confirmForegroundProcess = vi.fn(
+          () =>
+            new Promise<string | null>((resolve) => {
+              resolveConfirm = resolve
+            })
+        )
+        const runtime = new OrcaRuntimeService(store)
+        runtime.setPtyController({
+          spawn: vi.fn().mockResolvedValue({ id: 'pty-bg' }),
+          write: () => true,
+          kill: () => true,
+          getForegroundProcess: async () => 'claude',
+          confirmForegroundProcess
+        })
+        const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+          restoreProvenance: { kind: 'none' },
+          credentialLane: { kind: 'shared' }
+        })
+        setPtyLaunchAgent(runtime, 'pty-bg', 'claude')
+        runtime.onPtyData('pty-bg', 'agent output, no title\r\n', Date.now())
+
+        const wait = runtime.waitForTerminal(handle, { condition: 'tui-idle', timeoutMs: 6_000 })
+        wait.catch(() => {})
+
+        await vi.advanceTimersByTimeAsync(3_500)
+        await vi.waitFor(() => expect(confirmForegroundProcess).toHaveBeenCalledTimes(1))
+
+        runtime.noteTerminalSpawnCommand('pty-bg', 'claude')
+        resolveConfirm?.('claude')
+        await vi.advanceTimersByTimeAsync(0)
+
+        await expect(Promise.race([wait, Promise.resolve('still-pending')])).resolves.toBe(
+          'still-pending'
+        )
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // B3 pty-edge twin (G1 attempt-4 M-tui5): a fresh confirm that proves the pane fell back to
+    // a shell must never resolve, even though the per-poll cached read still reports the agent.
+    it('B3: does not resolve tui-idle when the fresh confirm proves the pane fell back to a shell', async () => {
+      vi.useFakeTimers()
+      try {
+        const confirmForegroundProcess = vi.fn(async () => 'zsh')
+        const runtime = new OrcaRuntimeService(store)
+        runtime.setPtyController({
+          spawn: vi.fn().mockResolvedValue({ id: 'pty-bg' }),
+          write: () => true,
+          kill: () => true,
+          getForegroundProcess: async () => 'claude',
+          confirmForegroundProcess
+        })
+        const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+          restoreProvenance: { kind: 'none' },
+          credentialLane: { kind: 'shared' }
+        })
+        runtime.onPtyData('pty-bg', 'agent output, no title\r\n', Date.now())
+
+        const wait = runtime.waitForTerminal(handle, { condition: 'tui-idle', timeoutMs: 6_000 })
+        wait.catch(() => {})
+
+        await vi.advanceTimersByTimeAsync(5_500)
+
+        expect(confirmForegroundProcess).toHaveBeenCalled()
+        await expect(Promise.race([wait, Promise.resolve('still-pending')])).resolves.toBe(
+          'still-pending'
+        )
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // G1 attempt-4 non-blocking 4/blocking 1 pty-edge twin: output recurring faster than the
+    // confirm latency must still resolve via the trust window, not time out.
+    it('G1 repair (attempt 4): periodic output every 4.5s with a 3s confirm still resolves, not times out', async () => {
+      vi.useFakeTimers()
+      try {
+        const confirmForegroundProcess = vi.fn(
+          () =>
+            new Promise<string | null>((resolve) => {
+              setTimeout(() => resolve('claude'), 3_000)
+            })
+        )
+        const runtime = new OrcaRuntimeService(store)
+        runtime.setPtyController({
+          spawn: vi.fn().mockResolvedValue({ id: 'pty-bg' }),
+          write: () => true,
+          kill: () => true,
+          getForegroundProcess: async () => 'claude',
+          confirmForegroundProcess
+        })
+        const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+          restoreProvenance: { kind: 'none' },
+          credentialLane: { kind: 'shared' }
+        })
+        runtime.onPtyData('pty-bg', 'agent output, no title\r\n', Date.now())
+
+        const wait = runtime.waitForTerminal(handle, { condition: 'tui-idle', timeoutMs: 20_000 })
+
+        const start = Date.now()
+        while (Date.now() - start < 20_000) {
+          await vi.advanceTimersByTimeAsync(500)
+          if ((Date.now() - start) % 4_500 === 0) {
+            runtime.onPtyData('pty-bg', 'status tick\r\n', Date.now())
+          }
+        }
+        await vi.advanceTimersByTimeAsync(600)
+
+        await expect(wait).resolves.toMatchObject({ handle, condition: 'tui-idle' })
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // G1 attempt-4 blocking 1 pty-edge twin: a second waiter must not resolve on a positive
+    // confirm that predates fresh output.
+    it('G1 repair (attempt 4): output after the confirm voids trust, so a later waiter re-confirms', async () => {
+      vi.useFakeTimers()
+      try {
+        const confirmForegroundProcess = vi
+          .fn<() => Promise<string | null>>()
+          .mockResolvedValueOnce('claude')
+          .mockResolvedValueOnce('zsh')
+        const runtime = new OrcaRuntimeService(store)
+        runtime.setPtyController({
+          spawn: vi.fn().mockResolvedValue({ id: 'pty-bg' }),
+          write: () => true,
+          kill: () => true,
+          getForegroundProcess: async () => 'claude',
+          confirmForegroundProcess
+        })
+        const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+          restoreProvenance: { kind: 'none' },
+          credentialLane: { kind: 'shared' }
+        })
+        runtime.onPtyData('pty-bg', 'agent output, no title\r\n', Date.now())
+
+        const w1 = runtime.waitForTerminal(handle, { condition: 'tui-idle', timeoutMs: 20_000 })
+
+        await vi.advanceTimersByTimeAsync(4_000)
+        await expect(w1).resolves.toMatchObject({ condition: 'tui-idle' })
+        expect(confirmForegroundProcess).toHaveBeenCalledTimes(1)
+
+        // Fresh output lands strictly after the confirm completed.
+        await vi.advanceTimersByTimeAsync(1)
+        runtime.onPtyData('pty-bg', 'agent working again\r\n', Date.now())
+        const w2 = runtime.waitForTerminal(handle, { condition: 'tui-idle', timeoutMs: 20_000 })
+        w2.catch(() => {})
+
+        await vi.advanceTimersByTimeAsync(4_000)
+
+        expect(confirmForegroundProcess).toHaveBeenCalledTimes(2)
+        await expect(Promise.race([w2, Promise.resolve('still-pending')])).resolves.toBe(
+          'still-pending'
+        )
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // G1 attempt-4 blocking 1 (trust map lifecycle): a same-id respawn must not inherit the
+    // exited process's positive confirm — pane session ids are stable across cold restore. No
+    // further output lands post-exit, isolating this from the output-voids-trust repair.
+    it('a pty exit clears the trust entry so a respawn re-confirms', async () => {
+      vi.useFakeTimers()
+      try {
+        const confirmForegroundProcess = vi
+          .fn<() => Promise<string | null>>()
+          .mockResolvedValueOnce('claude')
+          .mockResolvedValue('zsh')
+        const runtime = new OrcaRuntimeService(store)
+        runtime.setPtyController({
+          spawn: vi.fn().mockResolvedValue({ id: 'pty-bg' }),
+          write: () => true,
+          kill: () => true,
+          getForegroundProcess: async () => 'claude',
+          confirmForegroundProcess
+        })
+        const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+          restoreProvenance: { kind: 'none' },
+          credentialLane: { kind: 'shared' }
+        })
+        runtime.onPtyData('pty-bg', 'agent output, no title\r\n', Date.now())
+
+        const w1 = runtime.waitForTerminal(handle, { condition: 'tui-idle', timeoutMs: 20_000 })
+
+        await vi.advanceTimersByTimeAsync(4_000)
+        await expect(w1).resolves.toMatchObject({ condition: 'tui-idle' })
+        expect(confirmForegroundProcess).toHaveBeenCalledTimes(1)
+
+        // The pty exits; the same ptyId is reused by the respawned shell/agent.
+        runtime.onPtyExit('pty-bg', 0)
+
+        const w2 = runtime.waitForTerminal(handle, { condition: 'tui-idle', timeoutMs: 20_000 })
+        w2.catch(() => {})
+
+        await vi.advanceTimersByTimeAsync(4_000)
+
+        // A cleared trust entry forces a fresh confirm on every quiet tick (pty.lastOutputAt is
+        // unchanged, so quietMs is already past threshold at the first tick), each proving a
+        // shell — none of them may resolve on the stale trust.
+        expect(confirmForegroundProcess.mock.calls.length).toBeGreaterThan(1)
+        await expect(Promise.race([w2, Promise.resolve('still-pending')])).resolves.toBe(
+          'still-pending'
+        )
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // G1 round-5 recheck: a confirm still in flight when the pty exits, settling positive
+    // after onPtyExit clears the trust entry, must not re-seed trust for the next waiter.
+    it('a confirm in flight at pty exit does not re-seed trust for the next waiter', async () => {
+      vi.useFakeTimers()
+      try {
+        let release: (value: string | null) => void = () => {}
+        const confirmForegroundProcess = vi
+          .fn<() => Promise<string | null>>()
+          .mockImplementationOnce(
+            () =>
+              new Promise<string | null>((resolve) => {
+                release = resolve
+              })
+          )
+          .mockResolvedValue('zsh')
+        const runtime = new OrcaRuntimeService(store)
+        runtime.setPtyController({
+          spawn: vi.fn().mockResolvedValue({ id: 'pty-bg' }),
+          write: () => true,
+          kill: () => true,
+          getForegroundProcess: async () => 'claude',
+          confirmForegroundProcess
+        })
+        const { handle } = await runtime.createTerminal(`path:${TEST_WORKTREE_PATH}`, {
+          restoreProvenance: { kind: 'none' },
+          credentialLane: { kind: 'shared' }
+        })
+        runtime.onPtyData('pty-bg', 'agent output, no title\r\n', Date.now())
+
+        const w1 = runtime.waitForTerminal(handle, { condition: 'tui-idle', timeoutMs: 20_000 })
+        w1.catch(() => {})
+        await vi.advanceTimersByTimeAsync(4_000)
+        expect(confirmForegroundProcess).toHaveBeenCalledTimes(1)
+
+        // The pty exits while that confirm is still in flight; the confirm then settles positive.
+        runtime.onPtyExit('pty-bg', 0)
+        release('claude')
+        await vi.advanceTimersByTimeAsync(1)
+
+        const w2 = runtime.waitForTerminal(handle, { condition: 'tui-idle', timeoutMs: 20_000 })
+        w2.catch(() => {})
+        await vi.advanceTimersByTimeAsync(4_000)
+
+        expect(confirmForegroundProcess.mock.calls.length).toBeGreaterThan(1)
+        await expect(Promise.race([w2, Promise.resolve('still-pending')])).resolves.toBe(
+          'still-pending'
+        )
+      } finally {
+        vi.useRealTimers()
+      }
     })
   })
 

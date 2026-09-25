@@ -89,6 +89,11 @@ const SHELL_FOREGROUND_REFRESH_RETRY_MS = 5_000
 // Why: a Windows refresh forks a heavy powershell.exe CIM scan (~10-40x POSIX `ps`); idle shells retry slower, output re-arms the fast retry.
 const WINDOWS_IDLE_SHELL_FOREGROUND_REFRESH_RETRY_MS = 15_000
 const SHELL_FOREGROUND_OUTPUT_HOT_WINDOW_MS = 10_000
+// Why: a Windows refresh forks a whole-table CIM scan even when an agent is already cached; once
+// past the startup bootstrap window, relax to 5s while output flows and 30s once it goes quiet.
+export const WINDOWS_CACHED_AGENT_IDLE_REFRESH_MS = 30_000
+export const WINDOWS_CACHED_AGENT_ACTIVE_REFRESH_MS = 5_000
+export const WINDOWS_AGENT_OUTPUT_QUIET_MS = 10_000
 const STARTUP_AGENT_FOREGROUND_BOOTSTRAP_MS = 5_000
 const PTY_SPAWN_HEALTH_TIMEOUT_MS = 4_000
 // Why: retry once so a transient slow spawn doesn't route every terminal to the local fallback, losing daemon persistence.
@@ -982,14 +987,28 @@ export function createPtySubprocess(opts: PtySubprocessOptions): SubprocessHandl
       return
     }
     const now = Date.now()
-    const idleNoEvidenceShell =
-      fallbackIsShell && !getActiveStartupAgentForeground(now) && !cachedAgentForeground
+    const outsideStartupWindow = !getActiveStartupAgentForeground(now)
+    const idleNoEvidenceShell = fallbackIsShell && outsideStartupWindow && !cachedAgentForeground
+    // Why: a cached agent still needs a periodic fresh scan (exit detection), but on Windows every
+    // refresh is a whole-table CIM scan, so relax it once we're past the startup bootstrap window.
+    // Why: only relax when the raw pty foreground reports the shell (the agent is hidden behind
+    // it, e.g. a Windows ConPTY session) — a wrapper's own reported identity (e.g. omp) keeps the
+    // tighter TTL since its cache entry isn't an agent-liveness signal.
+    const cachedAgentOutsideStartup =
+      process.platform === 'win32' &&
+      fallbackIsShell &&
+      cachedAgentForeground !== null &&
+      outsideStartupWindow
     // Why: on Windows each refresh is a whole-table CIM scan, so only shells with no agent evidence and no recent output relax the retry.
-    const retryMs = !idleNoEvidenceShell
-      ? FOREGROUND_AGENT_CACHE_TTL_MS
-      : process.platform === 'win32' && now - lastOutputAt > SHELL_FOREGROUND_OUTPUT_HOT_WINDOW_MS
+    const retryMs = idleNoEvidenceShell
+      ? process.platform === 'win32' && now - lastOutputAt > SHELL_FOREGROUND_OUTPUT_HOT_WINDOW_MS
         ? WINDOWS_IDLE_SHELL_FOREGROUND_REFRESH_RETRY_MS
         : SHELL_FOREGROUND_REFRESH_RETRY_MS
+      : cachedAgentOutsideStartup
+        ? now - lastOutputAt > WINDOWS_AGENT_OUTPUT_QUIET_MS
+          ? WINDOWS_CACHED_AGENT_IDLE_REFRESH_MS
+          : WINDOWS_CACHED_AGENT_ACTIVE_REFRESH_MS
+        : FOREGROUND_AGENT_CACHE_TTL_MS
     if (foregroundRefreshInFlight || now - lastForegroundRefreshStartedAt < retryMs) {
       return
     }

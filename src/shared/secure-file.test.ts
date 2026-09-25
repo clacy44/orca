@@ -84,21 +84,22 @@ describe('hardenSecurePath', () => {
       ['/user', '/fo', 'csv', '/nh'],
       expect.objectContaining({ encoding: 'utf-8' })
     )
-    // PowerShell called asynchronously
+    // PowerShell called asynchronously. P1: path/sid/flag are embedded as literals inside the
+    // -EncodedCommand payload (not trailing argv) — decode it to inspect the script.
     const [powershellFile, powershellArgs, powershellOptions] = vi.mocked(execFile).mock.calls[0]!
     expect(powershellFile).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
-    expect(powershellArgs).toEqual(
-      expect.arrayContaining([
-        '-NoProfile',
-        '-NonInteractive',
-        '-ExecutionPolicy',
-        'Bypass',
-        'C:\\Users\\me\\.orca\\secret.json',
-        'S-1-5-21-1000',
-        '0'
-      ])
-    )
-    const script = (powershellArgs as string[])[5]!
+    expect(powershellArgs).toEqual([
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-EncodedCommand',
+      expect.any(String)
+    ])
+    const script = decodeEncodedCommand((powershellArgs as string[])[5]!)
+    expect(script).toContain("$path = 'C:\\Users\\me\\.orca\\secret.json'")
+    expect(script).toContain("$currentUserSid = 'S-1-5-21-1000'")
+    expect(script).toContain("$isDirectory = '0' -eq '1'")
     expect(script).toContain('SetAccessRuleProtection($true, $false)')
     expect(script).toContain('RemoveAccessRuleSpecific')
     expect(script).toContain('Unexpected ACL entry')
@@ -109,9 +110,10 @@ describe('hardenSecurePath', () => {
     hardenSecurePath('C:\\Users\\me\\.orca', { isDirectory: true, platform: 'win32' })
 
     const powershellArgs = vi.mocked(execFile).mock.calls[0]![1] as string[]
-    expect(powershellArgs.at(-1)).toBe('1')
-    expect(powershellArgs[5]).toContain('ContainerInherit')
-    expect(powershellArgs[5]).toContain('ObjectInherit')
+    const script = decodeEncodedCommand(powershellArgs.at(-1)!)
+    expect(script).toContain("$isDirectory = '1' -eq '1'")
+    expect(script).toContain('ContainerInherit')
+    expect(script).toContain('ObjectInherit')
   })
 
   it('keeps Windows hardening best-effort when ACL rewriting fails', () => {
@@ -146,7 +148,7 @@ describe('hardenSecurePath', () => {
     expect(getPowerShellCalls().map(getPowerShellTarget)).toEqual([userDataPath, targetPath])
   })
 
-  it('LRU-evicts Windows file hardening entries and safely re-hardens an evicted path', () => {
+  it('LRU-evicts Windows file hardening entries and safely re-hardens an evicted path', async () => {
     Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' })
     __resetSecureFileHardenedPathsForTests({
       maxEntries: 2,
@@ -161,15 +163,19 @@ describe('hardenSecurePath', () => {
     for (const path of paths) {
       writeFileSync(path, '{}')
       hardenExistingSecureFile(path)
+      // Item C: the read-path hardening now completes async (single-flight per path); let it
+      // settle before the next path so an evicted re-read below isn't coalesced as "in flight".
+      await flushWindowsFileHardening()
     }
 
     hardenExistingSecureFile(paths[0]!)
+    await flushWindowsFileHardening()
 
     const fileTargets = getPowerShellCalls()
       .map(getPowerShellTarget)
       .filter((path) => paths.includes(path))
     expect(fileTargets).toEqual([...paths, paths[0]])
-    expect(__getSecureFileHardeningCacheStateForTests().paths).toMatchObject({
+    expect(__getSecureFileHardeningCacheStateForTests().windowsFiles).toMatchObject({
       entries: 2
     })
   })
@@ -205,7 +211,10 @@ describe('hardenSecurePath', () => {
     })
   })
 
-  it('re-hardens an existing file when its metadata changes after caching', async () => {
+  it('does not re-harden a file on an in-place content change (identity unchanged)', async () => {
+    // Item C: the Windows read path now caches identity only (dev/ino/birthtime), not
+    // mtime/size/mode — an in-place content rewrite keeps the same inode, and the file's ACL is
+    // unaffected by its content, so it must not trigger another PowerShell spawn.
     Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' })
     const userDataPath = mkdtempSync(join(tmpdir(), 'orca-secure-file-'))
     tempDirs.push(userDataPath)
@@ -213,17 +222,15 @@ describe('hardenSecurePath', () => {
     writeFileSync(targetPath, '{}')
 
     hardenExistingSecureFile(targetPath)
+    await flushWindowsFileHardening()
     await waitForFileTimestampTick()
     writeFileSync(targetPath, '{"changed":true}')
     hardenExistingSecureFile(targetPath)
+    await flushWindowsFileHardening()
 
-    // call 1: dir + file. call 2: dir skipped (path-cached), file re-hardened (new mtime)
-    expect(getPowerShellCalls()).toHaveLength(3)
-    expect(getPowerShellCalls().map(getPowerShellTarget)).toEqual([
-      userDataPath,
-      targetPath,
-      targetPath
-    ])
+    // call 1: dir + file. call 2: dir path-cached, file identity unchanged (within the floor).
+    expect(getPowerShellCalls()).toHaveLength(2)
+    expect(getPowerShellCalls().map(getPowerShellTarget)).toEqual([userDataPath, targetPath])
   })
 
   it('keeps post-rename target hardening on every write while caching the directory', () => {
@@ -322,6 +329,28 @@ describe('hardenSecurePath', () => {
     expect(syncTargets.filter((entry) => entry === userDataPath)).toHaveLength(0)
     // The final published target's ACL must have been applied via the synchronous path.
     expect(getPowerShellCalls().map(getPowerShellTarget)).not.toContain(targetPath)
+  })
+
+  // G1 repair (item 6, F7 coverage gap): F7's own unit test (secure-path-windows-read-throttle.test.ts)
+  // only calls markWindowsFileHardened directly, so removing the seeding call from
+  // writeSecureFile itself left 26/26 green. Exercise the real integration: after a write, the
+  // very next read must spawn NOTHING (this fails red if that seeding call is deleted).
+  it('F7: the read immediately after a write spawns no PowerShell for the file (seeded by the write)', () => {
+    Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' })
+    const userDataPath = mkdtempSync(join(tmpdir(), 'orca-secure-file-'))
+    tempDirs.push(userDataPath)
+    const targetPath = join(userDataPath, 'secret.json')
+
+    writeSecureFile(targetPath, 'contents')
+    const powerShellCallsAfterWrite = getPowerShellCalls().length + getSyncPowerShellCalls().length
+
+    hardenExistingSecureFile(targetPath)
+
+    // No new call (async or sync) targeting the file: the write-path seed already marked it
+    // hardened, so the read path's hardenWindowsFileOnce must be a pure cache hit.
+    expect(getPowerShellCalls().length + getSyncPowerShellCalls().length).toBe(
+      powerShellCallsAfterWrite
+    )
   })
 
   // Nit #1 (review): the synchronous file path must cache as hardened ONLY on confirmed
@@ -454,12 +483,29 @@ function getSyncPowerShellCalls(): unknown[][] {
     .mock.calls.filter(([file]) => String(file).endsWith(POWERSHELL_SUFFIX))
 }
 
+function decodeEncodedCommand(base64: string): string {
+  return Buffer.from(base64, 'base64').toString('utf16le')
+}
+
+// P1: path/sid/flag are embedded as literals inside the -EncodedCommand payload, not passed
+// as trailing argv — recover the path by decoding the script and reading its `$path` literal.
 function getPowerShellTarget(call: unknown[]): string {
-  return (call[1] as string[])[6]!
+  const args = call[1] as string[]
+  const index = args.indexOf('-EncodedCommand')
+  const encoded = index !== -1 ? args[index + 1] : undefined
+  const script = encoded ? Buffer.from(encoded, 'base64').toString('utf16le') : ''
+  const match = /\$path = '((?:[^']|'')*)'/.exec(script)
+  return match ? match[1]!.replace(/''/g, "'") : ''
 }
 
 async function waitForFileTimestampTick(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 20))
+}
+
+// Lets a mocked (synchronously-resolving) Windows file hardening's .finally() land.
+async function flushWindowsFileHardening(): Promise<void> {
+  await Promise.resolve()
+  await Promise.resolve()
 }
 
 function statMode(path: string): number {
