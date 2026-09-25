@@ -19,6 +19,7 @@ import type { ChairSuccessionDeps } from './chair-succession-execute'
 import { defaultChairsManifestPath } from './chair-succession-manifest-entry'
 import { findSuccessionById, wasResumeContextServed } from './chair-succession-resume-context'
 import { settleHold } from './chair-succession-hold'
+import { refreshRetiredHandlesIndexSync } from './chair-succession-retired-index'
 
 function storeDepsFor(deps: ChairSuccessionDeps): ChairSuccessionStoreDeps {
   return { orcaHome: deps.orcaHome }
@@ -34,6 +35,16 @@ export type AcceptParams = {
   hostId: string
 }
 
+export type AcceptObligations = {
+  ackedDeliveryIds: string[]
+  outstandingDeliveryIds: string[]
+  retiredHandle: string | null
+  /** Slice 1: peer-question threads are not tracked by succession yet — always empty. */
+  pendingPeerQuestionThreadIds: string[]
+  /** Slice 1: pact turn-holding is not tracked by succession yet — always 0. */
+  pactTurnsHeld: number
+}
+
 export type AcceptResult = {
   ok: true
   successionId: string
@@ -42,7 +53,7 @@ export type AcceptResult = {
   runId: string
   generation: number
   resumeContext?: string
-  obligations: Record<string, never>
+  obligations: AcceptObligations
 }
 
 /** D-R215 §Protocol step 5 "the successor's accept call must arrive from the new pane with its
@@ -134,6 +145,7 @@ export async function acceptSuccession(
     succession: meta.id,
     at: new Date().toISOString()
   })
+  refreshRetiredHandlesIndexSync(deps.orcaHome)
 
   const confirmed = await transition(storeDepsFor(deps), meta.chair, meta.id, 'confirmed', {
     retiredHandle: meta.incumbent.terminalHandle
@@ -167,6 +179,25 @@ export async function acceptSuccession(
         'utf8'
       )
 
+  // S10-22a residual R238: read-only accessors (same pair chair-succession-execute.ts's seal path
+  // uses) against the successor's OWN mailbox/run, taken after the takeover above — anything
+  // still outstanding here arrived on/after the handoff, so the successor (not the acked-at-seal
+  // set) owns it.
+  const successorMailbox = `agent:${registration.agent.id}`
+  const outstandingMailbox = deps.db.getOutstandingMailboxDelivery(successorMailbox)
+  const outstandingRun = runId ? deps.db.getOutstandingRunDelivery(runId) : undefined
+  const outstandingDeliveryIds = [outstandingMailbox?.id, outstandingRun?.id].filter(
+    (id): id is string => id !== undefined
+  )
+
+  const obligations: AcceptObligations = {
+    ackedDeliveryIds: meta.ackedDeliveryIds ?? [],
+    outstandingDeliveryIds,
+    retiredHandle: meta.incumbent.terminalHandle,
+    pendingPeerQuestionThreadIds: [],
+    pactTurnsHeld: 0
+  }
+
   return {
     ok: true,
     successionId: confirmed.id,
@@ -175,7 +206,7 @@ export async function acceptSuccession(
     runId: runId ?? '',
     generation: runId ? (deps.db.getRun(runId)?.consumer_generation ?? 0) : 0,
     ...(resumeContextText !== undefined ? { resumeContext: resumeContextText } : {}),
-    obligations: {}
+    obligations
   }
 }
 

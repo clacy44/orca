@@ -51,6 +51,8 @@ export type CreateSealedInput = {
   charterText?: string
   resumeContextText: string
   incumbent: IncumbentHandle
+  /** S10-22a residual R238: the delivery ids acked at seal time, carried onto `meta.ackedDeliveryIds`. */
+  ackedDeliveryIds?: string[]
 }
 
 export type RetiredHandleEntry = {
@@ -179,7 +181,8 @@ export async function createSealed(
       checkpointSha: input.checkpointSha,
       charterSha: input.charterSha,
       incumbent: input.incumbent,
-      successor: {}
+      successor: {},
+      ...(input.ackedDeliveryIds !== undefined ? { ackedDeliveryIds: input.ackedDeliveryIds } : {})
     }
     await writeAtomic(join(dir, 'meta.json'), JSON.stringify(meta, null, 2))
     return meta

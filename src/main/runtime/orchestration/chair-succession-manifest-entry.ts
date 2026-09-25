@@ -1,18 +1,18 @@
 // S10-22a WAVE 2: the one place `chair-succession-seal.ts`/`chair-succession-execute.ts` read a
-// manifest entry from. Tolerates the manifest having no `succession`/`launchArgs` fields yet
-// (another worker's wave-2 slice adds them to chairs-manifest.ts's own validated shape) — read
-// defensively here rather than assume it.
+// manifest entry from. `succession`/`launchArgs` now live directly on chairs-manifest.ts's own
+// validated `ChairsManifestEntry` (S10-22a Wave 2 contract), so this module no longer needs its
+// own overlay type — `ManifestEntryWithSuccession` is kept as an alias only so the existing
+// importers below don't need a rename. `readManifestEntry` still tolerates a manifest entry with
+// no `succession` field (that field is optional on `ChairsManifestEntry` itself).
 import { readFile } from 'node:fs/promises'
 import { homedir, hostname } from 'node:os'
 import { join } from 'node:path'
 import { OrchestrationError } from './orchestration-error'
 import { parseChairsManifest, type ChairsManifestEntry } from './chairs-manifest'
-import type { CharterMode } from './chair-succession-types'
 
-export type ManifestEntryWithSuccession = ChairsManifestEntry & {
-  succession?: { enabled?: boolean; charterPath?: string; charterMode?: CharterMode }
-  launchArgs?: string[]
-}
+export type { ChairsManifestEntry }
+/** @deprecated use `ChairsManifestEntry` from `chairs-manifest.ts` directly. */
+export type ManifestEntryWithSuccession = ChairsManifestEntry
 
 export function defaultChairsManifestPath(): string {
   return join(homedir(), '.orca', 'chairs.json')

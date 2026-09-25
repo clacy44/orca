@@ -79,6 +79,10 @@ export type SuccessionMeta = {
   successor: SuccessorHandle
   retiredHandle?: string
   abortReason?: string
+  /** S10-22a residual R238: the delivery ids acknowledged (`--ack`) at seal time, carried through
+   * to `acceptSuccession`'s `obligations.ackedDeliveryIds` — additive, optional so existing
+   * meta.json files without it still parse. */
+  ackedDeliveryIds?: string[]
 }
 
 /** Whether the resume context embeds the charter text or only references it (D-R215 amendment

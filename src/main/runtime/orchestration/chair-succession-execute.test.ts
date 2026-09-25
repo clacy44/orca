@@ -20,6 +20,10 @@ import {
   type ChairSuccessionStoreDeps
 } from './chair-succession-store'
 import { _resetResumeContextServedForTest } from './chair-succession-resume-context'
+import {
+  retiredHandleChair,
+  _resetRetiredHandlesIndexForTest
+} from './chair-succession-retired-index'
 
 vi.mock('electron', () => ({
   BrowserWindow: { fromId: vi.fn(() => null) },
@@ -82,12 +86,14 @@ describe('S10-22a WAVE 2: chair-succession-execute', () => {
       manifestPath: join(tmp, 'chairs.json')
     }
     _resetResumeContextServedForTest()
+    _resetRetiredHandlesIndexForTest()
   })
 
   afterEach(async () => {
     db.close()
     await rm(tmp, { recursive: true, force: true })
     vi.restoreAllMocks()
+    _resetRetiredHandlesIndexForTest()
   })
 
   async function writeManifest(
@@ -579,6 +585,16 @@ describe('S10-22a WAVE 2: chair-succession-execute', () => {
       expect(confirmedMeta?.state).toBe('confirmed')
       const manifest = JSON.parse(await readFile(deps.manifestPath!, 'utf8'))
       expect(manifest.chairs[0].lastSessionId).toBe('sess-succ')
+      // Item 1: retired-handle index refreshed synchronously by accept, no restart needed.
+      expect(retiredHandleChair(HANDLE_A)).toBe('chair-x')
+      // R238: obligations reflect meta/db truthfully rather than the old `{}` placeholder.
+      expect(result.obligations).toEqual({
+        ackedDeliveryIds: [],
+        outstandingDeliveryIds: [],
+        retiredHandle: HANDLE_A,
+        pendingPeerQuestionThreadIds: [],
+        pactTurnsHeld: 0
+      })
     })
 
     it('chair review fix #3: takeover failure after the incumbent is closed aborts the record and leaves the successor pane open', async () => {

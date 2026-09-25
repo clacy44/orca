@@ -182,7 +182,8 @@ export async function sealSuccession(
     charterMode,
     ...(charterMode === 'embed' ? { charterText } : {}),
     resumeContextText: '',
-    incumbent: { paneKey: params.paneKey, terminalHandle: params.terminalHandle }
+    incumbent: { paneKey: params.paneKey, terminalHandle: params.terminalHandle },
+    ackedDeliveryIds: [...ack]
   })
 
   const input = await buildResumeContextInput(
