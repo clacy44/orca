@@ -69,7 +69,7 @@ export async function launchSuccessor(
       prompt:
         `orca chairs succession-accept ${meta.id} - Orca chair succession: you are the ` +
         `successor session for chair "${meta.chair}". Run this exact command immediately as ` +
-        `your FIRST tool call (use the Orca CLI on PATH: orca, or orca-ide on Linux; ` +
+        `your FIRST tool call (use the orca command on PATH; ` +
         `timeout 120000 ms) and then follow its printed output. Do not read files, run --help, ` +
         `or investigate first: the runtime holds the hand-over for 150 s.`,
       promptDelivery: 'auto-submit',
