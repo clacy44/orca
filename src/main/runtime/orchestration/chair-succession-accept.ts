@@ -24,6 +24,7 @@ import { getHoldRecord, settleHold } from './chair-succession-hold'
 import { purgeSuccessionsForChair } from './chair-succession-purge'
 import { enterConfirming } from './chair-succession-accept-confirm-lock'
 import {
+  abortForIncumbentExitTimeout,
   closeIncumbentAndWaitForExit,
   confirmIncumbentDead
 } from './chair-succession-accept-exit-wait'
@@ -119,9 +120,9 @@ export async function acceptSuccession(
   // resurrection race F1 guards against (an inventory round or late output can re-set the
   // liveness flags again between confirmIncumbentDead's read and this upsert) — retry within the
   // SAME bound instead of aborting a done takeover and stranding the chair. Re-confirming dead
-  // between attempts (not just sleeping) means a genuinely still-live incumbent still aborts
-  // promptly rather than spinning to the full bound. No transition happens in this loop, so the
-  // record stays `confirming` throughout.
+  // between attempts (not just sleeping) means a genuinely still-live incumbent still aborts as
+  // incumbent_exit_timeout once the re-confirm fails, within the same bound (N2). No transition
+  // happens in this loop, so the record stays `confirming` throughout.
   for (;;) {
     // G1-10z1 B1: clear the previous attempt's stale `name_taken` FIRST — otherwise a later
     // throw is retried against it, misreports name_taken instead of the real error, and can
@@ -148,7 +149,9 @@ export async function acceptSuccession(
     }
     // G1-10z1 N5: a name_taken whose holder pane is ALREADY dead (e.g. a different-name row on
     // the successor pane) is a structural rename collision, not the resurrection race F2 exists
-    // for — retry only while the refusal itself reports the holder as live.
+    // for — retry only while the refusal reports the holder pane NOT dead. N1 residual R258: a
+    // quarantined holder, or a holder that moved to a different live pane, also reads NOT dead
+    // here — this guard does not distinguish those from the resurrection race.
     if (
       registration &&
       !registration.ok &&
@@ -158,7 +161,9 @@ export async function acceptSuccession(
     ) {
       await new Promise((resolve) => setTimeout(resolve, 500))
       if (!(await confirmIncumbentDead(deps, hold.incumbent.paneKey, incumbentDeadline))) {
-        break
+        // N2: the incumbent still reads live within the bound — this is the exit-timeout
+        // situation (exit-wait.ts), not a takeover failure. Always throws.
+        return abortForIncumbentExitTimeout(deps, chair, params)
       }
       continue
     }

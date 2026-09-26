@@ -333,16 +333,121 @@ describe('S10-22b W-D1-DR1: chair-succession-accept, headless exit-wait field or
     expect(finalMeta?.abortReason).not.toContain('name_taken')
   }, 25_000)
 
-  it('N5: a name_taken whose holder is already dead is not retried', async () => {
+  // G1-10z1 attempt-2 review N2: after a `name_taken`, the loop's own re-confirm
+  // (confirmIncumbentDead) can come back unconfirmed-dead — the incumbent is either listed again
+  // by the daemon or the inventory round itself becomes unavailable — before the loop reaches the
+  // deadline. That is the exit-timeout situation, not a takeover failure.
+  function nameTakenThenIncumbentStatus(after: 'listed_again' | 'inventory_down'): { n: number } {
+    const calls = { n: 0 }
+    const realUpsert = db.upsertAgentByPaneSuffix.bind(db)
+    vi.spyOn(db, 'upsertAgentByPaneSuffix').mockImplementation((upsertParams) => {
+      calls.n += 1
+      if (calls.n === 1) {
+        if (after === 'listed_again') {
+          daemon.alive = true
+        } else {
+          daemon.listFails = true
+        }
+        return {
+          outcome: 'name_taken',
+          alternative: 'x-2',
+          livePaneKey: PANE_A,
+          liveTerminalHandle: HANDLE_A,
+          holderPaneDead: false
+        } as never
+      }
+      return realUpsert(upsertParams)
+    })
+    return calls
+  }
+  async function runAcceptWithHold(
+    meta: Awaited<ReturnType<typeof sealedLaunching>>,
+    chair: string
+  ) {
+    const holdPromise = holdSealRequest(deps, hostId, meta, undefined)
+    let caught: (Error & { code?: string; data?: { nextSteps?: string[] } }) | undefined
+    try {
+      await accept(meta.id)
+    } catch (err) {
+      caught = err as never
+    }
+    const finalMeta = (await read({ orcaHome: tmp }, chair, meta.id)) as
+      | { state?: string; abortReason?: string }
+      | undefined
+    const hold = (await holdPromise) as { reason?: string }
+    return { caught, finalMeta, hold }
+  }
+
+  it('N2-a: the incumbent is listed again after a name_taken — aborts succession_incumbent_exit_timeout, not takeover_failed; row and Run stay on the incumbent; hold reason incumbent_exit_timeout', async () => {
+    daemon.alive = false
+    const { meta } = await seal('chair-n2a')
+    const upserts = nameTakenThenIncumbentStatus('listed_again')
+    const { caught, finalMeta, hold } = await runAcceptWithHold(meta, 'chair-n2a')
+    const row = db.getAgentByName(hostId, 'chair-n2a')
+    const runRow = db.getRun(meta.runId as string)
+    expect(caught).toMatchObject({ code: 'succession_incumbent_exit_timeout' })
+    expect(caught?.code).not.toBe('succession_takeover_failed')
+    expect(upserts.n).toBe(1)
+    expect(finalMeta?.abortReason).toBe('incumbent_exit_timeout')
+    expect(hold.reason).toBe('incumbent_exit_timeout')
+    expect(row?.pane_key).toBe(PANE_A)
+    expect(runRow?.coordinator_pane_key).toBe(PANE_A)
+  }, 25_000)
+
+  it('N2-b: the inventory goes down after a name_taken — same abort', async () => {
+    daemon.alive = false
+    const { meta } = await seal('chair-n2b')
+    const upserts = nameTakenThenIncumbentStatus('inventory_down')
+    const { caught, finalMeta, hold } = await runAcceptWithHold(meta, 'chair-n2b')
+    const row = db.getAgentByName(hostId, 'chair-n2b')
+    const runRow = db.getRun(meta.runId as string)
+    expect(caught).toMatchObject({ code: 'succession_incumbent_exit_timeout' })
+    expect(caught?.code).not.toBe('succession_takeover_failed')
+    expect(upserts.n).toBe(1)
+    expect(finalMeta?.abortReason).toBe('incumbent_exit_timeout')
+    expect(hold.reason).toBe('incumbent_exit_timeout')
+    expect(row?.pane_key).toBe(PANE_A)
+    expect(runRow?.coordinator_pane_key).toBe(PANE_A)
+  }, 25_000)
+
+  // G1-10z1 attempt-2 review N3: the real upsert's structural refusal (a REGISTERED different-name
+  // row already on the successor pane) — a different row blocks the rename regardless of the
+  // incumbent's own liveness, so `holderPaneDead` is `true` with both live fields nulled
+  // (agent-directory.ts:188-199), never `holderPaneDead: true` alongside a live pane/handle as the
+  // old mock asserted (that shape the real upsert never produces).
+  function registerOtherOnSuccessorPane(): void {
+    const r = db.upsertAgentByPaneSuffix({
+      displayName: 'other-agent',
+      role: null,
+      hostId,
+      paneKey: SUCCESSOR_PANE,
+      terminalHandle: SUCCESSOR_HANDLE,
+      processIncarnation: null,
+      worktreeId: null,
+      worktreePath: null,
+      branch: null,
+      title: null,
+      agentLabel: null,
+      originHandle: SUCCESSOR_HANDLE,
+      originHostId: hostId,
+      isPaneLive: () => false
+    })
+    if (r.outcome !== 'created') {
+      throw new Error(`setup: ${r.outcome}`)
+    }
+  }
+
+  it('N5: a name_taken whose holder is already dead (a different row on the successor pane) is not retried — 1 upsert, aborts within 1 s', async () => {
     daemon.alive = false
     const { meta } = await seal('chair-n5')
-    const upserts = nameTakenOnFirstUpsert('chair-n5', 'real', true)
+    registerOtherOnSuccessorPane()
+    const upsertSpy = vi.spyOn(db, 'upsertAgentByPaneSuffix')
     const start = Date.now()
     const { caught, finalMeta } = await runAccept(meta, 'chair-n5')
     const elapsed = Date.now() - start
     expect(caught).toMatchObject({ code: 'succession_takeover_failed' })
     expect(finalMeta?.abortReason).toContain('name_taken')
-    expect(upserts.n).toBe(1)
+    expect(upsertSpy).toHaveBeenCalledTimes(1)
     expect(elapsed).toBeLessThan(1_000)
   }, 5_000)
 

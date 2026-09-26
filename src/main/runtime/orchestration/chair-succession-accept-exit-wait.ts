@@ -101,6 +101,18 @@ export async function closeIncumbentAndWaitForExit(
     // Confirmed dead via a fresh inventory round + the liveness predicate — proceed.
     return deadline
   }
+  return abortForIncumbentExitTimeout(deps, chair, params)
+}
+
+/** N2 (G1-10z1 attempt-2 review): the exit-timeout abort tail, shared by two callers that both
+ * mean the same thing (the incumbent still reads live within the bound) — the wait/confirm above,
+ * and `chair-succession-accept.ts`'s F2 retry loop when its own re-confirm after a `name_taken`
+ * comes back unconfirmed-dead. Always throws. */
+export async function abortForIncumbentExitTimeout(
+  deps: ChairSuccessionDeps,
+  chair: string,
+  params: { successionId: string; callerPaneKey: string; hostId: string }
+): Promise<never> {
   await transition(storeDepsFor(deps), chair, params.successionId, 'aborted', {
     abortReason: 'incumbent_exit_timeout'
   })
