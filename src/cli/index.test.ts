@@ -482,6 +482,33 @@ describe('orca root help', () => {
     expect(callMock).not.toHaveBeenCalled()
   })
 
+  // G1-10z2 N2: the same hand-maintained-list gap R262 fixed for `chairs` also hit `lane` —
+  // absent from `isCommandGroup`, `orca lane --help` printed "Unknown command: lane".
+  it('`lane --help` lists its verbs', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    logSpy.mockClear()
+
+    await main(['lane', '--help'], '/tmp/repo')
+
+    const laneHelp = String(logSpy.mock.calls[0][0])
+    expect(laneHelp).not.toContain('Unknown command')
+    expect(laneHelp).toContain('orca lane')
+    expect(callMock).not.toHaveBeenCalled()
+  })
+
+  // G1-10z2 N2: `supportsBrowserPageFlag` lacked `chairs`, so every chairs command advertised
+  // the browser-only `--page` flag in `orca chairs <verb> --help`.
+  it('`chairs succeed --help` does not advertise the browser-only --page flag', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    logSpy.mockClear()
+
+    await main(['chairs', 'succeed', '--help'], '/tmp/repo')
+
+    const help = String(logSpy.mock.calls[0][0])
+    expect(help).not.toContain('--page')
+    expect(callMock).not.toHaveBeenCalled()
+  })
+
   it('documents that --json and text return the same terminal topology (BUG 1)', async () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
     logSpy.mockClear()

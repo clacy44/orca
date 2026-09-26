@@ -109,7 +109,9 @@ const HOOK_STDIN_READ_TIMEOUT_MS = 2000
 // Claude Code's, not ours, and the fixed RPC contract (`{successionId?, hook?: boolean}`) has no
 // slot to carry the rest — reading further than `hook_event_name`/`source` would tie this file to
 // a payload the runtime never sees.
-async function readHookStdinAudit(
+// G1-10z2 B2: exported so tests can pass a stream (a PassThrough) through this parameter instead
+// of only exercising the `process.stdin` default.
+export async function readHookStdinAudit(
   stdin: NodeJS.ReadableStream = process.stdin
 ): Promise<{ hookEventName?: string; source?: string }> {
   if ((stdin as { isTTY?: boolean }).isTTY) {
@@ -122,13 +124,27 @@ async function readHookStdinAudit(
     }
   })()
   const timedOut = Symbol('hook-stdin-timeout')
+  // G1-10z2 B2: keep the timer handle and clear it once the race is over — an uncleared timer,
+  // and the still-open stdin pipe below, both kept the process alive past the handler returning
+  // (`orca chairs resume-context --hook` never calls `process.exit`).
+  let timer: ReturnType<typeof setTimeout> | undefined
   const raced = await Promise.race([
     readAll.then(() => 'done' as const).catch(() => 'done' as const),
-    new Promise<typeof timedOut>((resolve) =>
-      setTimeout(() => resolve(timedOut), HOOK_STDIN_READ_TIMEOUT_MS)
-    )
+    new Promise<typeof timedOut>((resolve) => {
+      timer = setTimeout(() => resolve(timedOut), HOOK_STDIN_READ_TIMEOUT_MS)
+    })
   ])
+  clearTimeout(timer)
   if (raced === timedOut) {
+    // G1-10z2 B2: destroy the stdin stream so a silent, never-closing pipe releases its handle
+    // instead of keeping the process alive until the writer closes it (fallback to `unref` for a
+    // stream with no `destroy`).
+    const destroyable = stdin as { destroy?: () => void; unref?: () => void }
+    if (typeof destroyable.destroy === 'function') {
+      destroyable.destroy()
+    } else {
+      destroyable.unref?.()
+    }
     return {}
   }
   const raw = Buffer.concat(chunks).toString('utf8').trim()
@@ -193,7 +209,7 @@ export const CHAIRS_SUCCESSION_HANDLERS: Record<string, CommandHandler> = {
     printResult(response, json, formatSuccessionAccept)
   },
 
-  'chairs resume-context': async ({ flags, client, json }) => {
+  'chairs resume-context': async ({ flags, client, json, stdin }) => {
     const hook = flags.has('hook')
     const markdown = flags.has('markdown')
     if ([hook, json, markdown].filter(Boolean).length > 1) {
@@ -205,7 +221,8 @@ export const CHAIRS_SUCCESSION_HANDLERS: Record<string, CommandHandler> = {
     if (hook) {
       // Why unused beyond parsing: see readHookStdinAudit's comment — nothing here forwards
       // into the RPC call, which never leaves this file with more than `hook: true`.
-      await readHookStdinAudit()
+      // G1-10z2 B2: forward ctx.stdin (undefined outside tests) so a PassThrough can be injected.
+      await readHookStdinAudit(stdin)
       // [G1-10z B1 repair] `succession_none` (no record for this pane) resolves to `{ok: false}`
       // and is handled below — but an RPC REFUSAL (no_pane_identity, no_registered_identity, a
       // transport error, anything else) THROWS, and previously nothing here caught it: an

@@ -57,8 +57,9 @@ export const CHAIRS_COMMAND_SPECS: CommandSpec[] = [
     allowedFlags: [...GLOBAL_FLAGS, 'markdown', 'hook'],
     notes: [
       '--hook reads a Claude Code SessionStart JSON payload from stdin (empty/invalid stdin is ' +
-        'fine), prints the context text and exits 0, or prints nothing and exits 0 when there is ' +
-        'no pending record for this pane.',
+        'fine; a TTY stdin is skipped outright; a non-TTY read that is still open after 2 s is ' +
+        'treated as empty and the stream is closed), prints the context text and exits 0, or ' +
+        'prints nothing and exits 0 when there is no pending record for this pane.',
       'Default and --markdown print the text; --json prints the raw RPC result.'
     ]
   }

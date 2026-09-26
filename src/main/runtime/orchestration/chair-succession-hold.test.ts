@@ -242,12 +242,16 @@ describe('S10-22a WAVE 2: chair-succession hold / abort', () => {
       expect.objectContaining({
         worktree: 'id:wt-1',
         agent: 'claude',
+        // G1-10z2 N3/N4 declared scenario correction: the em dash (the prompt's only non-ASCII
+        // byte, mis-typed by zsh under the C locale) is now ` - `, and the CLI-name instruction
+        // names both binaries (orca/orca-ide on Linux) instead of hardcoding `orca` — plain text,
+        // no backticks, since a backtick is PowerShell's escape character.
         prompt:
-          `orca chairs succession-accept ${sealedMeta.id}  — Orca chair succession: you are ` +
+          `orca chairs succession-accept ${sealedMeta.id} - Orca chair succession: you are ` +
           `the successor session for chair "${sealedMeta.chair}". Run this exact command ` +
-          `immediately as your FIRST tool call (use the orca CLI on PATH; timeout 120000 ms) ` +
-          `and then follow its printed output. Do not read files, run --help, or investigate ` +
-          `first: the runtime holds the hand-over for 150 s.`,
+          `immediately as your FIRST tool call (use the Orca CLI on PATH: orca, or orca-ide ` +
+          `on Linux; timeout 120000 ms) and then follow its printed output. Do not read ` +
+          `files, run --help, or investigate first: the runtime holds the hand-over for 150 s.`,
         promptDelivery: 'auto-submit',
         appendAgentArgs: '--flag-a --flag-b',
         presentation: 'background',

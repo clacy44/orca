@@ -20,8 +20,8 @@ function storeDepsFor(deps: ChairSuccessionDeps): ChairSuccessionStoreDeps {
 
 /** D-R215 §Protocol step 4. `createAgentSession` (orca-runtime.ts:28469 — the primitive
  * `requestChairRestore`'s own `ensureAgentSession` call sits beside, cited in chair-restore.ts)
- * spawns a NEW background tab, first prompt exactly `orca chairs succession-accept <id>`, launch
- * prefs from the manifest. Recording the successor pane/handle/session and transitioning
+ * spawns a NEW background tab, whose auto-submitted prompt (R253) says what the command is and
+ * demands it run first, launch prefs from the manifest. Recording the successor pane/handle/session and transitioning
  * sealed → launching happen in the SAME store write (wave 1's `LEGAL_TRANSITIONS` has no legal
  * launching → launching patch, so there is no earlier point to record a partial successor). A
  * spawn failure aborts immediately (`settleHold`) rather than waiting out the 150 s hold.
@@ -67,11 +67,11 @@ export async function launchSuccessor(
       // FIRST token sequence (any prefix-matching test/parser still matches) but the prompt now
       // says what the command is and demands it run first, before any exploration.
       prompt:
-        `orca chairs succession-accept ${meta.id}  — Orca chair succession: you are the ` +
+        `orca chairs succession-accept ${meta.id} - Orca chair succession: you are the ` +
         `successor session for chair "${meta.chair}". Run this exact command immediately as ` +
-        `your FIRST tool call (use the orca CLI on PATH; timeout 120000 ms) and then follow ` +
-        `its printed output. Do not read files, run --help, or investigate first: the runtime ` +
-        `holds the hand-over for 150 s.`,
+        `your FIRST tool call (use the Orca CLI on PATH: orca, or orca-ide on Linux; ` +
+        `timeout 120000 ms) and then follow its printed output. Do not read files, run --help, ` +
+        `or investigate first: the runtime holds the hand-over for 150 s.`,
       promptDelivery: 'auto-submit',
       ...(entry.launchArgs ? { appendAgentArgs: entry.launchArgs.join(' ') } : {}),
       ...(model || effort

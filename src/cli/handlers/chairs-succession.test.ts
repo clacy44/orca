@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { PassThrough } from 'node:stream'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { RuntimeClientError } from '../runtime/types'
 import { CHAIRS_SUCCESSION_HANDLERS } from './chairs-succession'
@@ -570,6 +571,52 @@ describe('chairs-succession handlers', () => {
       expect(logSpy).toHaveBeenCalledWith('hook context')
       expect(process.exitCode).toBe(0)
     }, 5000)
+
+    // G1-10z2 B2: on timeout, the stdin stream must be destroyed (not just outraced) or a real
+    // silent pipe keeps the process alive until the writer closes it (2005 ms -> +8726 ms measured).
+    it('resume-context --hook destroys an injected never-ending stream on timeout', async () => {
+      const stdin = new PassThrough()
+      const call = vi
+        .fn()
+        .mockResolvedValue({ result: { ok: true, text: 'hook context', served: true } })
+      const start = Date.now()
+
+      await CHAIRS_SUCCESSION_HANDLERS['chairs resume-context']({
+        flags: new Map<string, string | boolean>([['hook', true]]),
+        client: { call },
+        cwd: '/tmp',
+        json: false,
+        stdin
+      } as never)
+
+      expect(Date.now() - start).toBeLessThan(3000)
+      expect(stdin.destroyed).toBe(true)
+    }, 5000)
+
+    // G1-10z2 B2: the race timer must be cleared after a normal payload, or every ordinary hook
+    // run (JSON then EOF) keeps a live timer for the full 2 s bound after the handler returns.
+    it('resume-context --hook clears its race timer after a normal payload', async () => {
+      vi.useFakeTimers()
+      try {
+        const stdin = new PassThrough()
+        const call = vi
+          .fn()
+          .mockResolvedValue({ result: { ok: true, text: 'hook context', served: true } })
+        stdin.end(JSON.stringify({ hook_event_name: 'SessionStart', source: 'startup' }))
+
+        await CHAIRS_SUCCESSION_HANDLERS['chairs resume-context']({
+          flags: new Map<string, string | boolean>([['hook', true]]),
+          client: { call },
+          cwd: '/tmp',
+          json: false,
+          stdin
+        } as never)
+
+        expect(vi.getTimerCount()).toBe(0)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
 
     it('rejects passing more than one of --json/--markdown/--hook', async () => {
       const call = vi.fn()
