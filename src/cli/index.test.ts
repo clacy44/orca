@@ -448,6 +448,40 @@ describe('orca root help', () => {
     expect(callMock).not.toHaveBeenCalled()
   })
 
+  // R262: `chairs` was declared in handler-group-manifest.ts and had working specs, but was
+  // absent from both the top-level help text and `isCommandGroup`, so `orca --help` never
+  // listed it and `orca chairs --help` printed "Unknown command: chairs".
+  it('chairs group is listed in top-level help', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    logSpy.mockClear()
+
+    await main(['--help'], '/tmp/repo')
+
+    const rootHelp = String(logSpy.mock.calls[0][0])
+    expect(rootHelp).toContain('Chairs:')
+    expect(rootHelp).toContain('chairs restore')
+    expect(rootHelp).toContain('chairs succession-accept')
+    expect(callMock).not.toHaveBeenCalled()
+  })
+
+  it('`chairs --help` lists its verbs', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    logSpy.mockClear()
+
+    await main(['chairs', '--help'], '/tmp/repo')
+
+    const chairsHelp = String(logSpy.mock.calls[0][0])
+    expect(chairsHelp).not.toContain('Unknown command')
+    expect(chairsHelp).toContain('orca chairs')
+    expect(chairsHelp).toContain('restore')
+    expect(chairsHelp).toContain('status')
+    expect(chairsHelp).toContain('export')
+    expect(chairsHelp).toContain('succeed')
+    expect(chairsHelp).toContain('succession-accept')
+    expect(chairsHelp).toContain('resume-context')
+    expect(callMock).not.toHaveBeenCalled()
+  })
+
   it('documents that --json and text return the same terminal topology (BUG 1)', async () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
     logSpy.mockClear()

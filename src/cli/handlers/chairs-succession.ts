@@ -99,14 +99,37 @@ function formatSuccessionAccept(result: SuccessionAcceptResult): string {
   return lines.join('\n')
 }
 
+// R250: bounded read, `stdin` param defaulting to `process.stdin` — the smallest seam for a
+// PassThrough that never closes. A TTY stdin (no pipe/redirect) never closes on its own either,
+// so it is skipped outright; otherwise the read races a 2 s timer and a timeout is treated as an
+// empty payload (log nothing; the exit path below is unchanged either way).
+const HOOK_STDIN_READ_TIMEOUT_MS = 2000
+
 // Why only these two fields, nothing else forwarded: the SessionStart hook JSON's shape is
 // Claude Code's, not ours, and the fixed RPC contract (`{successionId?, hook?: boolean}`) has no
 // slot to carry the rest — reading further than `hook_event_name`/`source` would tie this file to
 // a payload the runtime never sees.
-async function readHookStdinAudit(): Promise<{ hookEventName?: string; source?: string }> {
+async function readHookStdinAudit(
+  stdin: NodeJS.ReadableStream = process.stdin
+): Promise<{ hookEventName?: string; source?: string }> {
+  if ((stdin as { isTTY?: boolean }).isTTY) {
+    return {}
+  }
   const chunks: Buffer[] = []
-  for await (const chunk of process.stdin) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)))
+  const readAll = (async () => {
+    for await (const chunk of stdin) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)))
+    }
+  })()
+  const timedOut = Symbol('hook-stdin-timeout')
+  const raced = await Promise.race([
+    readAll.then(() => 'done' as const).catch(() => 'done' as const),
+    new Promise<typeof timedOut>((resolve) =>
+      setTimeout(() => resolve(timedOut), HOOK_STDIN_READ_TIMEOUT_MS)
+    )
+  ])
+  if (raced === timedOut) {
+    return {}
   }
   const raw = Buffer.concat(chunks).toString('utf8').trim()
   if (raw.length === 0) {

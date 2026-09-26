@@ -22,6 +22,14 @@ Accounts:
   account add               Add a managed Claude or Codex account on this Orca host
   account list              List managed Claude and Codex accounts on this Orca host
 
+Chairs:
+  chairs restore            Restore every chair listed in a manifest: open its pane, resume its conversation
+  chairs status             Show the restore plan for a manifest without acting on it
+  chairs export             Write a manifest from the current agent directory
+  chairs succeed            Hand a chair off to a successor session and hold for the outcome
+  chairs succession-accept  Accept a pending succession as the successor session
+  chairs resume-context     Print the resume context for this pane after a succession
+
 Person lanes:
   lane persons              List people who can own a per-person Claude credential lane
   lane create-person        Create a person who can own a credential lane

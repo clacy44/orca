@@ -19,6 +19,7 @@ import { getDefaultWorkspaceSession } from '../../../shared/constants'
 import type { ChairSuccessionDeps } from './chair-succession-execute'
 import { holdSealRequest } from './chair-succession-hold'
 import { acceptSuccession } from './chair-succession-accept'
+import { INCUMBENT_EXIT_TIMEOUT_MS } from './chair-succession-accept-exit-wait'
 import {
   createSealed,
   transition,
@@ -404,6 +405,53 @@ describe('S10-22b W-D1-DR1: chair-succession-accept, headless exit-wait field or
     expect(caught).toMatchObject({ code: 'succession_incumbent_exit_timeout' })
     expect(caught?.code).not.toBe('succession_takeover_failed')
     expect(upserts.n).toBe(1)
+    expect(finalMeta?.abortReason).toBe('incumbent_exit_timeout')
+    expect(hold.reason).toBe('incumbent_exit_timeout')
+    expect(row?.pane_key).toBe(PANE_A)
+    expect(runRow?.coordinator_pane_key).toBe(PANE_A)
+  }, 25_000)
+
+  // R259: a name_taken landing AFTER `incumbentDeadline` used to skip the re-confirm entirely
+  // (the old `Date.now() < incumbentDeadline` gate sat on the SAME condition as the re-confirm
+  // itself) and broke straight to `succession_takeover_failed`, even though the incumbent reads
+  // live again — the exact resurrection race the re-confirm exists to catch. Fixed order:
+  // re-confirm death FIRST (bounded by the deadline, as before); only once confirmed dead does
+  // the deadline decide retry-vs-give-up.
+  it('a live-holder name_taken landing after the deadline re-confirms first and aborts incumbent_exit_timeout when the incumbent is listed again', async () => {
+    daemon.alive = false
+    const { meta } = await seal('chair-r259')
+    const startedAt = Date.now()
+    const realListTerminals = runtime.listTerminals.bind(runtime)
+    let listCalls2 = 0
+    // Delays the FIRST `registerAgentForPane` attempt's `findLiveTerminalByHandle` (the only
+    // caller of `listTerminals` on this path — `confirmIncumbentDead`'s own inventory round uses
+    // `refreshPtyLivenessScopedToPane`, not `listTerminals`) until well past `incumbentDeadline`,
+    // then flips the daemon back alive so the incumbent reads live again — "the first upsert
+    // refuses name_taken at ~deadline+50ms with the daemon listing the incumbent again".
+    vi.spyOn(runtime, 'listTerminals').mockImplementation(async (...args) => {
+      listCalls2 += 1
+      if (listCalls2 === 1) {
+        const target = startedAt + INCUMBENT_EXIT_TIMEOUT_MS + 150
+        const wait = target - Date.now()
+        if (wait > 0) {
+          await new Promise((resolve) => setTimeout(resolve, wait))
+        }
+        daemon.alive = true
+      }
+      return realListTerminals(...args)
+    })
+    vi.spyOn(db, 'upsertAgentByPaneSuffix').mockReturnValue({
+      outcome: 'name_taken',
+      alternative: 'chair-r259-2',
+      livePaneKey: PANE_A,
+      liveTerminalHandle: HANDLE_A,
+      holderPaneDead: false
+    } as never)
+    const { caught, finalMeta, hold } = await runAcceptWithHold(meta, 'chair-r259')
+    const row = db.getAgentByName(hostId, 'chair-r259')
+    const runRow = db.getRun(meta.runId as string)
+    expect(caught).toMatchObject({ code: 'succession_incumbent_exit_timeout' })
+    expect(caught?.code).not.toBe('succession_takeover_failed')
     expect(finalMeta?.abortReason).toBe('incumbent_exit_timeout')
     expect(hold.reason).toBe('incumbent_exit_timeout')
     expect(row?.pane_key).toBe(PANE_A)

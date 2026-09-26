@@ -6,6 +6,26 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { RuntimeClientError } from '../runtime/types'
 import { CHAIRS_SUCCESSION_HANDLERS } from './chairs-succession'
 
+// R250: a shell that never closes stdin looks like a PassThrough that never ends — the
+// async iterator never returns. Forces `isTTY` false (regardless of the real test-runner
+// stdin) so the assertion below exercises the bounded-race branch, not the TTY skip.
+function mockNeverClosingStdin(): { restore: () => void } {
+  const stdin = process.stdin
+  const previousAsyncIterator = stdin[Symbol.asyncIterator]
+  const previousIsTTY = (stdin as unknown as { isTTY?: boolean }).isTTY
+  ;(stdin as unknown as { isTTY?: boolean }).isTTY = false
+  ;(stdin as unknown as Record<symbol, unknown>)[Symbol.asyncIterator] = async function* () {
+    await new Promise(() => {})
+    yield '' // unreachable — the promise above never resolves
+  }
+  return {
+    restore: () => {
+      ;(stdin as unknown as Record<symbol, unknown>)[Symbol.asyncIterator] = previousAsyncIterator
+      ;(stdin as unknown as { isTTY?: boolean }).isTTY = previousIsTTY
+    }
+  }
+}
+
 function mockStdin(chunks: string[]): { restore: () => void } {
   const stdin = process.stdin
   const previousAsyncIterator = stdin[Symbol.asyncIterator]
@@ -524,6 +544,32 @@ describe('chairs-succession handlers', () => {
       expect(logSpy).not.toHaveBeenCalled()
       expect(process.exitCode).toBe(0)
     })
+
+    // R250: readHookStdinAudit read stdin to EOF unconditionally — with stdin open and silent
+    // (a shell that never closes it) `orca chairs resume-context --hook` blocked forever.
+    it('resume-context --hook returns within 3 s when stdin never closes', async () => {
+      const stdin = mockNeverClosingStdin()
+      const call = vi
+        .fn()
+        .mockResolvedValue({ result: { ok: true, text: 'hook context', served: true } })
+      const start = Date.now()
+
+      try {
+        await CHAIRS_SUCCESSION_HANDLERS['chairs resume-context']({
+          flags: new Map<string, string | boolean>([['hook', true]]),
+          client: { call },
+          cwd: '/tmp',
+          json: false
+        } as never)
+      } finally {
+        stdin.restore()
+      }
+
+      expect(Date.now() - start).toBeLessThan(3000)
+      expect(call).toHaveBeenCalledWith('orchestration.chairs.resumeContext', { hook: true })
+      expect(logSpy).toHaveBeenCalledWith('hook context')
+      expect(process.exitCode).toBe(0)
+    }, 5000)
 
     it('rejects passing more than one of --json/--markdown/--hook', async () => {
       const call = vi.fn()

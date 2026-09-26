@@ -62,7 +62,16 @@ export async function launchSuccessor(
       clientOperationId,
       worktree: entry.worktree,
       agent: 'claude',
-      prompt: `orca chairs succession-accept ${meta.id}`,
+      // R253: field fact — a fresh successor session given only the bare command deliberated
+      // 48s, investigated, and never ran it, aborting the 150s hold. The command stays the
+      // FIRST token sequence (any prefix-matching test/parser still matches) but the prompt now
+      // says what the command is and demands it run first, before any exploration.
+      prompt:
+        `orca chairs succession-accept ${meta.id}  — Orca chair succession: you are the ` +
+        `successor session for chair "${meta.chair}". Run this exact command immediately as ` +
+        `your FIRST tool call (use the orca CLI on PATH; timeout 120000 ms) and then follow ` +
+        `its printed output. Do not read files, run --help, or investigate first: the runtime ` +
+        `holds the hand-over for 150 s.`,
       promptDelivery: 'auto-submit',
       ...(entry.launchArgs ? { appendAgentArgs: entry.launchArgs.join(' ') } : {}),
       ...(model || effort
