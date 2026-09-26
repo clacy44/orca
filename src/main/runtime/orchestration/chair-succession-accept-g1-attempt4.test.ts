@@ -76,6 +76,16 @@ describe('S10-22a G1-10z attempt-4: chair-succession-accept (H1/H2/H4/H6)', () =
       getRepos: () => []
     } as never)
     runtime.setOrchestrationDb(db)
+    // W-D1-DR1 F1 harness: closeIncumbentAndWaitForExit's confirmIncumbentDead now runs a
+    // REQUIRED fresh controller-inventory round — without a controller, listTerminals(requireFresh)
+    // throws terminal_liveness_unavailable and every success-path accept aborts.
+    runtime.setPtyController({
+      spawn: async () => ({ id: 'never' }),
+      write: () => true,
+      kill: () => true,
+      getForegroundProcess: async () => null,
+      listProcesses: async () => []
+    } as never)
     deps = {
       db,
       runtime,
@@ -409,11 +419,19 @@ describe('S10-22a G1-10z attempt-4: chair-succession-accept (H1/H2/H4/H6)', () =
         handle: HANDLE_A,
         condition: 'exit'
       } as never)
-      vi.spyOn(runtime, 'getAgentDirectoryLivenessSignals').mockImplementation((paneKey) =>
-        paneKey === PANE_A
-          ? { terminalHandle: HANDLE_A, lastAgentStatus: null, observedLive: true }
-          : { terminalHandle: null, lastAgentStatus: null, observedLive: false }
-      )
+      // W-D1-DR1 F1 harness re-arrangement: F1 confirms the incumbent dead via a fresh
+      // inventory round, so forcing PANE_A to still read live here would be caught one step
+      // earlier as `incumbent_exit_timeout`, not `takeover_failed`. G1-10z1 N4: the writeAgentAudit
+      // mock below throws unconditionally, so the actual failure forced is a THROW at
+      // registerAgentForPane's own name_taken audit (register-agent-for-pane.ts:106-114), not a
+      // name_taken result — `registration` stays undefined and the loop exits on attempt 1.
+      vi.spyOn(db, 'upsertAgentByPaneSuffix').mockReturnValue({
+        outcome: 'name_taken',
+        alternative: 'chair-x-2',
+        livePaneKey: PANE_A,
+        liveTerminalHandle: HANDLE_A,
+        holderPaneDead: false
+      } as never)
       vi.spyOn(db, 'writeAgentAudit').mockImplementation(() => {
         throw new Error('SQLITE_FULL: database or disk is full')
       })
@@ -585,17 +603,20 @@ describe('S10-22a G1-10z attempt-4: chair-succession-accept (H1/H2/H4/H6)', () =
         handle: HANDLE_A,
         condition: 'exit'
       } as never)
-      // Force `registerAgentForPane`'s takeover to fail: report the INCUMBENT's own pane as
-      // still live (its `closeTerminal` above is mocked, not a real kill), so
-      // `upsertAgentByPaneSuffix` refuses `name_taken` with `holderPaneDead: false` instead of
-      // reminting.
-      vi.spyOn(runtime, 'getAgentDirectoryLivenessSignals').mockImplementation((paneKey) =>
-        paneKey === PANE_A
-          ? { terminalHandle: HANDLE_A, lastAgentStatus: null, observedLive: true }
-          : { terminalHandle: null, lastAgentStatus: null, observedLive: false }
-      )
-      // Registered as if `succeed`'s RPC call were still holding open, exactly as it is for real
-      // during the accept window — proves `settleHold` actually reaches it (not a no-op).
+      // W-D1-DR1 F1 harness re-arrangement: F1 confirms the incumbent dead via a fresh
+      // inventory round, so forcing PANE_A to still read live here would be caught one step
+      // earlier as `incumbent_exit_timeout`. Force `registerAgentForPane`'s own upsert to
+      // refuse `name_taken` (`holderPaneDead: false`) instead, so the takeover fails after the
+      // incumbent is confirmed dead — the case this test is actually about.
+      vi.spyOn(db, 'upsertAgentByPaneSuffix').mockReturnValue({
+        outcome: 'name_taken',
+        alternative: 'chair-x-2',
+        livePaneKey: PANE_A,
+        liveTerminalHandle: HANDLE_A,
+        holderPaneDead: false
+      } as never)
+      // Registered as if `succeed`'s RPC call were still holding open, exactly as it is for
+      // real during the accept window — proves `settleHold` actually reaches it (not a no-op).
       const holdPromise = holdSealRequest(deps, hostId, meta, undefined)
 
       await expect(
@@ -623,6 +644,6 @@ describe('S10-22a G1-10z attempt-4: chair-succession-accept (H1/H2/H4/H6)', () =
         code: 'succession_aborted',
         reason: 'takeover_failed'
       })
-    })
+    }, 15_000)
   })
 })

@@ -58,15 +58,20 @@ export const SUCCESSION_NEXT_STEPS: Record<string, string[]> = {
   succession_expired: [
     'The acceptance window passed and the succession was aborted; ask the incumbent chair to run `orca chairs succeed` again.'
   ],
+  // W-D1-DR1 F2 (Q5): the incumbent pane is ALWAYS already closed by the time this reaches the
+  // caller (F1 confirms it dead before the takeover ever runs) — tell the reader that plainly
+  // rather than "both panes may be down", which is false for the pane that is reading this.
   succession_takeover_failed: [
-    'Both panes may be down: run `orca chairs restore` twice, ten seconds apart, then retry from the restored chair.'
+    'the incumbent chair pane is already closed and this pane was NOT registered as the chair — do not send or receive chair traffic from it',
+    'recover the chair with `orca chairs restore`, run twice at least 10 s apart; chairs.json still names the pre-succession session, so restore resumes the incumbent conversation in a new pane',
+    'once the restored chair is up, end this session; the restored chair can retry `orca chairs succeed`'
   ],
   // G1 repair round (attempt 2), N8: five refusals reachable after the wave-2 pass with no map
   // entry — the runtime sent no `nextSteps` for any of them, so a caller saw a bare error code.
   succession_incumbent_exit_timeout: [
     'stand down: this pane is not the chair — do not send or receive chair traffic from it',
     'ask the incumbent (or a human) to check whether the old pane is actually dead',
-    'once confirmed dead, a fresh `orca chairs succeed` from the incumbent (if reachable) or manual recovery can retry'
+    'if the old pane later dies on its own, nobody holds the chair: recover with `orca chairs restore`, run twice at least 10 s apart, then retry `orca chairs succeed` from the restored chair'
   ],
   succession_run_moved: [
     'The incumbent no longer holds the Run this succession was sealed for; ask the incumbent to re-run `orca chairs succeed` against its CURRENT Run.'

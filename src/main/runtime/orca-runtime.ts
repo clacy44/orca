@@ -14294,6 +14294,29 @@ export class OrcaRuntimeService {
     }
   }
 
+  /** S10-22b D1-DR1 D2: a fresh controller-inventory round scoped to one pane's OWN connection
+   * (null for local, an SSH connectionId otherwise), not every registered provider — so one
+   * unreachable SSH provider cannot null a local succession's dead-incumbent confirmation
+   * (residual 1, W-D1-DR1-return.md). Uses the SAME absent-record clearing as the unscoped round
+   * (`refreshPtyWorktreeRecordsWithControllerInventory`'s sweep at :33811-33844 filters by
+   * `pty.connectionId`, so a scoped call clears exactly the records the scope owns). Returns
+   * false — the caller must fall back to the global round — when the pane's own connection
+   * cannot be determined (no PTY record for it, e.g. already pruned). */
+  async refreshPtyLivenessScopedToPane(paneKey: string): Promise<boolean> {
+    const pty = this.getPtyRecordForPaneKey(paneKey)
+    if (!pty) {
+      return false
+    }
+    const resolvedWorktrees = [...(await this.getResolvedWorktreeMap()).values()]
+    const inventory = await this.refreshPtyWorktreeRecordsWithControllerInventory(
+      resolvedWorktrees,
+      null,
+      undefined,
+      pty.connectionId
+    )
+    return inventory !== null
+  }
+
   /** S10-21a C4 (Ruling 34 Addendum 9): assembles the evidence bundle resolveIncumbentDeath
    * (incumbent-death.ts) reads — the only IO/mutable-state this slice performs. D1 from
    * ptysById + exitedPtyIdsThisGeneration; D2 from a live controller-inventory round (absence
