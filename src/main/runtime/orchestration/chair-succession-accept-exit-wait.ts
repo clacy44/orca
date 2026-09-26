@@ -4,7 +4,7 @@
 // S10-22b W-D1-DR1: neither a resolved exit wait nor a non-timeout rejection proves the
 // incumbent is dead. The controller's synthetic kill exit (`pty.ts:5866`) clears the liveness
 // flags before the process actually dies; the takeover's own inventory round
-// (`orca-runtime.ts:33751-33761`) or late output (`:11369-11371`) sets them again, and the real
+// (`orca-runtime.ts:33774-33784`) or late output (`:11369-11371`) sets them again, and the real
 // exit is discarded as a duplicate (`pty.ts:4254`). `confirmIncumbentDead` below is the only
 // thing either branch may trust: it re-runs a REQUIRED, fresh controller-inventory round and
 // reads the takeover's own dead-holder predicate immediately after it, under one shared bound.
@@ -35,7 +35,7 @@ export async function confirmIncumbentDead(
     let inventoryFresh = false
     try {
       // The same inventory round registerAgentForPane's findLiveTerminalByHandle runs;
-      // requireFreshPtyLiveness throws on a null/superseded round (orca-runtime.ts:18033-18035).
+      // requireFreshPtyLiveness throws on a null/superseded round (orca-runtime.ts:18057).
       inventoryFresh = await deps.runtime.refreshPtyLivenessScopedToPane(incumbentPaneKey)
       if (!inventoryFresh) {
         await deps.runtime.listTerminals(undefined, undefined, { requireFreshPtyLiveness: true })
@@ -132,7 +132,7 @@ export async function closeIncumbentAndWaitForExit(
       nextSteps: [
         'stand down: this pane is not the chair — do not send or receive chair traffic from it',
         'ask the incumbent (or a human) to check whether the old pane is actually dead',
-        'once confirmed dead, a fresh `orca chairs succeed` from the incumbent (if reachable) or manual recovery can retry'
+        'if the old pane later dies on its own, nobody holds the chair: recover with `orca chairs restore`, run twice at least 10 s apart, then retry `orca chairs succeed` from the restored chair'
       ]
     }
   )

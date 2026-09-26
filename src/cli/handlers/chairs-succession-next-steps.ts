@@ -71,7 +71,7 @@ export const SUCCESSION_NEXT_STEPS: Record<string, string[]> = {
   succession_incumbent_exit_timeout: [
     'stand down: this pane is not the chair — do not send or receive chair traffic from it',
     'ask the incumbent (or a human) to check whether the old pane is actually dead',
-    'once confirmed dead, a fresh `orca chairs succeed` from the incumbent (if reachable) or manual recovery can retry'
+    'if the old pane later dies on its own, nobody holds the chair: recover with `orca chairs restore`, run twice at least 10 s apart, then retry `orca chairs succeed` from the restored chair'
   ],
   succession_run_moved: [
     'The incumbent no longer holds the Run this succession was sealed for; ask the incumbent to re-run `orca chairs succeed` against its CURRENT Run.'

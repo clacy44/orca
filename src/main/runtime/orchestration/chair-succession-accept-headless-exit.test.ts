@@ -85,6 +85,10 @@ describe('S10-22b W-D1-DR1: chair-succession-accept, headless exit-wait field or
   let deps: ChairSuccessionDeps
   const hostId = 'local'
   const daemon = { alive: true, listFails: false, lateOutput: false }
+  // G1-10z1 N2: D2's SSH-down shape — the aggregate round (connectionId undefined) rejects while
+  // the local round (connectionId null) still answers from the fake daemon.
+  const d2 = { sshDown: false }
+  let listCalls: string[]
   let HANDLE_A: string
   let auditRows: WriteAgentAuditParams[]
 
@@ -94,6 +98,8 @@ describe('S10-22b W-D1-DR1: chair-succession-accept, headless exit-wait field or
     daemon.alive = true
     daemon.listFails = false
     daemon.lateOutput = false
+    d2.sshDown = false
+    listCalls = []
     const session = getDefaultWorkspaceSession()
     runtime = new OrcaRuntimeService({
       getSettings: () => ({
@@ -125,7 +131,11 @@ describe('S10-22b W-D1-DR1: chair-succession-accept, headless exit-wait field or
       },
       hasPty: () => false,
       getForegroundProcess: async () => null,
-      listProcesses: async () => {
+      listProcesses: async (connectionId?: string | null) => {
+        listCalls.push(connectionId === undefined ? 'aggregate' : 'local')
+        if (connectionId === undefined && d2.sshDown) {
+          throw new Error('ssh_provider_down')
+        }
         if (daemon.listFails) {
           throw new Error('daemon_unreachable')
         }
@@ -241,6 +251,100 @@ describe('S10-22b W-D1-DR1: chair-succession-accept, headless exit-wait field or
       hostId
     })
   }
+
+  // ---- G1-10z1 B1/N5 helpers: F2's retry loop must clear `registration` between attempts ----
+  function nameTakenOnFirstUpsert(
+    chair: string,
+    then: 'real' | 'throw',
+    holderPaneDead = false
+  ): { n: number } {
+    const realUpsert = db.upsertAgentByPaneSuffix.bind(db)
+    const calls = { n: 0 }
+    vi.spyOn(db, 'upsertAgentByPaneSuffix').mockImplementation((upsertParams) => {
+      calls.n += 1
+      if (calls.n === 1) {
+        return {
+          outcome: 'name_taken',
+          alternative: `${chair}-2`,
+          livePaneKey: PANE_A,
+          liveTerminalHandle: HANDLE_A,
+          holderPaneDead
+        } as never
+      }
+      if (then === 'throw') {
+        throw new Error('SQLITE_BUSY: database is locked (upsert)')
+      }
+      return realUpsert(upsertParams)
+    })
+    return calls
+  }
+  // The lane's own N2 fault shape: a post-upsert step (the `register` audit) throws AFTER the
+  // re-point already committed.
+  function throwOnPostUpsertRegisterAudit(): void {
+    vi.spyOn(db, 'writeAgentAudit').mockImplementation((row) => {
+      auditRows.push(row)
+      if (row.verb === 'register' && row.outcome !== 'name_taken') {
+        throw new Error('SQLITE_BUSY: database is locked (post-upsert register audit)')
+      }
+      return OrchestrationDb.prototype.writeAgentAudit.call(db, row)
+    })
+  }
+  async function runAccept(meta: Awaited<ReturnType<typeof sealedLaunching>>, chair: string) {
+    const holdPromise = holdSealRequest(deps, hostId, meta, undefined)
+    let result: Awaited<ReturnType<typeof accept>> | undefined
+    let caught: (Error & { code?: string; data?: { nextSteps?: string[] } }) | undefined
+    try {
+      result = await accept(meta.id)
+    } catch (err) {
+      caught = err as never
+    }
+    const finalMeta = (await read({ orcaHome: tmp }, chair, meta.id)) as
+      | { state?: string; abortReason?: string }
+      | undefined
+    await holdPromise
+    return { result, caught, finalMeta }
+  }
+
+  it('B1-a: a throw after the upsert committed, following an earlier name_taken, leaves the loop — ACCEPTED with takeoverCommittedDespiteThrow, Run on the successor pane', async () => {
+    daemon.alive = false
+    const { meta, agentId } = await seal('chair-b1a')
+    const upserts = nameTakenOnFirstUpsert('chair-b1a', 'real')
+    throwOnPostUpsertRegisterAudit()
+    const { result, caught, finalMeta } = await runAccept(meta, 'chair-b1a')
+    const row = db.getAgentByName(hostId, 'chair-b1a')
+    const runRow = db.getRun(meta.runId as string)
+    expect(caught).toBeUndefined()
+    expect(result?.agentId).toBe(agentId)
+    expect(result?.warnings).toContain('takeoverCommittedDespiteThrow')
+    expect(finalMeta?.state).toBe('confirmed')
+    expect(row?.pane_key).toBe(SUCCESSOR_PANE)
+    expect(runRow?.coordinator_pane_key).toBe(SUCCESSOR_PANE)
+    expect(upserts.n).toBe(2)
+  }, 25_000)
+
+  it('B1-b: a throwing upsert after an earlier name_taken is not retried — aborts naming the real error', async () => {
+    daemon.alive = false
+    const { meta } = await seal('chair-b1b')
+    const upserts = nameTakenOnFirstUpsert('chair-b1b', 'throw')
+    const { caught, finalMeta } = await runAccept(meta, 'chair-b1b')
+    expect(caught).toMatchObject({ code: 'succession_takeover_failed' })
+    expect(upserts.n).toBe(2)
+    expect(finalMeta?.abortReason).toContain('SQLITE_BUSY: database is locked (upsert)')
+    expect(finalMeta?.abortReason).not.toContain('name_taken')
+  }, 25_000)
+
+  it('N5: a name_taken whose holder is already dead is not retried', async () => {
+    daemon.alive = false
+    const { meta } = await seal('chair-n5')
+    const upserts = nameTakenOnFirstUpsert('chair-n5', 'real', true)
+    const start = Date.now()
+    const { caught, finalMeta } = await runAccept(meta, 'chair-n5')
+    const elapsed = Date.now() - start
+    expect(caught).toMatchObject({ code: 'succession_takeover_failed' })
+    expect(finalMeta?.abortReason).toContain('name_taken')
+    expect(upserts.n).toBe(1)
+    expect(elapsed).toBeLessThan(1_000)
+  }, 5_000)
 
   it('T1: field ordering: the exit wait resolves on the synthetic -1 exit while the daemon still lists the incumbent — accept waits for the inventory to drop it, then confirms the same agent id', async () => {
     const { meta, agentId } = await seal('chair-t1')
@@ -401,4 +505,47 @@ describe('S10-22b W-D1-DR1: chair-succession-accept, headless exit-wait field or
     expect(finalMeta?.state).toBe('aborted')
     expect(finalMeta?.abortReason).toContain('takeover_failed_after_close:name_taken')
   }, 20_000)
+
+  // ---- G1-10z1 N2: promote D2's scoped-inventory probes into the lane ----
+  function registerAudits(): string[] {
+    return auditRows
+      .filter((a) => a.actorPaneKey === SUCCESSOR_PANE && a.verb === 'register')
+      .map((a) => a.outcome)
+  }
+  function injectLateOutputRightBeforeTakeover(): void {
+    const realIncarnation = runtime.getTerminalProcessIncarnation.bind(runtime)
+    vi.spyOn(runtime, 'getTerminalProcessIncarnation').mockImplementationOnce((handle) => {
+      runtime.onPtyData(PTY_A, 'Resume this session with: claude --resume x\r\n', Date.now())
+      return realIncarnation(handle)
+    })
+  }
+
+  it('D2-a: with the aggregate inventory down (one SSH provider unreachable), a local succession still confirms through local-scoped rounds', async () => {
+    d2.sshDown = true
+    const { meta, agentId } = await seal('chair-d2a')
+    setTimeout(() => {
+      daemon.alive = false
+    }, 1_500)
+    const holdPromise = holdSealRequest(deps, hostId, meta, undefined)
+    const start = Date.now()
+    const result = await accept(meta.id)
+    const elapsed = Date.now() - start
+    await holdPromise
+    expect(result.agentId).toBe(agentId)
+    expect(elapsed).toBeGreaterThanOrEqual(1_400)
+    expect(registerAudits()).toEqual(['reminted'])
+    expect(listCalls).toContain('local')
+  }, 25_000)
+
+  it('D2-c: late output after the confirm is absorbed — audit reads name_taken then reminted', async () => {
+    d2.sshDown = true
+    daemon.alive = false
+    const { meta, agentId } = await seal('chair-d2c')
+    injectLateOutputRightBeforeTakeover()
+    const holdPromise = holdSealRequest(deps, hostId, meta, undefined)
+    const result = await accept(meta.id)
+    await holdPromise
+    expect(result.agentId).toBe(agentId)
+    expect(registerAudits()).toEqual(['name_taken', 'reminted'])
+  }, 25_000)
 })

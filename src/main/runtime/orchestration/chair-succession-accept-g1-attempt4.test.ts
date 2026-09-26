@@ -421,8 +421,10 @@ describe('S10-22a G1-10z attempt-4: chair-succession-accept (H1/H2/H4/H6)', () =
       } as never)
       // W-D1-DR1 F1 harness re-arrangement: F1 confirms the incumbent dead via a fresh
       // inventory round, so forcing PANE_A to still read live here would be caught one step
-      // earlier as `incumbent_exit_timeout`, not `takeover_failed`. Force the SAME failure
-      // (name_taken) one layer down instead, at the upsert the takeover itself performs.
+      // earlier as `incumbent_exit_timeout`, not `takeover_failed`. G1-10z1 N4: the writeAgentAudit
+      // mock below throws unconditionally, so the actual failure forced is a THROW at
+      // registerAgentForPane's own name_taken audit (register-agent-for-pane.ts:106-114), not a
+      // name_taken result — `registration` stays undefined and the loop exits on attempt 1.
       vi.spyOn(db, 'upsertAgentByPaneSuffix').mockReturnValue({
         outcome: 'name_taken',
         alternative: 'chair-x-2',
@@ -451,7 +453,7 @@ describe('S10-22a G1-10z attempt-4: chair-succession-accept (H1/H2/H4/H6)', () =
         code: 'succession_aborted',
         reason: 'takeover_failed'
       })
-    }, 15_000)
+    })
 
     // H6 (G1-10z attempt-4): the incumbent_exit_timeout audit write used to be unguarded — a
     // throwing audit skipped the settle below it, leaving the successor with a raw DB error

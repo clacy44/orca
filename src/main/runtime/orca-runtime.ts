@@ -14298,7 +14298,7 @@ export class OrcaRuntimeService {
    * (null for local, an SSH connectionId otherwise), not every registered provider — so one
    * unreachable SSH provider cannot null a local succession's dead-incumbent confirmation
    * (residual 1, W-D1-DR1-return.md). Uses the SAME absent-record clearing as the unscoped round
-   * (`refreshPtyWorktreeRecordsWithControllerInventory`'s sweep at :33788-33821 filters by
+   * (`refreshPtyWorktreeRecordsWithControllerInventory`'s sweep at :33811-33844 filters by
    * `pty.connectionId`, so a scoped call clears exactly the records the scope owns). Returns
    * false — the caller must fall back to the global round — when the pane's own connection
    * cannot be determined (no PTY record for it, e.g. already pruned). */

@@ -123,6 +123,10 @@ export async function acceptSuccession(
   // promptly rather than spinning to the full bound. No transition happens in this loop, so the
   // record stays `confirming` throughout.
   for (;;) {
+    // G1-10z1 B1: clear the previous attempt's stale `name_taken` FIRST — otherwise a later
+    // throw is retried against it, misreports name_taken instead of the real error, and can
+    // abort a takeover that already committed.
+    registration = undefined
     try {
       registration = await registerAgentForPane(deps.db, deps.runtime, {
         paneKey: params.callerPaneKey,
@@ -142,10 +146,14 @@ export async function acceptSuccession(
       registrationThrew = true
       registrationThrowReason = err instanceof Error ? err.message : String(err)
     }
+    // G1-10z1 N5: a name_taken whose holder pane is ALREADY dead (e.g. a different-name row on
+    // the successor pane) is a structural rename collision, not the resurrection race F2 exists
+    // for — retry only while the refusal itself reports the holder as live.
     if (
       registration &&
       !registration.ok &&
       registration.reason === 'name_taken' &&
+      registration.holderPaneDead === false &&
       Date.now() < incumbentDeadline
     ) {
       await new Promise((resolve) => setTimeout(resolve, 500))
