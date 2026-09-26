@@ -8,6 +8,9 @@ export type HandlerContext = {
   cwd: string
   json: boolean
   rawArgs?: string[]
+  // G1-10z2 B2: injectable stdin for `chairs resume-context --hook` — undefined falls back to
+  // `process.stdin` in the handler.
+  stdin?: NodeJS.ReadableStream
 }
 
 export type CommandHandler = (ctx: HandlerContext) => Promise<void>

@@ -134,7 +134,10 @@ export function supportsBrowserPageFlag(commandPath: string[]): boolean {
       'diagnostics',
       'linear',
       'skills',
-      'agent-context'
+      'agent-context',
+      // G1-10z2 N2: chairs commands are non-browser CLI verbs — they should not advertise the
+      // browser-only `--page` flag either.
+      'chairs'
     ].includes(commandPath[0])
   ) {
     return false
@@ -170,6 +173,10 @@ export function isCommandGroup(commandPath: string[]): boolean {
         'account',
         'artifacts',
         'automations',
+        'chairs',
+        // G1-10z2 N2: 'orca lane --help' listed 'Unknown command: lane' although 'lane' is a
+        // real command group.
+        'lane',
         'project',
         'repo',
         'worktree',

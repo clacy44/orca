@@ -235,17 +235,72 @@ describe('S10-22a WAVE 2: chair-succession hold / abort', () => {
       },
       sealedMeta
     )
+    // R253 declared scenario correction: the prompt is no longer the bare command — it now
+    // leads with the command (kept as the exact first token sequence) and then says what the
+    // command is and that it must run first, so a fresh successor session does not deliberate.
     expect(createSpy).toHaveBeenCalledWith(
       expect.objectContaining({
         worktree: 'id:wt-1',
         agent: 'claude',
-        prompt: `orca chairs succession-accept ${sealedMeta.id}`,
+        // G1-10z2 N3/N4 declared scenario correction: the em dash (the prompt's only non-ASCII
+        // byte, mis-typed by zsh under the C locale) is now ` - `, and the CLI-name instruction
+        // names both binaries (orca/orca-ide on Linux) instead of hardcoding `orca` — plain text,
+        // no backticks, since a backtick is PowerShell's escape character. G1-10z2 A2-N1
+        prompt:
+          `orca chairs succession-accept ${sealedMeta.id} - Orca chair succession: you are ` +
+          `the successor session for chair "${sealedMeta.chair}". Run this exact command ` +
+          `immediately as your FIRST tool call (use the orca command on PATH; ` +
+          `timeout 120000 ms) and then follow its printed output. Do not read ` +
+          `files, run --help, or investigate first: the runtime holds the hand-over for 150 s.`,
         promptDelivery: 'auto-submit',
         appendAgentArgs: '--flag-a --flag-b',
         presentation: 'background',
         launchPreferences: { model: 'incumbent-model', effort: 'high' }
       })
     )
+    settleHold(sealedMeta.id, {
+      ok: false,
+      code: 'succession_aborted',
+      successionId: sealedMeta.id,
+      reason: 'test_cleanup'
+    })
+    await holdPromise
+  })
+
+  // R253: a fresh Claude session given only the bare command deliberated 48s, investigated, and
+  // never ran it — the 150s hold aborted. The prompt must lead with the exact command and then
+  // say what it is and that it must be the first tool call.
+  it('the successor prompt starts with the accept command and names the chair and the first-tool-call instruction', async () => {
+    await mkdir(join(tmp, 'chairs'), { recursive: true })
+    const sealedMeta = await createSealed(storeDeps, 'chair-prompt-text', {
+      reason: 'batch_end',
+      checkpointText: VALID_CHECKPOINT,
+      checkpointSha: sha256(VALID_CHECKPOINT),
+      charterPath: join(tmp, 'CHARTER.md'),
+      charterSha: sha256('charter'),
+      charterMode: 'reference',
+      resumeContextText: 'resume text',
+      incumbent: { paneKey: PANE_A, terminalHandle: HANDLE_A }
+    })
+    const createSpy = vi.spyOn(runtime, 'createAgentSession').mockResolvedValue({
+      terminal: { paneKey: 'tabB:b', handle: 'term_b' }
+    } as never)
+    const holdPromise = holdSealRequest(deps, hostId, sealedMeta, undefined)
+    await launchSuccessor(
+      deps,
+      hostId,
+      {
+        name: 'chair-prompt-text',
+        worktree: 'id:wt-1',
+        agent: 'claude',
+        conversationId: 'sess-orig'
+      },
+      sealedMeta
+    )
+    const prompt = createSpy.mock.calls[0]?.[0]?.prompt as string
+    expect(prompt.startsWith(`orca chairs succession-accept ${sealedMeta.id}`)).toBe(true)
+    expect(prompt).toContain('chair-prompt-text')
+    expect(prompt).toContain('FIRST tool call')
     settleHold(sealedMeta.id, {
       ok: false,
       code: 'succession_aborted',

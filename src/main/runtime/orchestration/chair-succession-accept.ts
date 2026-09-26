@@ -156,16 +156,26 @@ export async function acceptSuccession(
       registration &&
       !registration.ok &&
       registration.reason === 'name_taken' &&
-      registration.holderPaneDead === false &&
-      Date.now() < incumbentDeadline
+      registration.holderPaneDead === false
     ) {
+      // R259: a name_taken landing AFTER the deadline must still re-confirm dead first — the
+      // deadline check alone cannot distinguish a genuinely still-live incumbent (abort as
+      // incumbent_exit_timeout) from one that only reads live due to the same resurrection race
+      // (fall through to takeover_failed once time is out).
+      // G1-10z2 B1: sample the deadline at the moment the refusal is examined, BEFORE the sleep
+      // and re-confirm — checking `Date.now() < incumbentDeadline` only after both can let a
+      // pre-deadline refusal's own 500 ms sleep + re-confirm cross the deadline and lose the
+      // retry 10z.1 gave it (falling to takeover_failed instead of retrying once more).
+      const landedBeforeDeadline = Date.now() < incumbentDeadline
       await new Promise((resolve) => setTimeout(resolve, 500))
       if (!(await confirmIncumbentDead(deps, hold.incumbent.paneKey, incumbentDeadline))) {
         // N2: the incumbent still reads live within the bound — this is the exit-timeout
         // situation (exit-wait.ts), not a takeover failure. Always throws.
         return abortForIncumbentExitTimeout(deps, chair, params)
       }
-      continue
+      if (landedBeforeDeadline) {
+        continue
+      }
     }
     break
   }

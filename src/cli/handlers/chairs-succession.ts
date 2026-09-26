@@ -99,14 +99,53 @@ function formatSuccessionAccept(result: SuccessionAcceptResult): string {
   return lines.join('\n')
 }
 
+// R250: bounded read, `stdin` param defaulting to `process.stdin` — the smallest seam for a
+// PassThrough that never closes. A TTY stdin (no pipe/redirect) never closes on its own either,
+// so it is skipped outright; otherwise the read races a 2 s timer and a timeout is treated as an
+// empty payload (log nothing; the exit path below is unchanged either way).
+const HOOK_STDIN_READ_TIMEOUT_MS = 2000
+
 // Why only these two fields, nothing else forwarded: the SessionStart hook JSON's shape is
 // Claude Code's, not ours, and the fixed RPC contract (`{successionId?, hook?: boolean}`) has no
 // slot to carry the rest — reading further than `hook_event_name`/`source` would tie this file to
 // a payload the runtime never sees.
-async function readHookStdinAudit(): Promise<{ hookEventName?: string; source?: string }> {
+// G1-10z2 B2: exported so tests can pass a stream (a PassThrough) through this parameter instead
+// of only exercising the `process.stdin` default.
+export async function readHookStdinAudit(
+  stdin: NodeJS.ReadableStream = process.stdin
+): Promise<{ hookEventName?: string; source?: string }> {
+  if ((stdin as { isTTY?: boolean }).isTTY) {
+    return {}
+  }
   const chunks: Buffer[] = []
-  for await (const chunk of process.stdin) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)))
+  const readAll = (async () => {
+    for await (const chunk of stdin) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)))
+    }
+  })()
+  const timedOut = Symbol('hook-stdin-timeout')
+  // G1-10z2 B2: keep the timer handle and clear it once the race is over — an uncleared timer,
+  // and the still-open stdin pipe below, both kept the process alive past the handler returning
+  // (`orca chairs resume-context --hook` never calls `process.exit`).
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const raced = await Promise.race([
+    readAll.then(() => 'done' as const).catch(() => 'done' as const),
+    new Promise<typeof timedOut>((resolve) => {
+      timer = setTimeout(() => resolve(timedOut), HOOK_STDIN_READ_TIMEOUT_MS)
+    })
+  ])
+  clearTimeout(timer)
+  if (raced === timedOut) {
+    // G1-10z2 B2: destroy the stdin stream so a silent, never-closing pipe releases its handle
+    // instead of keeping the process alive until the writer closes it (fallback to `unref` for a
+    // stream with no `destroy`).
+    const destroyable = stdin as { destroy?: () => void; unref?: () => void }
+    if (typeof destroyable.destroy === 'function') {
+      destroyable.destroy()
+    } else {
+      destroyable.unref?.()
+    }
+    return {}
   }
   const raw = Buffer.concat(chunks).toString('utf8').trim()
   if (raw.length === 0) {
@@ -170,7 +209,7 @@ export const CHAIRS_SUCCESSION_HANDLERS: Record<string, CommandHandler> = {
     printResult(response, json, formatSuccessionAccept)
   },
 
-  'chairs resume-context': async ({ flags, client, json }) => {
+  'chairs resume-context': async ({ flags, client, json, stdin }) => {
     const hook = flags.has('hook')
     const markdown = flags.has('markdown')
     if ([hook, json, markdown].filter(Boolean).length > 1) {
@@ -182,7 +221,8 @@ export const CHAIRS_SUCCESSION_HANDLERS: Record<string, CommandHandler> = {
     if (hook) {
       // Why unused beyond parsing: see readHookStdinAudit's comment — nothing here forwards
       // into the RPC call, which never leaves this file with more than `hook: true`.
-      await readHookStdinAudit()
+      // G1-10z2 B2: forward ctx.stdin (undefined outside tests) so a PassThrough can be injected.
+      await readHookStdinAudit(stdin)
       // [G1-10z B1 repair] `succession_none` (no record for this pane) resolves to `{ok: false}`
       // and is handled below — but an RPC REFUSAL (no_pane_identity, no_registered_identity, a
       // transport error, anything else) THROWS, and previously nothing here caught it: an
