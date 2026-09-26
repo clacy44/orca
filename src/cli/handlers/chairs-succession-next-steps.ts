@@ -58,8 +58,13 @@ export const SUCCESSION_NEXT_STEPS: Record<string, string[]> = {
   succession_expired: [
     'The acceptance window passed and the succession was aborted; ask the incumbent chair to run `orca chairs succeed` again.'
   ],
+  // W-D1-DR1 F2 (Q5): the incumbent pane is ALWAYS already closed by the time this reaches the
+  // caller (F1 confirms it dead before the takeover ever runs) — tell the reader that plainly
+  // rather than "both panes may be down", which is false for the pane that is reading this.
   succession_takeover_failed: [
-    'Both panes may be down: run `orca chairs restore` twice, ten seconds apart, then retry from the restored chair.'
+    'the incumbent chair pane is already closed and this pane was NOT registered as the chair — do not send or receive chair traffic from it',
+    'recover the chair with `orca chairs restore`, run twice at least 10 s apart; chairs.json still names the pre-succession session, so restore resumes the incumbent conversation in a new pane',
+    'once the restored chair is up, end this session; the restored chair can retry `orca chairs succeed`'
   ],
   // G1 repair round (attempt 2), N8: five refusals reachable after the wave-2 pass with no map
   // entry — the runtime sent no `nextSteps` for any of them, so a caller saw a bare error code.

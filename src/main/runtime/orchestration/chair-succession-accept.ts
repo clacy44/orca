@@ -23,7 +23,10 @@ import { readManifestEntry } from './chair-succession-manifest-entry'
 import { getHoldRecord, settleHold } from './chair-succession-hold'
 import { purgeSuccessionsForChair } from './chair-succession-purge'
 import { enterConfirming } from './chair-succession-accept-confirm-lock'
-import { closeIncumbentAndWaitForExit } from './chair-succession-accept-exit-wait'
+import {
+  closeIncumbentAndWaitForExit,
+  confirmIncumbentDead
+} from './chair-succession-accept-exit-wait'
 import { runPostTakeoverSteps } from './chair-succession-accept-post-takeover'
 
 function storeDepsFor(deps: ChairSuccessionDeps): ChairSuccessionStoreDeps {
@@ -96,7 +99,9 @@ export async function acceptSuccession(
   // (G1 repair B6), and — on anything short of confirmed-dead (a real timeout, or a non-timeout
   // rejection the liveness predicate still calls live, N4) — abort + settle + throw, telling the
   // successor pane to stand down (N8). Sourced from the HOLD, never meta.json (B5).
-  await closeIncumbentAndWaitForExit(deps, hold, chair, params)
+  // W-D1-DR1 F2: the returned deadline bounds the `name_taken` retry loop below with the SAME
+  // bound confirmIncumbentDead used, not a second independent one.
+  const incumbentDeadline = await closeIncumbentAndWaitForExit(deps, hold, chair, params)
 
   const entry = await readManifestEntry(deps.manifestPath, chair).catch(() => undefined)
 
@@ -110,24 +115,46 @@ export async function acceptSuccession(
   // `registrationThrowReason && !registration` would then skip the re-read below even though a
   // throw did occur.
   let registrationThrew = false
-  try {
-    registration = await registerAgentForPane(deps.db, deps.runtime, {
-      paneKey: params.callerPaneKey,
-      terminalHandle: params.callerTerminalHandle,
-      processIncarnation: deps.runtime.getTerminalProcessIncarnation(params.callerTerminalHandle),
-      displayName: chair,
-      // G1 repair M6 / N15: pass the manifest's role through — `registerAgentForPane` writes
-      // `role` unconditionally, so leaving this `undefined` erases the chair's role on every
-      // takeover. N15: the manifest is not the only source — a chair whose role exists only on
-      // its (incumbent) agents row must not lose it just because the manifest never set one.
-      role:
-        entry?.role ??
-        deps.db.getAgentByPaneKey(params.hostId, hold.incumbent.paneKey)?.role ??
-        undefined
-    })
-  } catch (err) {
-    registrationThrew = true
-    registrationThrowReason = err instanceof Error ? err.message : String(err)
+  // W-D1-DR1 F2 (answers Q5): a `name_taken` right after a confirmed death can still be the same
+  // resurrection race F1 guards against (an inventory round or late output can re-set the
+  // liveness flags again between confirmIncumbentDead's read and this upsert) — retry within the
+  // SAME bound instead of aborting a done takeover and stranding the chair. Re-confirming dead
+  // between attempts (not just sleeping) means a genuinely still-live incumbent still aborts
+  // promptly rather than spinning to the full bound. No transition happens in this loop, so the
+  // record stays `confirming` throughout.
+  for (;;) {
+    try {
+      registration = await registerAgentForPane(deps.db, deps.runtime, {
+        paneKey: params.callerPaneKey,
+        terminalHandle: params.callerTerminalHandle,
+        processIncarnation: deps.runtime.getTerminalProcessIncarnation(params.callerTerminalHandle),
+        displayName: chair,
+        // G1 repair M6 / N15: pass the manifest's role through — `registerAgentForPane` writes
+        // `role` unconditionally, so leaving this `undefined` erases the chair's role on every
+        // takeover. N15: the manifest is not the only source — a chair whose role exists only on
+        // its (incumbent) agents row must not lose it just because the manifest never set one.
+        role:
+          entry?.role ??
+          deps.db.getAgentByPaneKey(params.hostId, hold.incumbent.paneKey)?.role ??
+          undefined
+      })
+    } catch (err) {
+      registrationThrew = true
+      registrationThrowReason = err instanceof Error ? err.message : String(err)
+    }
+    if (
+      registration &&
+      !registration.ok &&
+      registration.reason === 'name_taken' &&
+      Date.now() < incumbentDeadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 500))
+      if (!(await confirmIncumbentDead(deps, hold.incumbent.paneKey, incumbentDeadline))) {
+        break
+      }
+      continue
+    }
+    break
   }
   // [G1-10z polish-recheck N2 repair] a throw can arrive AFTER `upsertAgentByPaneSuffix` already
   // committed the re-point (a post-upsert step inside `registerAgentForPane` — catch-up, the
@@ -191,7 +218,14 @@ export async function acceptSuccession(
     })
     throw new OrchestrationError(
       'succession_takeover_failed',
-      `Dead-pane takeover for chair "${chair}" failed: ${failureReason}.`
+      `Dead-pane takeover for chair "${chair}" failed: ${failureReason}.`,
+      {
+        nextSteps: [
+          'the incumbent chair pane is already closed and this pane was NOT registered as the chair — do not send or receive chair traffic from it',
+          'recover the chair with `orca chairs restore`, run twice at least 10 s apart; chairs.json still names the pre-succession session, so restore resumes the incumbent conversation in a new pane',
+          'once the restored chair is up, end this session; the restored chair can retry `orca chairs succeed`'
+        ]
+      }
     )
   }
 

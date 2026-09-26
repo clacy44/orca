@@ -315,6 +315,16 @@ describe('S10-22a G1 repair N9: orchestration.chairs.successionAccept keepalive'
     const db = new OrchestrationDb(':memory:')
     const runtime = new OrcaRuntimeService()
     runtime.setOrchestrationDb(db)
+    // W-D1-DR1 F1 harness: closeIncumbentAndWaitForExit's confirmIncumbentDead now runs a
+    // REQUIRED fresh controller-inventory round — without a controller, listTerminals(requireFresh)
+    // throws terminal_liveness_unavailable and every success-path accept aborts.
+    runtime.setPtyController({
+      spawn: async () => ({ id: 'never' }),
+      write: () => true,
+      kill: () => true,
+      getForegroundProcess: async () => null,
+      listProcesses: async () => []
+    } as never)
 
     const incumbentPaneKey = 'tabA:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
     const incumbentHandle = 'term_incumbent'
@@ -432,6 +442,16 @@ describe('S10-22a G1 repair round 2 Q7: succeed -> real launch -> successionAcce
     const db = new OrchestrationDb(':memory:')
     const runtime = new OrcaRuntimeService()
     runtime.setOrchestrationDb(db)
+    // W-D1-DR1 F1 harness: closeIncumbentAndWaitForExit's confirmIncumbentDead now runs a
+    // REQUIRED fresh controller-inventory round — without a controller, listTerminals(requireFresh)
+    // throws terminal_liveness_unavailable and every success-path accept aborts.
+    runtime.setPtyController({
+      spawn: async () => ({ id: 'never' }),
+      write: () => true,
+      kill: () => true,
+      getForegroundProcess: async () => null,
+      listProcesses: async () => []
+    } as never)
 
     const incumbentPaneKey = 'tabA:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
     const incumbentHandle = 'term_incumbent'

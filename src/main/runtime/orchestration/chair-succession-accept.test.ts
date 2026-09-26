@@ -77,6 +77,16 @@ describe('S10-22a WAVE 2: chair-succession-accept', () => {
       getRepos: () => []
     } as never)
     runtime.setOrchestrationDb(db)
+    // W-D1-DR1 F1 harness: closeIncumbentAndWaitForExit's confirmIncumbentDead now runs a
+    // REQUIRED fresh controller-inventory round — without a controller, listTerminals(requireFresh)
+    // throws terminal_liveness_unavailable and every success-path accept aborts.
+    runtime.setPtyController({
+      spawn: async () => ({ id: 'never' }),
+      write: () => true,
+      kill: () => true,
+      getForegroundProcess: async () => null,
+      listProcesses: async () => []
+    } as never)
     deps = {
       db,
       runtime,
