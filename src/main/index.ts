@@ -39,9 +39,15 @@ import {
   getDaemonProvider,
   listLiveDaemonPtyIds,
   shutdownDaemon,
-  setDaemonDiedFanoutHandler
+  setDaemonDiedFanoutHandler,
+  getCurrentDaemonIntegrity
 } from './daemon/daemon-init'
 import { warnIfServeExitAtRiskOnAppImageMount } from './daemon/linux-appimage-mount-risk'
+import {
+  recordHostIntegrityStartupObservation,
+  setDaemonIntegrityReader,
+  startHostIntegrityDetection
+} from './host-integrity/host-integrity-guard'
 import {
   type CodexPaneHomeRoute,
   getCodexPaneAccount,
@@ -2274,6 +2280,9 @@ function shouldSuppressCodexAutoApprovalSyntheticTitleFromHook(args: {
 
 void app.whenReady().then(async () => {
   logStartupMilestone('app-ready')
+  // Why (INV-P-023): probe before any agent-launch surface exists.
+  void startHostIntegrityDetection()
+  setDaemonIntegrityReader(getCurrentDaemonIntegrity)
   installMainThreadHangWatchdog({ userDataPath: getCanonicalUserDataPath() })
   const hangDetection = consumeHangDetectionMarker(
     hangDetectionMarkerPath(getCanonicalUserDataPath())
@@ -3418,6 +3427,14 @@ void app.whenReady().then(async () => {
     await shellPathReady
     bindTerminalRuntimeStartupServices(Promise.resolve(startTerminalRuntimeStartupServices()))
   }
+  void localPtyProviderStartupReady
+    .catch(() => undefined)
+    .then(() =>
+      recordHostIntegrityStartupObservation({
+        hostId: runtimeService.getOrchestrationCompatibilityHostId(),
+        writeAudit: (row) => runtimeService.getOrchestrationDb().writeAgentAudit(row)
+      })
+    )
   app.on('activate', handleMacAppActivation)
 
   if (serveOptions) {
