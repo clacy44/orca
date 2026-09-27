@@ -377,6 +377,7 @@ import { getRegisteredSshState } from '../ipc/ssh'
 // typed refusal — never on a wire schema (see `LaunchAdmission`'s own doc comment).
 import { LaunchAdmissionRefusedError, type LaunchAdmission } from '../ipc/agent-launch-admission'
 import { audit as writeLaunchAdmissionAudit } from '../ipc/agent-launch-admission-support'
+import { assertHostIntegrityAllowsAgentLaunch } from '../host-integrity/host-integrity-guard'
 import {
   isCoveredLaunchAgent,
   isContinueSelectorToken,
@@ -28445,6 +28446,15 @@ export class OrcaRuntimeService {
     if (!this.store) {
       throw new Error('runtime_unavailable')
     }
+    await assertHostIntegrityAllowsAgentLaunch({
+      includeDaemon: false,
+      agent: request.agent,
+      paneKey: null,
+      hostId: this.getOrchestrationCompatibilityHostId(),
+      via: 'ensure_agent_session',
+      recordOverride: false,
+      getDb: () => this.getOrchestrationDb()
+    })
     const workspace = await this.resolveTerminalWorkspaceLaunchScope(request.worktree)
     const namespace = this.getAgentSessionExecutionNamespace(workspace, request.agent)
     if (
@@ -28560,6 +28570,15 @@ export class OrcaRuntimeService {
     if (!this.store) {
       throw new Error('runtime_unavailable')
     }
+    await assertHostIntegrityAllowsAgentLaunch({
+      includeDaemon: false,
+      agent: request.agent,
+      paneKey: null,
+      hostId: this.getOrchestrationCompatibilityHostId(),
+      via: 'create_agent_session',
+      recordOverride: false,
+      getDb: () => this.getOrchestrationDb()
+    })
     const now = Date.now()
     const operationTimestamp = parseAgentSessionOperationTimestamp(request.clientOperationId)
     if (
