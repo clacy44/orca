@@ -100,13 +100,14 @@ export function hostIntegrityBlocker(
 
 /** [N7, INV-P-023] Synchronous peek for a hidden usage-fetcher PTY probe (never awaited, never
  * a chokepoint substitute): true only once a blocker is settled and the override is not set;
- * false when nothing has settled yet (startup) or on POSIX (main settles 'n/a'). */
+ * false when nothing has settled yet (startup) or on POSIX (main settles 'n/a'). These usage
+ * probes always run in MAIN (A5): the daemon's level is irrelevant here, unlike agent launches. */
 export function isHostIntegrityBlockedForAgentProcesses(): boolean {
   const settled = cache?.peek()
   if (!settled || settled.level === 'n/a') {
     return false
   }
-  const blocker = hostIntegrityBlocker(settled.level, readDaemon(), true)
+  const blocker = hostIntegrityBlocker(settled.level, null, false)
   return blocker !== null && !elevationAllowed
 }
 

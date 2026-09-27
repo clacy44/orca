@@ -624,6 +624,15 @@ async function fetchViaRpc(options?: FetchCodexRateLimitsOptions): Promise<Provi
   if (options?.signal?.aborted) {
     return abortedCodexRateLimitResult()
   }
+  // [N7, A6, INV-P-023] Skip the `codex ... app-server` child_process spawn while the host is
+  // blocked, same as the PTY fallback below — this probe never reaches admitAgentLaunch either.
+  if (isHostIntegrityBlockedForAgentProcesses()) {
+    if (!warnedHostIntegrityBlocked) {
+      warnedHostIntegrityBlocked = true
+      console.warn('[host-integrity] usage probe skipped: host blocked (INV-P-023)')
+    }
+    return abortedCodexRateLimitResult()
+  }
   return new Promise<ProviderRateLimits>((resolve) => {
     let buffer = ''
     let stderr = ''

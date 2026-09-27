@@ -13,6 +13,7 @@ import {
   hostIntegrityBlocker,
   hostIntegrityOverrideSentence,
   hostIntegrityRefusalSentence,
+  isHostIntegrityBlockedForAgentProcesses,
   readRuntimeHostIntegrity,
   recordHostIntegrityStartupObservation,
   resetHostIntegrityForTests,
@@ -81,6 +82,15 @@ describe('resetHostIntegrityForTests', () => {
     resetHostIntegrityForTests()
     const result = await startHostIntegrityDetection()
     expect(result.level).toBe('n/a')
+    // N10 (kills R7): the detail pins the vitest setupFile's probe, not the real one -- both
+    // report 'n/a' on Linux, so the level alone does not discriminate a reset gone wrong.
+    expect(result.detail).toBe('vitest default')
+  })
+
+  it('T3: the usage gate ignores the daemon (medium main + high daemon -> not blocked) (A5)', async () => {
+    configureHostIntegrityForTests({ probe: probeOf('medium'), env: {}, daemon: () => 'high' })
+    await startHostIntegrityDetection()
+    expect(isHostIntegrityBlockedForAgentProcesses()).toBe(false)
   })
 })
 

@@ -1325,7 +1325,8 @@ export function getDaemonProvider(): DaemonProvider | null {
 
 /** INV-P-023: the integrity a fresh local agent PTY inherits from the current daemon. N1: an
  * adopted daemon (not self-spawned) whose pinned identity has no conclusive level is refreshed
- * from the adapter's most recent hello, so a later report is not stuck behind the first one. */
+ * from the adapter's most recent hello. That accessor only changes on reconnect (R267): in
+ * steady state, with no new hello, an inconclusive adoption stays pinned until then. */
 export function getCurrentDaemonIntegrity(): DaemonIntegrityReport | null {
   if (!adapter) {
     return null

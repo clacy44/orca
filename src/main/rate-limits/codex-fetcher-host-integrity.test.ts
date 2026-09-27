@@ -57,4 +57,24 @@ describe('fetchCodexRateLimits: N7 (INV-P-023) host-integrity gate', () => {
       warnSpy.mockRestore()
     }
   })
+
+  it('skips the app-server spawn while the host is blocked (A6)', async () => {
+    // RPC path available this time; only the host-integrity gate should keep it from spawning.
+    childSpawnMock.mockReset()
+    configureHostIntegrityForTests({
+      probe: async () => ({ level: 'high', detail: 'test' }) satisfies IntegrityProbe,
+      env: {}
+    })
+    await Promise.resolve()
+    await Promise.resolve()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const result = await fetchCodexRateLimits()
+      expect(result).toMatchObject({ provider: 'codex', status: 'error' })
+      expect(childSpawnMock).not.toHaveBeenCalled()
+      expect(ptySpawnMock).not.toHaveBeenCalled()
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
 })

@@ -119,6 +119,34 @@ describe('probeCurrentProcessIntegrity', () => {
     expect(result.level).toBe('high')
   })
 
+  it('N5 (kills R8): an empty SystemRoot falls through to WINDIR, then C:\\Windows', async () => {
+    const savedSystemRoot = process.env.SystemRoot
+    const savedWindir = process.env.WINDIR
+    try {
+      process.env.SystemRoot = ''
+      process.env.WINDIR = 'D:\\W'
+      const spy1 = vi.fn().mockResolvedValue(CRLF_HIGH)
+      await probeCurrentProcessIntegrity({ platform: 'win32', systemRoot: '', runWhoamiImpl: spy1 })
+      expect(spy1).toHaveBeenCalledWith('D:\\W\\System32\\whoami.exe')
+
+      process.env.WINDIR = ''
+      const spy2 = vi.fn().mockResolvedValue(CRLF_HIGH)
+      await probeCurrentProcessIntegrity({ platform: 'win32', systemRoot: '', runWhoamiImpl: spy2 })
+      expect(spy2).toHaveBeenCalledWith('C:\\Windows\\System32\\whoami.exe')
+    } finally {
+      if (savedSystemRoot === undefined) {
+        delete process.env.SystemRoot
+      } else {
+        process.env.SystemRoot = savedSystemRoot
+      }
+      if (savedWindir === undefined) {
+        delete process.env.WINDIR
+      } else {
+        process.env.WINDIR = savedWindir
+      }
+    }
+  })
+
   it('r: spy rejects with {code:ENOENT} -> unknown, detail contains ENOENT', async () => {
     const spy = vi.fn().mockRejectedValue({ code: 'ENOENT' })
     const result = await probeCurrentProcessIntegrity({
@@ -296,6 +324,38 @@ describe('startDaemonIntegrityReport', () => {
       await vi.advanceTimersByTimeAsync(INCONCLUSIVE_RETRY_MS)
       expect(probe).toHaveBeenCalledTimes(2)
       expect(report.current()).toBe('medium')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('T1b (kills the A1 mutant): the retry still probes when the timer fires before the clock says 30 s passed', async () => {
+    vi.useFakeTimers()
+    try {
+      let time = 0
+      const probe = vi
+        .fn()
+        .mockResolvedValueOnce({ level: 'unknown', detail: 'first' } satisfies IntegrityProbe)
+        .mockResolvedValueOnce({ level: 'unknown', detail: 'second' } satisfies IntegrityProbe)
+        .mockResolvedValueOnce({ level: 'medium', detail: 'third' } satisfies IntegrityProbe)
+      const log = { log: vi.fn() }
+      const report = startDaemonIntegrityReport(log, probe, () => time)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(probe).toHaveBeenCalledTimes(1)
+      const settledAt = time
+      // the timer runs on the fake-timer clock, but the injected `now` lags behind: only
+      // 29_940 ms have passed by its account when the timer callback fires.
+      time = settledAt + 29_940
+      await vi.advanceTimersByTimeAsync(INCONCLUSIVE_RETRY_MS)
+      expect(probe).toHaveBeenCalledTimes(2)
+      expect(report.current()).toBe('unknown')
+      time += 29_940
+      await vi.advanceTimersByTimeAsync(INCONCLUSIVE_RETRY_MS)
+      expect(probe).toHaveBeenCalledTimes(3)
+      expect(report.current()).toBe('medium')
+      // the chain stops once conclusive: no further probe after medium
+      await vi.advanceTimersByTimeAsync(INCONCLUSIVE_RETRY_MS * 2)
+      expect(probe).toHaveBeenCalledTimes(3)
     } finally {
       vi.useRealTimers()
     }

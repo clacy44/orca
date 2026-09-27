@@ -128,6 +128,15 @@ export class ProcessIntegrityCache {
         return Promise.resolve(this.settled.probe)
       }
     }
+    return this.probeAndSettle()
+  }
+
+  /** Always probes, bypassing the freshness check (a timer-driven retry must not be swallowed). */
+  refresh(): Promise<IntegrityProbe> {
+    return this.probeAndSettle()
+  }
+
+  private probeAndSettle(): Promise<IntegrityProbe> {
     if (this.inFlight) {
       return this.inFlight
     }
@@ -146,14 +155,17 @@ export class ProcessIntegrityCache {
 /** The terminal daemon reports at boot without delaying readiness (Q1 "Daemon"). */
 export function startDaemonIntegrityReport(
   log: { log(event: string, details?: unknown): void },
-  probe: () => Promise<IntegrityProbe> = () => probeCurrentProcessIntegrity()
+  probe: () => Promise<IntegrityProbe> = () => probeCurrentProcessIntegrity(),
+  now: () => number = Date.now
 ): { current(): ProcessIntegrityLevel | undefined } {
   // Self-heals a stale 'unknown' without waiting for a hello (N1): retries on its own timer.
+  // Calls refresh(), not resolve(): the timer runs on uv_now while resolve()'s freshness check
+  // uses now(), so a late-in-iteration settle could otherwise swallow the retry (see A1).
   const scheduleRetry = (): void => {
-    const timer = setTimeout(() => void cache.resolve(), INCONCLUSIVE_RETRY_MS)
+    const timer = setTimeout(() => void cache.refresh(), INCONCLUSIVE_RETRY_MS)
     timer.unref?.()
   }
-  const cache = new ProcessIntegrityCache(probe, Date.now, (settled) => {
+  const cache = new ProcessIntegrityCache(probe, now, (settled) => {
     if (settled.level !== 'n/a') {
       log.log('integrity', { level: settled.level, detail: settled.detail })
     }
