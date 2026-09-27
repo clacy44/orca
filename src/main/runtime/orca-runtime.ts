@@ -2391,7 +2391,10 @@ type PtyWriteFlight = {
 // PtyTitle idle edge is the delivery edge that will eventually pick this record up, never a
 // silent delete; 'awaiting_launch_prompt' added R197 — a launch command sits in the pane and
 // the launched agent has not yet been observed at its own prompt (INV-P-LAUNCH-EDGE); the
-// shell's own OSC titles do not count as that evidence).
+// shell's own OSC titles do not count as that evidence; 'anchored_confirm_inconclusive' added
+// G1-10z4 N-A3-1 — a pane re-admitted only on its anchored Claude identity (not observed live)
+// whose fresh foreground read did not name claude itself: null, a wrapper, another agent, or no
+// fresh read possible at all).
 type WithheldDeliveryReason =
   | 'pane_busy'
   | 'not_agent_pane'
@@ -2401,6 +2404,7 @@ type WithheldDeliveryReason =
   | 'blocked_modal'
   | 'awaiting_idle_edge'
   | 'awaiting_launch_prompt'
+  | 'anchored_confirm_inconclusive'
 
 // Why (S10-15 F8): the pointer/Enter push targets either a live leaf or a leafless pty record
 // — no renderer leaf exists for it, e.g. a headless `orca serve` session or a desktop pane
@@ -36019,29 +36023,38 @@ export class OrcaRuntimeService {
   private async confirmDeliveryForegroundIsAgent(
     ptyId: string
   ): Promise<'agent' | 'not_agent' | 'unknown'> {
+    return (await this.confirmDeliveryForeground(ptyId)).verdict
+  }
+
+  // [G1-10z4 N-A3-1] The same single fresh read, keeping the process it named: the anchored route
+  // (a pane re-admitted without a live observation) delivers only on claude itself, never on
+  // "not proven absent".
+  private async confirmDeliveryForeground(
+    ptyId: string
+  ): Promise<{ verdict: 'agent' | 'not_agent' | 'unknown'; processName: string | null }> {
     const controller = this.ptyController
     if (!controller?.confirmForegroundProcess) {
-      return 'unknown'
+      return { verdict: 'unknown', processName: null }
     }
     let confirmed: string | null
     try {
       confirmed = await controller.confirmForegroundProcess(ptyId)
     } catch {
-      return 'unknown'
+      return { verdict: 'unknown', processName: null }
     }
     if (!confirmed) {
-      return 'unknown'
+      return { verdict: 'unknown', processName: null }
     }
     if (recognizeAgentProcess(confirmed) !== null) {
-      return 'agent'
+      return { verdict: 'agent', processName: confirmed }
     }
     // A wrapper (node/npx) reported before the cmdline cache resolves is not proof of absence —
     // isRecognizedForegroundAgentProcess (:33889) treats it the same way, with a retry this guard
     // deliberately does not run: it sits in front of EVERY delivery and must stay cheap.
     if (isAgentForegroundWrapperProcess(confirmed)) {
-      return 'unknown'
+      return { verdict: 'unknown', processName: confirmed }
     }
-    return 'not_agent'
+    return { verdict: 'not_agent', processName: confirmed }
   }
 
   // S10-23a G1 repair: the --inject gate's resolve edge. isPeerPaneForegroundAgentLive
@@ -36382,12 +36395,14 @@ export class OrcaRuntimeService {
   // masked out. Scoped to panes identifiable as Claude — the launch/foreground agent, or ANY Claude
   // hook row for the pane key regardless of age: a reattached pane carries no in-memory Claude
   // identity at all, only hook history (A2-B3). The generic sentinel list stays on the mid-turn and
-  // R2 paths (detectDeliveryBlockedModal), where it predates this gate: on L2 its loose phrase
-  // pairs match ordinary conversation and would starve an idle chair.
+  // R2 paths (detectDeliveryBlockedModal), where it predates this gate, and joins the check before
+  // an anchored pointer (`withGenericSentinels`, N-A3-2); on L2 its loose phrase pairs match
+  // ordinary conversation and would starve an idle chair.
   private claudeDeliveryDialogBlocks(
     ptyId: string | null,
     resolvedTarget: PendingMessageDeliveryTarget,
-    pointerLines: readonly string[] = []
+    pointerLines: readonly string[] = [],
+    options: { withGenericSentinels?: boolean } = {}
   ): boolean {
     const pty = ptyId ? this.ptysById.get(ptyId) : undefined
     if (!ptyId || !pty) {
@@ -36406,7 +36421,10 @@ export class OrcaRuntimeService {
     const waitSource = this.isPtyOnlyDeliveryTarget(resolvedTarget)
       ? pty
       : (resolvedTarget as RuntimeLeafRecord)
-    return isClaudeDialogOnScreen(this.getDeliveryScreenRows(ptyId, waitSource, pointerLines))
+    const rows = this.getDeliveryScreenRows(ptyId, waitSource, pointerLines)
+    return options.withGenericSentinels
+      ? detectDeliveryBlockedModal(rows)
+      : isClaudeDialogOnScreen(rows)
   }
 
   // [S-24-1 (iii)] The pane's current screen for a delivery-gate scan — the last `rows` lines
@@ -36729,7 +36747,7 @@ export class OrcaRuntimeService {
           // deliverPendingMessages (fence, fresh foreground confirm, dialog checks) still runs.
           this.deliverPendingMessages(
             { deliveryKind: 'pty', ptyId: pty.ptyId },
-            { mailboxHandle: handle, reservedTypes, notifiedThreadIdKnown }
+            { mailboxHandle: handle, reservedTypes, notifiedThreadIdKnown, anchoredIdentity: true }
           )
         } else if (!pty.lastAgentStatusObservedLive) {
           // [S10-21a C9, Ruling 34 Addendum 5 §5(1), N5 fix] Narrowed in code, not left to a
@@ -36829,7 +36847,8 @@ export class OrcaRuntimeService {
         this.deliverPendingMessages(leaf, {
           mailboxHandle: handle,
           reservedTypes,
-          notifiedThreadIdKnown
+          notifiedThreadIdKnown,
+          anchoredIdentity: true
         })
       } else if (!leaf.lastAgentStatusObservedLive) {
         void this.attemptHydratedProbedDelivery(leaf.tabId, leaf.leafId, terminalHandle, handle, {
@@ -38483,17 +38502,20 @@ export class OrcaRuntimeService {
         // already owns cleanup for that case; not a withheld attempt against a still-live pane.
         continue
       }
+      // [R270] The same anchored re-admission the ladder grants (deliverPendingMessagesForHandle).
+      const anchored =
+        !resolved.lastAgentStatusObservedLive &&
+        resolved.writable &&
+        this.hasAnchoredClaudeIdentity(this.ptysById.get(ptyId))
       if (
         (resolved.lastAgentStatus === 'idle' && resolved.lastAgentStatusObservedLive) ||
-        // [R270] The same anchored re-admission the ladder grants (deliverPendingMessagesForHandle).
-        (!resolved.lastAgentStatusObservedLive &&
-          resolved.writable &&
-          this.hasAnchoredClaudeIdentity(this.ptysById.get(ptyId)))
+        anchored
       ) {
         this.deliverPendingMessages(resolved.target, {
           mailboxHandle,
           reservedTypes: delivery.reservedTypes,
-          notifiedThreadIdKnown: delivery.notifiedThreadIdKnown
+          notifiedThreadIdKnown: delivery.notifiedThreadIdKnown,
+          anchoredIdentity: anchored
         })
         continue
       }
@@ -38575,6 +38597,11 @@ export class OrcaRuntimeService {
       // [S10-21f b4, R147] Set only by attemptForcedBusyDelivery via attemptMidTurnClaudeDelivery
       // — passed to formatMessagePointer's 4th arg below.
       deliveredWhileBusy?: boolean
+      // [R270; G1-10z4 N-A3-1, N-A3-2] Set only where a pane NOT observed live was re-admitted on
+      // its anchored Claude identity (hasAnchoredClaudeIdentity). With no live title behind it,
+      // this push needs the fresh foreground read to name claude itself, and it also runs the
+      // generic sentinel list the mid-turn path runs.
+      anchoredIdentity?: boolean
     } = {}
   ): void {
     if (!this._orchestrationDb) {
@@ -38729,16 +38756,19 @@ export class OrcaRuntimeService {
                 this.recordWithheldDelivery(mailboxHandle, 'no_live_pane')
                 return
               }
+              // [R270] The same anchored re-admission the ladder grants.
+              const anchored =
+                !current.lastAgentStatusObservedLive &&
+                current.writable &&
+                this.hasAnchoredClaudeIdentity(this.ptysById.get(probedPtyId))
               if (
                 (current.lastAgentStatus === 'idle' && current.lastAgentStatusObservedLive) ||
-                // [R270] The same anchored re-admission the ladder grants.
-                (!current.lastAgentStatusObservedLive &&
-                  current.writable &&
-                  this.hasAnchoredClaudeIdentity(this.ptysById.get(probedPtyId)))
+                anchored
               ) {
                 this.deliverPendingMessages(current.target, {
                   mailboxHandle,
-                  skipAbsenceProbe: true
+                  skipAbsenceProbe: true,
+                  anchoredIdentity: anchored
                 })
                 return
               }
@@ -38810,13 +38840,22 @@ export class OrcaRuntimeService {
       // process: the anchored authorization (bound to the old incarnation), a mid-turn Claude
       // authorization and the confirm itself all belong to the process that was replaced.
       const guardedGeneration = this.getPtyLifecycleGeneration(guardedPtyId)
-      void this.confirmDeliveryForegroundIsAgent(guardedPtyId)
-        .then((verdict) => {
+      void this.confirmDeliveryForeground(guardedPtyId)
+        .then(({ verdict, processName }) => {
           this.foregroundGuardPendingPtyIds.delete(guardedPtyId)
           if (verdict === 'not_agent') {
             // Proven: the pane's foreground is not its agent. HELD, never typed.
             this.recordWithheldDelivery(mailboxHandle, 'not_agent_pane')
             this.mailPointerRepointScheduler.schedule(mailboxHandle)
+            return
+          }
+          // [G1-10z4 N-A3-1] The observed-live paths keep S-20's rule ('unknown' delivers); the
+          // anchored route has no live title behind it, so only a read naming claude itself will do.
+          if (
+            options.anchoredIdentity &&
+            !(processName !== null && isExpectedAgentProcess(processName, 'claude'))
+          ) {
+            this.recordWithheldDelivery(mailboxHandle, 'anchored_confirm_inconclusive')
             return
           }
           // Why re-resolve (same reason the absence continuation does above): an
@@ -38877,6 +38916,13 @@ export class OrcaRuntimeService {
         })
       return
     }
+    // [G1-10z4 N-A3-1] No fresh read is possible at all here (a controller without
+    // confirmForegroundProcess): 'unknown' still delivers on the observed-live paths, never on the
+    // anchored route.
+    if (options.anchoredIdentity && !options.foregroundConfirmed) {
+      this.recordWithheldDelivery(mailboxHandle, 'anchored_confirm_inconclusive')
+      return
+    }
 
     const db = this._orchestrationDb
     const payload = formatMessagePointer(
@@ -38905,7 +38951,13 @@ export class OrcaRuntimeService {
     // mid-turn, the R2 fallback, the anchored ladder — is checked here immediately before the
     // pointer write, whatever its own caller already checked. The pointer about to be written is
     // masked too: after a restart its own earlier strand may still be on screen (iii).
-    if (this.claudeDeliveryDialogBlocks(ptyId, resolved.target, pointerLines)) {
+    if (
+      this.claudeDeliveryDialogBlocks(ptyId, resolved.target, pointerLines, {
+        // [G1-10z4 N-A3-2] The anchored route also runs the generic sentinel list the mid-turn
+        // path runs (attemptMidTurnClaudeDelivery), immediately before its pointer.
+        withGenericSentinels: options.anchoredIdentity === true
+      })
+    ) {
       this.recordWithheldDelivery(mailboxHandle, 'blocked_modal')
       return
     }

@@ -83,6 +83,21 @@ describe('signal (ii): a ❯-led numbered option row with a sibling option row, 
   })
 })
 
+describe('Y-window-1: the sibling option row window is six rows, on either side', () => {
+  const rowsWithSiblingAt = (offset: number): string[] => {
+    const notes = Array.from({ length: Math.abs(offset) - 1 }, (_, i) => `note ${i}`)
+    return offset > 0 ? ['❯ 1. Yes', ...notes, '  2. No'] : ['  1. Yes', ...notes, '❯ 2. No']
+  }
+
+  it.each([6, -6])('a sibling option row %i rows from the ❯ row counts', (offset) => {
+    expect(isClaudeDialogOnScreen(rowsWithSiblingAt(offset))).toBe(true)
+  })
+
+  it.each([7, -7])('a sibling option row %i rows from the ❯ row does not', (offset) => {
+    expect(isClaudeDialogOnScreen(rowsWithSiblingAt(offset))).toBe(false)
+  })
+})
+
 describe('signal (iii): the host masks its own pointer lines, and only whole lines', () => {
   const trustSubjectLine = '[from: agent-7] "do you trust this folder layout?" thread:none'
   const selectSubjectLine = '[from: agent-7] "Enter to select the build target" thread:none'

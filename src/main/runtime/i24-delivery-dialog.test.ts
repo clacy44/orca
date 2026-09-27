@@ -16,6 +16,7 @@ import { OrcaRuntimeService } from './orca-runtime'
 import { HEADLESS_RUNTIME_WINDOW_ID } from '../../shared/runtime-types'
 import { AGENT_PROMPT_SUBMIT_DELAY_MS } from '../../shared/agent-prompt-injection'
 import type { AgentStatusIpcPayload } from '../../shared/agent-status-types'
+import { setUpLeafPane } from './i24-delivery-test-harness'
 
 const WORKTREE_ID = 'repo-1::/tmp/probe-worktree-i24-dialog'
 
@@ -666,6 +667,62 @@ describe('S-24-1 (v): a withheld L2 attempt keeps its record, so a stuck idle ed
       expect(snap.delivery).toBe('queued_starved')
       expect(snap.withheldReason).toBe('blocked_modal')
       expect(pane.write).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('X-l2-predelete: the leaf idle edge keeps its record too, so a stuck leaf reads queued_starved', async () => {
+    vi.useFakeTimers()
+    try {
+      const ptyId = 'pty-l2-starved-leaf'
+      const leafPane = await setUpLeafPane({
+        hooks: () => [],
+        fg: 'claude',
+        confirm: 'claude',
+        ptyId,
+        launchAgent: 'claude'
+      })
+      leafPane.runtime.onPtyData(ptyId, '\x1b]0;✳ Claude Code\x07', Date.now())
+      leafPane.runtime.onPtyData(ptyId, PERMISSION_PROMPT_LINES.join('\r\n'), Date.now())
+      leafPane.stub.insert('mail')
+      leafPane.runtime.deliverPendingMessagesForHandle(leafPane.handle)
+      await vi.advanceTimersByTimeAsync(50)
+      const records = internals(leafPane.runtime).withheldDeliveryAttemptsByHandle
+      const first = records.get(leafPane.handle)
+      expect(first?.reason).toBe('blocked_modal')
+      await advanceBy(13 * MIN)
+      const later = records.get(leafPane.handle)
+      expect(later?.firstAt).toBe(first?.firstAt)
+      expect(later?.count).toBeGreaterThan(1)
+      const snap = leafPane.runtime.getMessageDeliverySnapshot(leafPane.stub.rows[0] as never)
+      expect(snap.delivery).toBe('queued_starved')
+      expect(snap.withheldReason).toBe('blocked_modal')
+      expect(pointerCalls(leafPane.write, ptyId)).toHaveLength(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('X-noop-keep: an idle edge with no unread mail left clears a leftover record', async () => {
+    vi.useFakeTimers()
+    try {
+      const ptyId = 'pty-l2-all-read'
+      const pane = setUpIdlePane(ptyId)
+      pane.stub.insert('mail')
+      pane.runtime.deliverPendingMessagesForHandle(pane.handle)
+      await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS + 50)
+      expect(enterCallsOf(pane.write, ptyId)).toHaveLength(1)
+      pane.stub.rows[0]!.read = 1
+      const now = Date.now()
+      internals(pane.runtime).withheldDeliveryAttemptsByHandle.set(pane.handle, {
+        firstAt: now,
+        at: now,
+        count: 1,
+        reason: 'pane_busy'
+      })
+      pane.runtime.deliverPendingMessagesForHandle(pane.handle)
+      expect(internals(pane.runtime).withheldDeliveryAttemptsByHandle.has(pane.handle)).toBe(false)
     } finally {
       vi.useRealTimers()
     }

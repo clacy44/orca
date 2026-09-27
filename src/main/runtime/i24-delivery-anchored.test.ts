@@ -317,3 +317,112 @@ describe('R270: the anchored ladder keeps every write-time gate', () => {
     expect(enterWrites(write, ptyId)).toHaveLength(0)
   })
 })
+
+// ── G1-10z4 attempt-3 polish: N-A3-1 (only a read naming claude licenses the anchored route),
+// N-A3-2 (the anchored route runs the generic sentinel list too), and the surviving mutants
+// X-connected-skip, X-anchored-absence-off and X-title-reset.
+describe('R270 polish: what the anchored route still requires at write time', () => {
+  it.each([
+    ['a null read', null, 0, 'anchored_confirm_inconclusive'],
+    ['a wrapper read (node)', 'node', 0, 'anchored_confirm_inconclusive'],
+    ['a shell read (pwsh.exe)', 'pwsh.exe', 0, 'not_agent_pane'],
+    ['a read naming claude', 'claude', 1, undefined]
+  ])(
+    'N-A3-1: the fresh foreground confirm on an anchored pane returns %s',
+    async (_name, confirm, pointers, reason) => {
+      vi.useFakeTimers()
+      const ptyId = `pty-r270-confirm-${String(confirm)}`
+      const { runtime, write, handle, stub } = await setUpLeafPane({
+        hooks: restoredDone(),
+        fg: 'claude',
+        confirm,
+        ptyId,
+        anchor: { launchToken: ptyId }
+      })
+      stub.insert('mail')
+      runtime.notifyMessageArrived(handle, 'status', null, null)
+      await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS + 100)
+      expect(pointerWrites(write, ptyId)).toHaveLength(pointers)
+      expect(enterWrites(write, ptyId)).toHaveLength(pointers)
+      expect(priv(runtime).withheldDeliveryAttemptsByHandle.get(handle)?.reason).toBe(reason)
+    }
+  )
+
+  it('N-A3-1: a controller that cannot take a fresh read never licenses the anchored route', async () => {
+    vi.useFakeTimers()
+    const ptyId = 'pty-r270-no-confirm'
+    const { runtime, write, handle, stub, controller } = await anchoredPane(ptyId)
+    Reflect.deleteProperty(controller, 'confirmForegroundProcess')
+    stub.insert('mail')
+    runtime.notifyMessageArrived(handle, 'status', null, null)
+    await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS + 100)
+    expect(pointerWrites(write, ptyId)).toHaveLength(0)
+    expect(snapshot(runtime, stub).withheldReason).toBe('anchored_confirm_inconclusive')
+  })
+
+  it('N-A3-2: an old-wording trust prompt with no ❯ menu withholds the anchored route, as it does mid-turn', async () => {
+    vi.useFakeTimers()
+    const ptyId = 'pty-r270-generic'
+    const { runtime, write, handle, stub } = await anchoredPane(ptyId)
+    runtime.seedTerminalRestoreTail(ptyId, {
+      text: 'Do you trust the files in this folder?\r\n\r\n  /work/backend-dll\r\n\r\nPress Enter to continue…\r\n'
+    })
+    stub.insert('mail')
+    runtime.notifyMessageArrived(handle, 'status', null, null)
+    await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS + 100)
+    expect(pointerWrites(write, ptyId)).toHaveLength(0)
+    expect(snapshot(runtime, stub).withheldReason).toBe('blocked_modal')
+  })
+
+  it('X-connected-skip: a pty record the daemon reports disconnected is never anchored, even while its leaf is writable', async () => {
+    vi.useFakeTimers()
+    const ptyId = 'pty-r270-disconnected'
+    const { runtime, write, handle, stub, pty } = await anchoredPane(ptyId)
+    pty.connected = false
+    stub.insert('mail')
+    runtime.notifyMessageArrived(handle, 'status', null, null)
+    await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS + 100)
+    expect(pointerWrites(write, ptyId)).toHaveLength(0)
+    expect(snapshot(runtime, stub).withheldReason).toBe('no_hydrated_status')
+  })
+
+  it('X-anchored-absence-off: the absence-probe continuation re-admits the anchored pane too', async () => {
+    vi.useFakeTimers()
+    const ptyId = 'pty-r270-absence'
+    const { runtime, write, handle, stub, controller } = await anchoredPane(ptyId)
+    const probePtyLiveness = vi.fn(async () => true)
+    Object.assign(controller, { probePtyLiveness })
+    stub.insert('mail')
+    runtime.notifyMessageArrived(handle, 'status', null, null)
+    await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS + 100)
+    expect(probePtyLiveness).toHaveBeenCalled()
+    expect(pointerWrites(write, ptyId)).toHaveLength(1)
+    expect(enterWrites(write, ptyId)).toHaveLength(1)
+  })
+
+  it("X-title-reset: after a same-id respawn an earlier generation's ✳ title no longer makes a waiting row stale", async () => {
+    vi.useFakeTimers()
+    const ptyId = 'pty-r270-title-reset'
+    const at = Date.now() - 2 * 60 * MIN
+    const { runtime, write, handle, stub } = await setUpLeafPane({
+      hooks: () => [claudeHook('waiting', at)],
+      fg: 'claude',
+      confirm: 'claude',
+      ptyId,
+      anchor: { launchToken: ptyId }
+    })
+    // The previous process showed its own prompt after the waiting row (the row went stale)...
+    runtime.onPtyData(ptyId, '\x1b]0;✳ Claude Code\x07', Date.now())
+    // ...then the daemon replaced the process under the same id (the tracked state resets).
+    runtime.synchronizePtyOutputSequenceFromProvider(
+      ptyId,
+      { value: 0, generation: 'reset' },
+      runtime.getPtyOutputSequence(ptyId)
+    )
+    stub.insert('mail')
+    runtime.notifyMessageArrived(handle, 'status', null, null)
+    await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS + 100)
+    expect(pointerWrites(write, ptyId)).toHaveLength(0)
+    expect(snapshot(runtime, stub).withheldReason).toBe('blocked_modal')
+  })
+})
