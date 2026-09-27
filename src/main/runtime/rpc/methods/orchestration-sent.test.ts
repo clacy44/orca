@@ -548,4 +548,76 @@ describe('orchestration.sent (BUG 3)', () => {
     expect(delivery.withheldReason).toBeUndefined()
     expect(delivery.withheldAt).toBeUndefined()
   })
+
+  // [G1-10z4 A2-B4, R-rpc-gate] The snapshot attaches the MAILBOX's withheld record to every row
+  // of that mailbox; only the queued_* gate keeps it off a row that was already pointed while
+  // newer mail to the same mailbox is being withheld. The test above cannot tell (its mailbox has
+  // no record at all once the pointer lands), so this one gives the mailbox a live record.
+  it('keeps a pointed row free of the withheld reason its mailbox holds for newer mail', async () => {
+    setup()
+    const write = vi.fn().mockReturnValue(true)
+    runtime!.setPtyController({
+      write,
+      kill: vi.fn(),
+      getForegroundProcess: async () => null
+    } as never)
+    runtime!.attachWindow(1)
+    runtime!.syncWindowGraph(1, {
+      tabs: [
+        {
+          tabId: 'tab-1',
+          worktreeId: 'repo-1::/tmp/worktree-a',
+          title: 'Codex',
+          activeLeafId: 'pane-gate-pointed',
+          layout: null
+        }
+      ],
+      leaves: [
+        {
+          tabId: 'tab-1',
+          worktreeId: 'repo-1::/tmp/worktree-a',
+          leafId: 'pane-gate-pointed',
+          paneRuntimeId: 1,
+          ptyId: 'pty-gate-pointed',
+          paneTitle: null
+        }
+      ]
+    })
+    const [terminal] = (await runtime!.listTerminals()).terminals
+    runtime!.onPtyData('pty-gate-pointed', '\x1b]0;Codex working\x07', 100)
+    runtime!.onPtyData('pty-gate-pointed', '\x1b]0;Codex done\x07', 101)
+    const pointed = db!.insertMessage({ from: 'term_a', to: terminal.handle, subject: 'first' })
+    await dispatcher.dispatch(
+      request('sent-gate-pre-pointed', 'orchestration.sent', { id: pointed.id })
+    )
+    runtime!.deliverPendingMessagesForHandle(terminal.handle)
+    const newer = db!.insertMessage({ from: 'term_a', to: terminal.handle, subject: 'second' })
+    const now = Date.now()
+    ;(
+      runtime as unknown as { withheldDeliveryAttemptsByHandle: Map<string, unknown> }
+    ).withheldDeliveryAttemptsByHandle.set(terminal.handle, {
+      firstAt: now,
+      at: now,
+      count: 1,
+      reason: 'blocked_modal'
+    })
+
+    const pointedResponse = await dispatcher.dispatch(
+      request('sent-gate-pointed', 'orchestration.sent', { id: pointed.id })
+    )
+    const newerResponse = await dispatcher.dispatch(
+      request('sent-gate-newer', 'orchestration.sent', { id: newer.id })
+    )
+
+    expect(pointedResponse).toMatchObject({ ok: true, result: { delivery: { state: 'pointed' } } })
+    const pointedDelivery = (pointedResponse as { result: { delivery: Record<string, unknown> } })
+      .result.delivery
+    expect(pointedDelivery.withheldReason).toBeUndefined()
+    expect(pointedDelivery.withheldAt).toBeUndefined()
+    // Positive control: the same record IS on the wire for the queued row it belongs to.
+    expect(newerResponse).toMatchObject({
+      ok: true,
+      result: { delivery: { state: 'queued_awaiting_pane', withheldReason: 'blocked_modal' } }
+    })
+  })
 })

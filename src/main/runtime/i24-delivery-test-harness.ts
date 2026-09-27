@@ -1,41 +1,53 @@
-// Shared harness for the I-24-1/G1 delivery-escape test files (i24-delivery-escape.test.ts and
-// i24-delivery-escape-guards.test.ts, split at 800 counted lines — see config/vitest.config.ts's
-// own max-lines budget). Mirrors the validated I-24-1 probe (i24-fix-probe.test.ts) and
-// s10-21f-r147-delivery-starvation-bound.test.ts's fixtures.
-import { vi } from 'vitest'
+// Shared harness for the I-24-1 delivery-gate test files (i24-delivery-anchored.test.ts,
+// i24-delivery-fallback.test.ts): a real OrcaRuntimeService over an injected pty controller and an
+// orchestration-db stub keyed by `to_handle` (s10-21f-r147-delivery-starvation-bound.test.ts's own
+// fixtures). `anchor` adds the two persisted facts the anchored Claude identity (R270) reads — the
+// workspace session's launch anchor for the pane, bound to the pty's `<ptyId>:<incarnationId>`, and
+// the hook server's attestation of a hook carrying that anchor's hash — so a test can stand up the
+// exact state a main restart leaves behind.
+import { createHash } from 'node:crypto'
+import { vi, type Mock } from 'vitest'
 import { OrcaRuntimeService } from './orca-runtime'
 import { makePaneKey } from '../../shared/stable-pane-id'
 import type { AgentStatusIpcPayload } from '../../shared/agent-status-types'
 
-export const WORKTREE_ID = 'repo-1::/tmp/probe-worktree-i24-escape'
-export const TAB_ID = 'tab-i24-escape'
+export const WORKTREE_ID = 'repo-1::/tmp/probe-worktree-i24-delivery'
+export const TAB_ID = 'tab-i24-delivery'
 export const LEAF_ID = '24242424-2424-4242-8242-242424242424'
 export const PANE_KEY = makePaneKey(TAB_ID, LEAF_ID)
 export const MIN = 60_000
+export const INCARNATION = 'inc-i24-delivery-1'
 
 export type WithheldRecord = { firstAt: number; at: number; count: number; reason: string }
 
 export type PtyRecordForTest = {
   ptyId: string
+  incarnationId: string | null
   launchAgent: string | null
   connected: boolean
   paneKey: string | null
   launchPromptFenceSince: number | null
+  lastAgentStatusObservedLive: boolean
+  tailBuffer: string[]
+  tailPartialLine: string
+  preview: string
 }
 
-export type LeafRecordForTest = { writable: boolean }
+export type LeafRecordForTest = { writable: boolean; lastAgentStatusObservedLive: boolean }
 
 export type RuntimeInternals = {
   ptysById: Map<string, PtyRecordForTest>
   leaves: Map<string, LeafRecordForTest>
   withheldDeliveryAttemptsByHandle: Map<string, WithheldRecord>
+  pointedMessageIdsByHandle: Map<string, Set<string>>
   getLeafKey: (tabId: string, leafId: string) => string
   recordPtyWorktree: (
     ptyId: string,
     worktreeId: string,
-    state?: { connected?: boolean; paneKey?: string | null }
+    state?: { connected?: boolean; paneKey?: string | null; incarnationId?: string }
   ) => PtyRecordForTest
   issuePtyHandle: (pty: unknown) => string
+  advancePtyLifecycleGeneration: (ptyId: string) => void
 }
 
 export function priv(runtime: OrcaRuntimeService): RuntimeInternals {
@@ -85,20 +97,7 @@ export type StoredMessageRow = {
 export type TestDbStub = {
   rows: StoredMessageRow[]
   insert: (subject: string) => void
-  db: {
-    getUndeliveredUnreadMessages: (handle: string) => StoredMessageRow[]
-    getUndeliveredUnreadMailboxHandles: () => string[]
-    getActiveCoordinatorRun: () => null
-    getCurrentRunForPane: () => undefined
-    getActiveDispatchForTerminal: () => null
-    getActiveDispatchForIdentity: () => undefined
-    findActiveRemoteAttachmentForPane: () => undefined
-    listDispatchInputObservationTargets: () => never[]
-    getRecipientPaneKeyForBareHandle: () => null
-    findOrphanedIdentityCandidate: () => undefined
-    markAsDelivered: ReturnType<typeof vi.fn>
-    close: () => void
-  }
+  db: Record<string, unknown>
 }
 
 export function makeDbStub(toHandle: () => string): TestDbStub {
@@ -154,10 +153,11 @@ export function enterWrites(write: ReturnType<typeof vi.fn>, ptyId: string): unk
 
 export function claudeHook(
   state: AgentStatusIpcPayload['state'],
-  receivedAt: number
+  receivedAt: number,
+  paneKey: string = PANE_KEY
 ): AgentStatusIpcPayload {
   return {
-    paneKey: PANE_KEY,
+    paneKey,
     state,
     prompt: '',
     agentType: 'claude',
@@ -169,13 +169,66 @@ export function claudeHook(
   }
 }
 
-/** A renderer-leaf pane on a reattached pty: launchAgent null (reattach), no OSC title seen. */
+export function tokenHash(token: string): string {
+  return createHash('sha256').update(token).digest('hex')
+}
+
+/** The persisted facts a main restart leaves for an Orca-launched pane (see the file comment).
+ *  `boundPty` defaults to the pty's own identity (null: a legacy anchor with no binding);
+ *  `attestedHash` defaults to the anchor's hash (null: the hook server holds no evidence). */
+export type AnchorFixture = {
+  launchToken: string
+  boundPty?: string | null
+  attestedHash?: string | null
+}
+
+type AttestCandidate = { paneKey: string; launchTokenHash: string; connectionId: string | null }
+type AttestResult = { paneKey: string; source: 'hydrated_commitment' } | null
+export type AttestMock = Mock<(candidate: AttestCandidate) => AttestResult>
+
+/** The store stub (workspace session with the pane's launch anchor) and the hook server's
+ *  attestation stub for `anchor` on the pane PANE_KEY, pty `ptyId` at INCARNATION. */
+export function buildAnchorDeps(
+  ptyId: string,
+  anchor: AnchorFixture | undefined
+): { store: unknown; attest: AttestMock } {
+  const anchorHash = anchor ? tokenHash(anchor.launchToken) : undefined
+  const boundPty = anchor?.boundPty === undefined ? `${ptyId}:${INCARNATION}` : anchor.boundPty
+  const session = {
+    terminalLaunchTokenHashesByPaneKey: anchorHash ? { [PANE_KEY]: anchorHash } : {},
+    terminalLaunchTokenAnchorPtyByPaneKey: anchor && boundPty ? { [PANE_KEY]: boundPty } : {}
+  }
+  const attestedHash = anchor?.attestedHash === undefined ? anchorHash : anchor.attestedHash
+  const attest = vi.fn(
+    (candidate: AttestCandidate): AttestResult =>
+      candidate.paneKey === PANE_KEY &&
+      candidate.connectionId === null &&
+      attestedHash !== null &&
+      candidate.launchTokenHash === attestedHash
+        ? { paneKey: PANE_KEY, source: 'hydrated_commitment' }
+        : null
+  )
+  // Only what these flows read: the workspace session (the anchor), an empty repo/worktree
+  // catalogue for listTerminals, and default settings for pty output handling.
+  const store = {
+    getWorkspaceSession: () => session,
+    getRepos: () => [],
+    getRepo: () => undefined,
+    getAllWorktreeMeta: () => ({}),
+    getWorktreeMeta: () => undefined,
+    getSettings: () => ({})
+  }
+  return { store: anchor ? store : null, attest }
+}
+
+/** A renderer-leaf pane on a reattached pty: launchAgent null, no OSC title seen, incarnation set. */
 export async function setUpLeafPane(opts: {
   hooks: () => AgentStatusIpcPayload[]
   fg: string | null
   confirm: string | null
   ptyId: string
   launchAgent?: string | null
+  anchor?: AnchorFixture
 }): Promise<{
   runtime: OrcaRuntimeService
   write: ReturnType<typeof vi.fn>
@@ -183,8 +236,13 @@ export async function setUpLeafPane(opts: {
   handle: string
   stub: TestDbStub
   pty: PtyRecordForTest
+  attest: AttestMock
 }> {
-  const runtime = new OrcaRuntimeService(null, undefined, { getAgentStatusSnapshot: opts.hooks })
+  const { store, attest } = buildAnchorDeps(opts.ptyId, opts.anchor)
+  const runtime = new OrcaRuntimeService(store as never, undefined, {
+    getAgentStatusSnapshot: opts.hooks,
+    attestAgentHookCompatibilityAuthority: attest
+  })
   const write = vi.fn((_p: string, _d: string) => true)
   const controller = makeController(write, opts.fg, opts.confirm)
   runtime.setPtyController(controller as never)
@@ -212,6 +270,7 @@ export async function setUpLeafPane(opts: {
     ]
   } as never)
   const pty = priv(runtime).ptysById.get(opts.ptyId)!
+  pty.incarnationId = INCARNATION
   if (opts.launchAgent !== undefined) {
     pty.launchAgent = opts.launchAgent
   }
@@ -219,7 +278,7 @@ export async function setUpLeafPane(opts: {
   const handle = terminal.handle as string
   const stub = makeDbStub(() => handle)
   runtime.setOrchestrationDb(stub.db as never)
-  return { runtime, write, controller, handle, stub, pty }
+  return { runtime, write, controller, handle, stub, pty, attest }
 }
 
 export async function advance(ms: number, step = 30_000): Promise<void> {
@@ -230,7 +289,8 @@ export async function advance(ms: number, step = 30_000): Promise<void> {
 
 export function snapshot(
   runtime: OrcaRuntimeService,
-  stub: { rows: StoredMessageRow[] }
+  stub: { rows: StoredMessageRow[] },
+  index = 0
 ): ReturnType<OrcaRuntimeService['getMessageDeliverySnapshot']> {
-  return runtime.getMessageDeliverySnapshot(stub.rows[0] as never)
+  return runtime.getMessageDeliverySnapshot(stub.rows[index] as never)
 }
