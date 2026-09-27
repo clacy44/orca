@@ -1,4 +1,5 @@
 import type { CliStatusResult } from '../shared/runtime-types'
+import type { RuntimeHostIntegrity } from '../shared/host-integrity-types'
 import { computerUseErrorRecoveryData } from '../shared/computer-use-error-recovery'
 import { prepareComputerCliJsonResult } from './computer-format'
 import type { RuntimeRpcFailure, RuntimeRpcSuccess } from './runtime-client'
@@ -166,6 +167,24 @@ function localCliErrorData(error: unknown, context: CliErrorContext): unknown {
   return undefined
 }
 
+/** INV-P-023: Windows-only integrity/integrityWarning lines, absent when the field is absent. */
+function formatIntegrityLines(integrity: RuntimeHostIntegrity | undefined): string[] {
+  if (!integrity) {
+    return []
+  }
+  const detail =
+    integrity.daemon !== undefined && integrity.daemon !== integrity.main
+      ? ` (main: ${integrity.main}, terminal daemon: ${integrity.daemon})`
+      : ''
+  const override =
+    integrity.elevationAllowed && integrity.level !== 'medium' ? ' [ORCA_ALLOW_ELEVATED=1]' : ''
+  const lines = [`integrity: ${integrity.level}${detail}${override}`]
+  if (integrity.warning) {
+    lines.push(`integrityWarning: ${integrity.warning}`)
+  }
+  return lines
+}
+
 export function formatCliStatus(status: CliStatusResult): string {
   return [
     `appRunning: ${status.app.running}`,
@@ -174,7 +193,8 @@ export function formatCliStatus(status: CliStatusResult): string {
     `runtimeState: ${status.runtime.state}`,
     `runtimeReachable: ${status.runtime.reachable}`,
     `runtimeId: ${status.runtime.runtimeId ?? 'none'}`,
-    `graphState: ${status.graph.state}`
+    `graphState: ${status.graph.state}`,
+    ...formatIntegrityLines(status.runtime.integrity)
   ].join('\n')
 }
 

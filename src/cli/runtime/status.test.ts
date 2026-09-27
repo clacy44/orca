@@ -73,4 +73,66 @@ describe.skipIf(process.platform === 'win32')('CLI runtime status', () => {
       state: 'ready'
     })
   })
+
+  // INV-P-023: hostIntegrity on the wire maps to result.runtime.integrity; its absence
+  // produces no `integrity` key at all (Windows-only field).
+  it('maps a status.get hostIntegrity field to runtime.integrity, or omits it entirely', async () => {
+    async function statusWith(hostIntegrity?: unknown) {
+      const userDataPath = mkdtempSync(join(tmpdir(), 'orca-runtime-status-integrity-'))
+      const endpoint = join(userDataPath, 'runtime.sock')
+      const server = createServer((socket) => {
+        sockets.add(socket)
+        socket.once('close', () => sockets.delete(socket))
+        socket.once('data', (data) => {
+          const request = JSON.parse(String(data).trim()) as { id: string }
+          socket.write(
+            `${JSON.stringify({
+              id: request.id,
+              ok: true,
+              result: {
+                runtimeId: 'runtime-legacy',
+                rendererGraphEpoch: 1,
+                graphStatus: 'ready',
+                authoritativeWindowId: null,
+                liveTabCount: 0,
+                ...(hostIntegrity !== undefined ? { hostIntegrity } : {})
+              },
+              _meta: { runtimeId: 'runtime-legacy' }
+            })}\n`
+          )
+        })
+      })
+      servers.add(server)
+      await new Promise<void>((resolve) => server.listen(endpoint, resolve))
+      writeFileSync(
+        getRuntimeMetadataPath(userDataPath),
+        JSON.stringify({
+          runtimeId: 'runtime-legacy',
+          pid: process.pid,
+          transport: { kind: 'unix', endpoint },
+          authToken: 'token',
+          startedAt: Date.now()
+        })
+      )
+      return new RuntimeClient(userDataPath).getCliStatus()
+    }
+
+    const withIntegrity = await statusWith({
+      level: 'high',
+      main: 'high',
+      elevationAllowed: false,
+      agentLaunch: 'refused',
+      warning: 'refused'
+    })
+    expect(withIntegrity.result.runtime.integrity).toEqual({
+      level: 'high',
+      main: 'high',
+      elevationAllowed: false,
+      agentLaunch: 'refused',
+      warning: 'refused'
+    })
+
+    const withoutIntegrity = await statusWith(undefined)
+    expect('integrity' in withoutIntegrity.result.runtime).toBe(false)
+  })
 })

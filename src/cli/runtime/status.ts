@@ -50,7 +50,8 @@ export async function getCliStatus(
         ...(response.result.remoteUpdateSupport
           ? { remoteUpdateSupport: response.result.remoteUpdateSupport }
           : {}),
-        ...(response.result.capabilities ? { capabilities: response.result.capabilities } : {})
+        ...(response.result.capabilities ? { capabilities: response.result.capabilities } : {}),
+        ...(response.result.hostIntegrity ? { integrity: response.result.hostIntegrity } : {})
       },
       graph: {
         state: graphState

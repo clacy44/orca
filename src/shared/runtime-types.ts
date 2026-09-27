@@ -13,6 +13,7 @@ import type {
   BrowserSessionProfileSource
 } from './browser-workspace-types'
 import type { RateLimitWindow } from './rate-limit-types'
+import type { RuntimeHostIntegrity } from './host-integrity-types'
 import type { BaseRefSearchResult, Repo } from './repo-types'
 import type { TabGroupLayoutNode } from './tab-types'
 import type { TerminalColorOverrides } from './terminal-color-overrides'
@@ -95,6 +96,8 @@ export type RuntimeStatus = {
   // that still read these names; new desktop/CLI code uses the fields above.
   protocolVersion?: number
   minCompatibleMobileVersion?: number
+  // Why: Windows only (INV-P-023); absent on POSIX and on hosts that predate it.
+  hostIntegrity?: RuntimeHostIntegrity
 }
 
 export type CliRuntimeState =
@@ -117,6 +120,7 @@ export type CliStatusResult = {
     appVersion?: string
     remoteUpdateSupport?: RemoteServerUpdateSupport
     capabilities?: RuntimeCapability[]
+    integrity?: RuntimeHostIntegrity
   }
   graph: {
     state: RuntimeGraphStatus | 'not_running' | 'starting'
