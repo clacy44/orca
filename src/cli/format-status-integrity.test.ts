@@ -4,43 +4,13 @@ import { describe, expect, it } from 'vitest'
 import { formatCliStatus } from './format'
 import type { CliStatusResult } from '../shared/runtime-types'
 import type { RuntimeHostIntegrity } from '../shared/host-integrity-types'
-
-// Exact contract strings (R266 DESIGN Q2 "Sentences") — copied verbatim, not imported, so this
-// CLI-project test does not need to pull in the main-only host-integrity-guard module graph.
-function hostIntegrityRefusalSentence(
-  source: 'main' | 'daemon',
-  level: 'high' | 'low' | 'unknown'
-): string {
-  const subject = source === 'main' ? "Orca's main process" : "Orca's terminal daemon"
-  const remedy =
-    source === 'main'
-      ? 'Relaunch Orca normally from the Start menu (not from an elevated shell)'
-      : 'Restart the terminal daemon from this non-elevated Orca (Manage Sessions → Restart)'
-  const describe =
-    level === 'high'
-      ? 'elevated (High integrity)'
-      : level === 'low'
-        ? 'at Low integrity'
-        : 'at an integrity level Orca could not verify'
-  return `${subject} is running ${describe}, so new agent sessions are refused. ${remedy}, or set ORCA_ALLOW_ELEVATED=1 to allow them.`
-}
-
-function hostIntegrityOverrideSentence(
-  source: 'main' | 'daemon',
-  level: 'high' | 'low' | 'unknown'
-): string {
-  const subject = source === 'main' ? "Orca's main process" : "Orca's terminal daemon"
-  const describe =
-    level === 'high'
-      ? 'elevated (High integrity)'
-      : level === 'low'
-        ? 'at Low integrity'
-        : 'at an integrity level Orca could not verify'
-  return `${subject} is running ${describe} and ORCA_ALLOW_ELEVATED=1 is set, so agent sessions are allowed and inherit that integrity level.`
-}
-
-const DAEMON_UNREPORTED_SENTENCE =
-  "Orca's terminal daemon predates the elevation guard and cannot report its integrity level; restart it (Manage Sessions → Restart) to verify it is not elevated."
+// N3: imported (config/tsconfig.cli.json includes ../src/shared/**), not copied — the exact
+// contract strings (R266 DESIGN Q2 "Sentences") now live in one place (host-integrity-sentences.ts).
+import {
+  DAEMON_UNREPORTED_SENTENCE,
+  hostIntegrityOverrideSentence,
+  hostIntegrityRefusalSentence
+} from '../shared/host-integrity-sentences'
 
 function status(integrity?: RuntimeHostIntegrity): CliStatusResult {
   return {

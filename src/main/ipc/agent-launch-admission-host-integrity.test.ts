@@ -6,6 +6,7 @@ import { OrchestrationDb } from '../runtime/orchestration/db'
 import { admitAgentLaunch, type LaunchAdmission } from './agent-launch-admission'
 import { HostElevatedRefusedError } from './agent-launch-admission-errors'
 import { ADMISSION_AUDIT_VERBS } from './agent-launch-admission-support'
+import { SETUP_AGENT_SEQUENCE_STARTUP_COMMAND_ENV } from '../../shared/setup-agent-sequencing'
 import type { PtySpawnOptions } from '../providers/pty-provider-contract'
 import {
   configureHostIntegrityForTests,
@@ -96,6 +97,22 @@ describe('INV-P-023: admitAgentLaunch host-integrity chokepoint', () => {
         admitAgentLaunch(
           () => db,
           opts({ launchAgent: undefined, command: 'claude --model opus' }),
+          CALLER,
+          ctx()
+        )
+      ).rejects.toThrow(HostElevatedRefusedError)
+    })
+
+    it('N6: a spawn whose sequenced startup line runs claude is refused on a high host', async () => {
+      const db = freshDb()
+      await expect(
+        admitAgentLaunch(
+          () => db,
+          opts({
+            launchAgent: undefined,
+            command: undefined,
+            env: { [SETUP_AGENT_SEQUENCE_STARTUP_COMMAND_ENV]: 'claude --model opus' }
+          }),
           CALLER,
           ctx()
         )

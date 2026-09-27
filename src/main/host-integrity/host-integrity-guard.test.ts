@@ -27,7 +27,7 @@ function probeOf(level: IntegrityProbe['level']): () => Promise<IntegrityProbe> 
 describe('startHostIntegrityDetection', () => {
   afterEach(() => resetHostIntegrityForTests())
 
-  it('is idempotent (probe called once) and reads env once', async () => {
+  it('is idempotent: the probe is called exactly once across repeated calls', async () => {
     const probe = vi
       .fn()
       .mockResolvedValue({ level: 'medium', detail: 'x' } satisfies IntegrityProbe)
@@ -35,6 +35,24 @@ describe('startHostIntegrityDetection', () => {
     await startHostIntegrityDetection({ ORCA_ALLOW_ELEVATED: '1' })
     await startHostIntegrityDetection({ ORCA_ALLOW_ELEVATED: '0' })
     expect(probe).toHaveBeenCalledTimes(1)
+  })
+
+  it('N4 (kills M2b): a later env change cannot switch the override on', async () => {
+    configureHostIntegrityForTests({ probe: probeOf('high') })
+    await startHostIntegrityDetection({})
+    await startHostIntegrityDetection({ ORCA_ALLOW_ELEVATED: '1' })
+    const db = { writeAgentAudit: vi.fn() }
+    await expect(
+      assertHostIntegrityAllowsAgentLaunch({
+        includeDaemon: false,
+        agent: 'claude',
+        paneKey: null,
+        hostId: 'local',
+        via: 'admission',
+        recordOverride: true,
+        getDb: () => db
+      })
+    ).rejects.toThrow(LaunchAdmissionRefusedError)
   })
 
   it.each(['true', ' 1'])("'%s' does not override", async (value) => {
@@ -55,6 +73,17 @@ describe('startHostIntegrityDetection', () => {
   })
 })
 
+describe('resetHostIntegrityForTests', () => {
+  afterEach(() => resetHostIntegrityForTests())
+
+  it("T3: reset restores the configured default probe (the vitest setupFile's, not the real probe)", async () => {
+    configureHostIntegrityForTests({ probe: probeOf('high') })
+    resetHostIntegrityForTests()
+    const result = await startHostIntegrityDetection()
+    expect(result.level).toBe('n/a')
+  })
+})
+
 describe('hostIntegrityBlocker', () => {
   it.each<[ProcessIntegrityLevel, DaemonIntegrityReport | null, boolean, 'main' | 'daemon' | null]>(
     [
@@ -63,6 +92,7 @@ describe('hostIntegrityBlocker', () => {
       ['low', null, true, 'main'],
       ['medium', 'high', true, 'daemon'],
       ['medium', 'high', false, null],
+      ['medium', 'low', true, 'daemon'],
       ['medium', 'unknown', true, 'daemon'],
       ['medium', 'unreported', true, null],
       ['medium', 'inherited', true, null]
@@ -237,6 +267,55 @@ describe('readRuntimeHostIntegrity', () => {
     const view = await readRuntimeHostIntegrity()
     expect(view?.daemon).toBe('medium')
     expect(view?.warning).toBeUndefined()
+  })
+
+  it('N4 (kills MG4): reports the worse of main and daemon (medium main, high daemon -> high)', async () => {
+    configureHostIntegrityForTests({ probe: probeOf('medium'), daemon: () => 'high' })
+    const view = await readRuntimeHostIntegrity()
+    expect(view?.level).toBe('high')
+    expect(view?.main).toBe('medium')
+    expect(view?.daemon).toBe('high')
+  })
+})
+
+// N3 (G1-10z3-attacker): the design's literal sentences (R266 design Q2 "Sentences"), copied by
+// hand here rather than compared against the module's own builders — a mutant that rewrites the
+// wording (M-sentence-drift) still calls these exports, so only a hand-copied literal catches it.
+describe('T3: literal contract sentences (R266 design Q2)', () => {
+  it('main refusal sentences (high/low/unknown)', () => {
+    expect(hostIntegrityRefusalSentence('main', 'high')).toBe(
+      "Orca's main process is running elevated (High integrity), so new agent sessions are refused. Relaunch Orca normally from the Start menu (not from an elevated shell), or set ORCA_ALLOW_ELEVATED=1 to allow them."
+    )
+    expect(hostIntegrityRefusalSentence('main', 'low')).toBe(
+      "Orca's main process is running at Low integrity, so new agent sessions are refused. Relaunch Orca normally from the Start menu (not from an elevated shell), or set ORCA_ALLOW_ELEVATED=1 to allow them."
+    )
+    expect(hostIntegrityRefusalSentence('main', 'unknown')).toBe(
+      "Orca's main process is running at an integrity level Orca could not verify, so new agent sessions are refused. Relaunch Orca normally from the Start menu (not from an elevated shell), or set ORCA_ALLOW_ELEVATED=1 to allow them."
+    )
+  })
+
+  it('daemon refusal sentences (high/low/unknown)', () => {
+    expect(hostIntegrityRefusalSentence('daemon', 'high')).toBe(
+      "Orca's terminal daemon is running elevated (High integrity), so new agent sessions are refused. Restart the terminal daemon from this non-elevated Orca (Manage Sessions → Restart), or set ORCA_ALLOW_ELEVATED=1 to allow them."
+    )
+    expect(hostIntegrityRefusalSentence('daemon', 'low')).toBe(
+      "Orca's terminal daemon is running at Low integrity, so new agent sessions are refused. Restart the terminal daemon from this non-elevated Orca (Manage Sessions → Restart), or set ORCA_ALLOW_ELEVATED=1 to allow them."
+    )
+    expect(hostIntegrityRefusalSentence('daemon', 'unknown')).toBe(
+      "Orca's terminal daemon is running at an integrity level Orca could not verify, so new agent sessions are refused. Restart the terminal daemon from this non-elevated Orca (Manage Sessions → Restart), or set ORCA_ALLOW_ELEVATED=1 to allow them."
+    )
+  })
+
+  it('the override sentence (main/high)', () => {
+    expect(hostIntegrityOverrideSentence('main', 'high')).toBe(
+      "Orca's main process is running elevated (High integrity) and ORCA_ALLOW_ELEVATED=1 is set, so agent sessions are allowed and inherit that integrity level."
+    )
+  })
+
+  it('DAEMON_UNREPORTED_SENTENCE', () => {
+    expect(DAEMON_UNREPORTED_SENTENCE).toBe(
+      "Orca's terminal daemon predates the elevation guard and cannot report its integrity level; restart it (Manage Sessions → Restart) to verify it is not elevated."
+    )
   })
 })
 

@@ -20,9 +20,12 @@ import {
   getHiddenRateLimitWslCwdSetupCommands,
   resolveHiddenRateLimitPtyCwd
 } from './hidden-rate-limit-pty-cwd'
+import { isHostIntegrityBlockedForAgentProcesses } from '../host-integrity/host-integrity-guard'
 
 const PTY_TIMEOUT_MS = 25_000
 const MAX_OUTPUT_LENGTH = 100_000 // 100KB buffer limit
+// [N7, INV-P-023] Warn at most once per process — this probe can be skipped many times.
+let warnedHostIntegrityBlocked = false
 
 // ---------------------------------------------------------------------------
 // PTY fallback — spawn interactive `claude`, send `/usage`, parse the TUI
@@ -226,6 +229,15 @@ export async function fetchViaPty(options?: {
   signal?: AbortSignal
 }): Promise<ProviderRateLimits> {
   if (options?.signal?.aborted) {
+    return abortedClaudeUsageResult()
+  }
+  // [N7, INV-P-023] Skip the interactive `claude` PTY usage fallback while the host is blocked
+  // (High/Low/unknown integrity, no override) — this probe never reaches admitAgentLaunch.
+  if (isHostIntegrityBlockedForAgentProcesses()) {
+    if (!warnedHostIntegrityBlocked) {
+      warnedHostIntegrityBlocked = true
+      console.warn('[host-integrity] usage probe skipped: host blocked (INV-P-023)')
+    }
     return abortedClaudeUsageResult()
   }
   const pty = await import('node-pty')

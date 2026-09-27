@@ -83,6 +83,7 @@ import {
 } from './terminal-history-seed-chunks'
 import { NdjsonLineTooLongError } from './ndjson'
 import type { DaemonEndpointIdentity } from './daemon-hello-protocol'
+import type { ProcessIntegrityLevel } from '../../shared/host-integrity-types'
 import {
   classifyDaemonAuditFailure,
   recordAuthenticatedInventory,
@@ -231,6 +232,9 @@ export class DaemonPtyAdapter implements IPtyProvider {
   private client: DaemonClient
   private auditContext: DaemonAuditContext
   private lastAuthenticatedIdentity: DaemonEndpointIdentity | null = null
+  // Recorded from EVERY hello (unlike lastAuthenticatedIdentity, gated by sameEndpointIdentity)
+  // so an adopted daemon's later, more conclusive report is not stuck behind its first hello.
+  private lastHelloIntegrityLevel: ProcessIntegrityLevel | undefined = undefined
   private exactDaemonIncarnation: ExactDaemonIncarnation | null = null
   private lastAuditObservation: DaemonAuditObservation | null = null
   // Why: every listProcesses call republishes the same observation; unthrottled it drains the shared per-session telemetry ceiling.
@@ -396,6 +400,12 @@ export class DaemonPtyAdapter implements IPtyProvider {
 
   getLastAuthenticatedDaemonIdentity(): DaemonEndpointIdentity | null {
     return this.lastAuthenticatedIdentity ? { ...this.lastAuthenticatedIdentity } : null
+  }
+
+  /** INV-P-023 N1: the integrityLevel from the most recent hello, even one sameEndpointIdentity
+   * suppressed from lastAuthenticatedIdentity — lets an adopted daemon's later report heal. */
+  getLastHelloIntegrityLevel(): ProcessIntegrityLevel | undefined {
+    return this.lastHelloIntegrityLevel
   }
 
   getLastAuditObservation(): DaemonAuditObservation | null {
@@ -2011,6 +2021,8 @@ export class DaemonPtyAdapter implements IPtyProvider {
     if (!current) {
       return
     }
+    // Every hello, not gated by sameEndpointIdentity: getLastHelloIntegrityLevel() below.
+    this.lastHelloIntegrityLevel = current.integrityLevel
     const previous = this.lastAuthenticatedIdentity
     if (previous && sameEndpointIdentity(previous, current)) {
       return

@@ -1323,14 +1323,27 @@ export function getDaemonProvider(): DaemonProvider | null {
   return adapter
 }
 
-/** INV-P-023: the integrity a fresh local agent PTY inherits from the current daemon. */
+/** INV-P-023: the integrity a fresh local agent PTY inherits from the current daemon. N1: an
+ * adopted daemon (not self-spawned) whose pinned identity has no conclusive level is refreshed
+ * from the adapter's most recent hello, so a later report is not stuck behind the first one. */
 export function getCurrentDaemonIntegrity(): DaemonIntegrityReport | null {
-  return adapter
-    ? classifyDaemonIntegrity(
-        getCurrentDaemonAdapter(adapter).getLastAuthenticatedDaemonIdentity(),
-        selfSpawnedDaemonLaunchNonces
-      )
-    : null
+  if (!adapter) {
+    return null
+  }
+  const currentAdapter = getCurrentDaemonAdapter(adapter)
+  const identity = currentAdapter.getLastAuthenticatedDaemonIdentity()
+  const selfSpawned = identity !== null && selfSpawnedDaemonLaunchNonces.has(identity.launchNonce)
+  if (
+    identity &&
+    !selfSpawned &&
+    (identity.integrityLevel === undefined || identity.integrityLevel === 'unknown')
+  ) {
+    const refreshed = currentAdapter.getLastHelloIntegrityLevel()
+    if (refreshed !== undefined) {
+      return refreshed
+    }
+  }
+  return classifyDaemonIntegrity(identity, selfSpawnedDaemonLaunchNonces)
 }
 
 // Why: computed from the pid record on demand (not cached at adoption) so the Settings

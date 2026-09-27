@@ -5,6 +5,7 @@ import {
   runWhoami,
   ProcessIntegrityCache,
   startDaemonIntegrityReport,
+  INCONCLUSIVE_RETRY_MS,
   WHOAMI_GROUPS_ARGS,
   WHOAMI_TIMEOUT_MS
 } from './windows-integrity-level'
@@ -259,6 +260,16 @@ describe('startDaemonIntegrityReport', () => {
     expect(log.log).toHaveBeenCalledWith('integrity', { level: 'high', detail: 'S-1-16-12288' })
   })
 
+  it('N4 (kills MX4): an unknown probe -> current() returns unknown, not undefined', async () => {
+    const log = { log: vi.fn() }
+    const report = startDaemonIntegrityReport(log, () =>
+      Promise.resolve({ level: 'unknown', detail: 'still probing' })
+    )
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(report.current()).toBe('unknown')
+  })
+
   it('ab: an n/a probe -> current() undefined and no log line', async () => {
     const log = { log: vi.fn() }
     const report = startDaemonIntegrityReport(log, () =>
@@ -268,5 +279,25 @@ describe('startDaemonIntegrityReport', () => {
     await Promise.resolve()
     expect(report.current()).toBeUndefined()
     expect(log.log).not.toHaveBeenCalled()
+  })
+
+  it('T1: an unknown daemon probe retries on its own after 30 s and heals to the next conclusive result', async () => {
+    vi.useFakeTimers()
+    try {
+      const probe = vi
+        .fn()
+        .mockResolvedValueOnce({ level: 'unknown', detail: 'first' } satisfies IntegrityProbe)
+        .mockResolvedValueOnce({ level: 'medium', detail: 'second' } satisfies IntegrityProbe)
+      const log = { log: vi.fn() }
+      const report = startDaemonIntegrityReport(log, probe)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(report.current()).toBe('unknown')
+      expect(probe).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(INCONCLUSIVE_RETRY_MS)
+      expect(probe).toHaveBeenCalledTimes(2)
+      expect(report.current()).toBe('medium')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

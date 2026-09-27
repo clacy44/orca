@@ -7,6 +7,11 @@ import {
   type ProcessIntegrityLevel,
   type RuntimeHostIntegrity
 } from '../../shared/host-integrity-types'
+import {
+  DAEMON_UNREPORTED_SENTENCE,
+  hostIntegrityOverrideSentence,
+  hostIntegrityRefusalSentence
+} from '../../shared/host-integrity-sentences'
 import { HostElevatedRefusedError } from '../ipc/agent-launch-admission-errors'
 import {
   ProcessIntegrityCache,
@@ -24,6 +29,10 @@ type HostIntegrityAuditRow = {
 }
 
 let probe: () => Promise<IntegrityProbe> = () => probeCurrentProcessIntegrity()
+// [N10] The FIRST probe configureHostIntegrityForTests ever receives in this module instance is
+// the vitest setupFile's (config/scripts/vitest-host-integrity-default.ts) — recorded so a reset
+// restores THAT, not the real whoami-backed probe, which would run on a dev machine otherwise.
+let testDefaultProbe: (() => Promise<IntegrityProbe>) | null = null
 let clock: () => number = Date.now
 let cache: ProcessIntegrityCache | null = null
 let elevationRead = false
@@ -89,42 +98,22 @@ export function hostIntegrityBlocker(
   return null
 }
 
-function subjectFor(source: 'main' | 'daemon'): string {
-  return source === 'main' ? "Orca's main process" : "Orca's terminal daemon"
-}
-
-function remedyFor(source: 'main' | 'daemon'): string {
-  return source === 'main'
-    ? 'Relaunch Orca normally from the Start menu (not from an elevated shell)'
-    : 'Restart the terminal daemon from this non-elevated Orca (Manage Sessions → Restart)'
-}
-
-function describeLevel(level: ProcessIntegrityLevel): string {
-  if (level === 'high') {
-    return 'elevated (High integrity)'
+/** [N7, INV-P-023] Synchronous peek for a hidden usage-fetcher PTY probe (never awaited, never
+ * a chokepoint substitute): true only once a blocker is settled and the override is not set;
+ * false when nothing has settled yet (startup) or on POSIX (main settles 'n/a'). */
+export function isHostIntegrityBlockedForAgentProcesses(): boolean {
+  const settled = cache?.peek()
+  if (!settled || settled.level === 'n/a') {
+    return false
   }
-  if (level === 'low') {
-    return 'at Low integrity'
-  }
-  return 'at an integrity level Orca could not verify'
+  const blocker = hostIntegrityBlocker(settled.level, readDaemon(), true)
+  return blocker !== null && !elevationAllowed
 }
 
-export function hostIntegrityRefusalSentence(
-  source: 'main' | 'daemon',
-  level: ProcessIntegrityLevel
-): string {
-  return `${subjectFor(source)} is running ${describeLevel(level)}, so new agent sessions are refused. ${remedyFor(source)}, or set ORCA_ALLOW_ELEVATED=1 to allow them.`
-}
-
-export function hostIntegrityOverrideSentence(
-  source: 'main' | 'daemon',
-  level: ProcessIntegrityLevel
-): string {
-  return `${subjectFor(source)} is running ${describeLevel(level)} and ORCA_ALLOW_ELEVATED=1 is set, so agent sessions are allowed and inherit that integrity level.`
-}
-
-export const DAEMON_UNREPORTED_SENTENCE =
-  "Orca's terminal daemon predates the elevation guard and cannot report its integrity level; restart it (Manage Sessions → Restart) to verify it is not elevated."
+// Sentence builders + DAEMON_UNREPORTED_SENTENCE moved to shared/host-integrity-sentences.ts
+// (N3) so the CLI project can import the exact literals instead of copying them; re-exported
+// here so every existing import of this module keeps working unchanged.
+export { DAEMON_UNREPORTED_SENTENCE, hostIntegrityOverrideSentence, hostIntegrityRefusalSentence }
 
 function reasonCodeFor(
   main: ProcessIntegrityLevel,
@@ -182,16 +171,13 @@ export async function assertHostIntegrityAllowsAgentLaunch(args: {
   }
 }
 
-/** Fed to `orca status`; waits only for the first probe, never for a background retry. */
-export async function readRuntimeHostIntegrity(): Promise<RuntimeHostIntegrity | undefined> {
-  const settled = cache?.peek() ?? (await startHostIntegrityDetection())
-  const main = settled.level
-  if (main === 'n/a') {
+function buildRuntimeHostIntegrityView(
+  mainOrNa: ProcessIntegrityLevel | 'n/a'
+): RuntimeHostIntegrity | undefined {
+  if (mainOrNa === 'n/a') {
     return undefined
   }
-  if (main === 'unknown') {
-    void startHostIntegrityDetection()
-  }
+  const main = mainOrNa
   const daemon = readDaemon()
   const blocker = hostIntegrityBlocker(main, daemon, true)
   const refused = blocker !== null && !elevationAllowed
@@ -211,6 +197,29 @@ export async function readRuntimeHostIntegrity(): Promise<RuntimeHostIntegrity |
     agentLaunch: refused ? 'refused' : 'allowed',
     ...(warning ? { warning } : {})
   }
+}
+
+/** Fed to the startup observation; waits only for the first probe, never for a background retry. */
+export async function readRuntimeHostIntegrity(): Promise<RuntimeHostIntegrity | undefined> {
+  const settled = cache?.peek() ?? (await startHostIntegrityDetection())
+  if (settled.level === 'unknown') {
+    void startHostIntegrityDetection()
+  }
+  return buildRuntimeHostIntegrityView(settled.level)
+}
+
+/** [N8] Fed to `orca status`'s RPC handler: NEVER awaits the first probe (the CLI's own RPC
+ * timeout is shorter than the probe's settle guard) — undefined until something has settled,
+ * kicking detection off in the background either way. */
+export function peekRuntimeHostIntegrity(): RuntimeHostIntegrity | undefined {
+  const settled = cache?.peek()
+  if (!settled || settled.level === 'unknown') {
+    void startHostIntegrityDetection()
+  }
+  if (!settled) {
+    return undefined
+  }
+  return buildRuntimeHostIntegrityView(settled.level)
 }
 
 /** Runs once per process; a console warning plus one audit row whenever the state is abnormal. */
@@ -247,6 +256,9 @@ export function configureHostIntegrityForTests(opts: {
   now?: () => number
   daemon?: () => DaemonIntegrityReport | null
 }): void {
+  if (testDefaultProbe === null) {
+    testDefaultProbe = opts.probe
+  }
   probe = opts.probe
   clock = opts.now ?? Date.now
   cache = null
@@ -261,7 +273,9 @@ export function configureHostIntegrityForTests(opts: {
 }
 
 export function resetHostIntegrityForTests(): void {
-  probe = () => probeCurrentProcessIntegrity()
+  // [N10] Restore the vitest setupFile's configured default, not the real probe — see
+  // testDefaultProbe's own doc comment.
+  probe = testDefaultProbe ?? (() => probeCurrentProcessIntegrity())
   clock = Date.now
   cache = null
   elevationRead = false

@@ -54,6 +54,7 @@ import {
   scanEffectiveResumeId,
   scanRefusal,
   locateClaude,
+  sequencedEnvHasClaude,
   tokensOfSubject
 } from './agent-launch-classification'
 
@@ -124,8 +125,14 @@ export async function admitAgentLaunch(
       : (spawnOptions.command ?? '')
     sniffed = sniffSubject.length > 0 && locateClaude(sniffSubject, shell)
   }
-  // INV-P-023: every agent launch (host-classified, or claude on the startup line) — never a plain shell.
-  if (spawnOptions.launchAgent !== undefined || sniffed) {
+  // INV-P-023: every agent launch (host-classified, claude on the startup line, or a sequenced
+  // env line that locates claude — N6, closes a caller-authored wrapper's escape) — never a
+  // plain shell.
+  if (
+    spawnOptions.launchAgent !== undefined ||
+    sniffed ||
+    sequencedEnvHasClaude(spawnOptions, shell)
+  ) {
     await assertHostIntegrityAllowsAgentLaunch({
       includeDaemon: ctx.executionHostId === LOCAL_EXECUTION_HOST_ID,
       agent: spawnOptions.launchAgent ?? 'claude',

@@ -1,6 +1,6 @@
 import { defineMethod, type RpcMethod } from '../core'
 import { getRemoteServerUpdaterSnapshot } from '../../remote-server-updater'
-import { readRuntimeHostIntegrity } from '../../../host-integrity/host-integrity-guard'
+import { peekRuntimeHostIntegrity } from '../../../host-integrity/host-integrity-guard'
 
 export const STATUS_METHODS: RpcMethod[] = [
   defineMethod({
@@ -8,7 +8,9 @@ export const STATUS_METHODS: RpcMethod[] = [
     params: null,
     handler: async (_params, { runtime, pairedDeviceId }) => {
       const snapshot = getRemoteServerUpdaterSnapshot(runtime.getRuntimeId())
-      const hostIntegrity = await readRuntimeHostIntegrity()
+      // [N8, INV-P-023] Never await the first probe — status.get's RPC timeout is shorter than
+      // the probe's settle guard on a slow Windows host.
+      const hostIntegrity = peekRuntimeHostIntegrity()
       return {
         ...runtime.getStatus(),
         ...(pairedDeviceId ? { pairedDeviceId } : {}),

@@ -290,6 +290,8 @@ type MockAdapter = {
   disconnectOnly: ReturnType<typeof vi.fn>
   onData: ReturnType<typeof vi.fn>
   onExit: ReturnType<typeof vi.fn>
+  getLastAuthenticatedDaemonIdentity: ReturnType<typeof vi.fn>
+  getLastHelloIntegrityLevel: ReturnType<typeof vi.fn>
   // Why: the router calls onData/onExit on each adapter; the stub returns a no-op unsubscribe so router subscription doesn't explode.
   callOrder: string[]
 }
@@ -435,6 +437,8 @@ vi.mock('./daemon-pty-adapter', () => ({
     readonly disconnectOnly: ReturnType<typeof vi.fn>
     readonly onData: ReturnType<typeof vi.fn>
     readonly onExit: ReturnType<typeof vi.fn>
+    readonly getLastAuthenticatedDaemonIdentity: ReturnType<typeof vi.fn>
+    readonly getLastHelloIntegrityLevel: ReturnType<typeof vi.fn>
     readonly callOrder: string[]
     constructor(opts: MockAdapter['options']) {
       this.protocolVersion = opts.protocolVersion ?? PROTOCOL_VERSION
@@ -471,6 +475,8 @@ vi.mock('./daemon-pty-adapter', () => ({
         return () => {}
       })
       this.onExit = vi.fn(() => () => {})
+      this.getLastAuthenticatedDaemonIdentity = vi.fn(() => null)
+      this.getLastHelloIntegrityLevel = vi.fn(() => undefined)
       adapterInstances.push(this as unknown as MockAdapter)
     }
   }
@@ -3898,5 +3904,23 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
     expect(disconnectMock).toHaveBeenCalledOnce()
     expect(killStaleDaemonMock).not.toHaveBeenCalled()
     expect(forkMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('daemon-init: getCurrentDaemonIntegrity (INV-P-023 N1)', () => {
+  it('an adopted daemon whose later hello reports high is classified high', async () => {
+    const mod = await importFresh()
+    const fakeAdapter = {
+      // Pinned identity (first hello) never got a conclusive level — the daemon boot probe was
+      // still pending. Not in selfSpawnedDaemonLaunchNonces: this process adopted it.
+      getLastAuthenticatedDaemonIdentity: vi.fn(() => ({
+        pid: 4242,
+        startedAtMs: 1_000,
+        launchNonce: 'adopted-nonce'
+      })),
+      getLastHelloIntegrityLevel: vi.fn(() => 'high' as const)
+    }
+    mod.replaceDaemonProvider(fakeAdapter as never)
+    expect(mod.getCurrentDaemonIntegrity()).toBe('high')
   })
 })

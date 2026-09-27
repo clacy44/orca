@@ -78,7 +78,7 @@ export function probeCurrentProcessIntegrity(
     return Promise.resolve({ level: 'n/a', detail: `platform ${platform}` })
   }
   const systemRoot =
-    deps.systemRoot ?? process.env.SystemRoot ?? process.env.WINDIR ?? 'C:\\Windows'
+    deps.systemRoot || process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows'
   const whoamiPath = getWhoamiPath(systemRoot)
   return new Promise((resolve) => {
     let settled = false
@@ -148,9 +148,17 @@ export function startDaemonIntegrityReport(
   log: { log(event: string, details?: unknown): void },
   probe: () => Promise<IntegrityProbe> = () => probeCurrentProcessIntegrity()
 ): { current(): ProcessIntegrityLevel | undefined } {
+  // Self-heals a stale 'unknown' without waiting for a hello (N1): retries on its own timer.
+  const scheduleRetry = (): void => {
+    const timer = setTimeout(() => void cache.resolve(), INCONCLUSIVE_RETRY_MS)
+    timer.unref?.()
+  }
   const cache = new ProcessIntegrityCache(probe, Date.now, (settled) => {
     if (settled.level !== 'n/a') {
       log.log('integrity', { level: settled.level, detail: settled.detail })
+    }
+    if (settled.level === 'unknown') {
+      scheduleRetry()
     }
   })
   void cache.resolve()

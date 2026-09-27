@@ -57,7 +57,12 @@ describe('status.get: INV-P-023 hostIntegrity', () => {
   })
 
   it('configured high: result.hostIntegrity matches the refusal view', async () => {
-    configureHostIntegrityForTests({ probe: probeOf('high') })
+    // N8: peekRuntimeHostIntegrity() never awaits the first probe — settle it first (env:{}
+    // starts detection) so this asserts the populated-field shape, not the pending-probe case
+    // (that's T6 below).
+    configureHostIntegrityForTests({ probe: probeOf('high'), env: {} })
+    await Promise.resolve()
+    await Promise.resolve()
     const result = (await handler('status.get')(undefined, { runtime } as never)) as {
       hostIntegrity?: { level: string; agentLaunch: string; warning?: string }
     }
@@ -66,5 +71,29 @@ describe('status.get: INV-P-023 hostIntegrity', () => {
       agentLaunch: 'refused',
       warning: expect.stringContaining('refused')
     })
+  })
+
+  it('T6: returns promptly with no hostIntegrity while the first probe is pending, and with the field once it settled', async () => {
+    let settle!: (probe: IntegrityProbe) => void
+    const pending = new Promise<IntegrityProbe>((resolve) => {
+      settle = resolve
+    })
+    configureHostIntegrityForTests({ probe: () => pending, env: {} })
+
+    const first = (await handler('status.get')(undefined, { runtime } as never)) as Record<
+      string,
+      unknown
+    >
+    expect('hostIntegrity' in first).toBe(false)
+
+    settle({ level: 'high', detail: 'test' })
+    await pending
+    await Promise.resolve()
+    await Promise.resolve()
+
+    const second = (await handler('status.get')(undefined, { runtime } as never)) as {
+      hostIntegrity?: { level: string; agentLaunch: string }
+    }
+    expect(second.hostIntegrity).toMatchObject({ level: 'high', agentLaunch: 'refused' })
   })
 })

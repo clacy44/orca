@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { resolveClaudeCommandMock, spawnMock } = vi.hoisted(() => ({
   resolveClaudeCommandMock: vi.fn(),
@@ -16,6 +16,11 @@ vi.mock('node-pty', () => ({
 import { fetchViaPty } from './claude-pty'
 import { getActiveHiddenRateLimitPtyCount } from './hidden-pty-cleanup'
 import { HIDDEN_PTY_KILL_UNCONFIRMED_ERROR } from './hidden-pty-exit'
+import {
+  configureHostIntegrityForTests,
+  resetHostIntegrityForTests
+} from '../host-integrity/host-integrity-guard'
+import type { IntegrityProbe } from '../host-integrity/windows-integrity-level'
 
 function makeDisposable() {
   return { dispose: vi.fn() }
@@ -596,6 +601,32 @@ describe('fetchViaPty', () => {
         resetDescription: 'Wed at 9:05 PM'
       },
       error: null
+    })
+  })
+
+  describe('N7 (INV-P-023): host-integrity gate', () => {
+    afterEach(() => resetHostIntegrityForTests())
+
+    it('skips the PTY usage probe while the host is blocked', async () => {
+      configureHostIntegrityForTests({
+        probe: async () => ({ level: 'high', detail: 'test' }) satisfies IntegrityProbe,
+        env: {}
+      })
+      await Promise.resolve()
+      await Promise.resolve()
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        const result = await fetchViaPty()
+        expect(result).toMatchObject({ provider: 'claude', status: 'error' })
+        expect(spawnMock).not.toHaveBeenCalled()
+        expect(
+          warnSpy.mock.calls.filter(
+            (c) => c[0] === '[host-integrity] usage probe skipped: host blocked (INV-P-023)'
+          )
+        ).toHaveLength(1)
+      } finally {
+        warnSpy.mockRestore()
+      }
     })
   })
 })
