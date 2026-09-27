@@ -88,6 +88,41 @@ describe('startDaemon', () => {
     const client = new DaemonClient({ socketPath, tokenPath })
     await expect(client.ensureConnected()).rejects.toThrow()
   })
+
+  // INV-P-023: getIntegrityLevel threads through startDaemon -> DaemonServer -> hello identity.
+  it('reports integrityLevel in the hello identity when getIntegrityLevel returns a level', async () => {
+    daemon = await startDaemon({
+      socketPath,
+      tokenPath,
+      launchNonce: 'nonce-1',
+      startedAtMs: Date.now(),
+      spawnSubprocess: () => createMockSubprocess(),
+      getIntegrityLevel: () => 'high'
+    })
+
+    const client = new DaemonClient({ socketPath, tokenPath })
+    await client.ensureConnected()
+    expect(client.getDaemonIdentity()?.integrityLevel).toBe('high')
+    client.disconnect()
+  })
+
+  it('omits integrityLevel entirely when getIntegrityLevel returns undefined', async () => {
+    daemon = await startDaemon({
+      socketPath,
+      tokenPath,
+      launchNonce: 'nonce-2',
+      startedAtMs: Date.now(),
+      spawnSubprocess: () => createMockSubprocess(),
+      getIntegrityLevel: () => undefined
+    })
+
+    const client = new DaemonClient({ socketPath, tokenPath })
+    await client.ensureConnected()
+    const identity = client.getDaemonIdentity()
+    expect(identity).not.toBeNull()
+    expect(identity && 'integrityLevel' in identity).toBe(false)
+    client.disconnect()
+  })
 })
 
 function createMockSubprocess() {

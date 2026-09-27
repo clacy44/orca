@@ -76,6 +76,7 @@ describe('DaemonClient', () => {
       entryPath?: string
       appVersion?: string
       spawnerExecPath?: string
+      integrityLevel?: string
     }
   }): Promise<void> {
     return new Promise((resolve) => {
@@ -172,6 +173,35 @@ describe('DaemonClient', () => {
       await client.ensureConnected()
 
       expect(client.getDaemonIdentity()).toEqual(identity)
+    })
+
+    it('keeps a valid integrityLevel', async () => {
+      const identity = {
+        pid: 123,
+        startedAtMs: 456,
+        launchNonce: 'launch-b',
+        integrityLevel: 'high'
+      }
+      await startMockDaemon({ helloIdentity: () => identity })
+
+      client = new DaemonClient({ socketPath, tokenPath })
+      await client.ensureConnected()
+
+      expect(client.getDaemonIdentity()?.integrityLevel).toBe('high')
+    })
+
+    it('reads an unrecognized integrityLevel as unknown but still connects', async () => {
+      const identity = {
+        pid: 123,
+        startedAtMs: 456,
+        launchNonce: 'launch-c',
+        integrityLevel: 'bogus'
+      }
+      await startMockDaemon({ helloIdentity: () => identity })
+
+      client = new DaemonClient({ socketPath, tokenPath })
+      await expect(client.ensureConnected()).resolves.toBeUndefined()
+      expect(client.getDaemonIdentity()?.integrityLevel).toBe('unknown')
     })
 
     it('rejects a v24 daemon that omits endpoint identity', async () => {

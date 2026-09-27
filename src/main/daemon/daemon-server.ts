@@ -52,6 +52,7 @@ import {
   isAgentSessionSurfaceBinding
 } from '../../shared/agent-session-host-authority'
 import { TerminalHistorySeedTransferRegistry } from './terminal-history-seed-transfer-registry'
+import type { ProcessIntegrityLevel } from '../../shared/host-integrity-types'
 
 export type DaemonServerOptions = {
   socketPath: string
@@ -64,6 +65,8 @@ export type DaemonServerOptions = {
   entryPath?: string
   appVersion?: string
   spawnerExecPath?: string
+  /** INV-P-023: read at each hello; undefined until the boot probe settles and always off Windows. */
+  getIntegrityLevel?: () => ProcessIntegrityLevel | undefined
   /** Direct-construction seam for protocol fixture tests; production never overrides it. */
   protocolVersion?: number
   onIdleShutdown?: () => void
@@ -141,6 +144,7 @@ export class DaemonServer {
   private entryPath: string | null
   private appVersion: string | null
   private spawnerExecPath: string | null
+  private getIntegrityLevel: () => ProcessIntegrityLevel | undefined
   private ownedSocketIdentity: DaemonSocketIdentity | null = null
   /** Set once start() has been rejected, so async publication can tell it is no longer wanted. */
   private startupFailure: Error | null = null
@@ -237,6 +241,7 @@ export class DaemonServer {
     this.entryPath = opts.entryPath ?? null
     this.appVersion = opts.appVersion ?? null
     this.spawnerExecPath = opts.spawnerExecPath ?? null
+    this.getIntegrityLevel = opts.getIntegrityLevel ?? (() => undefined)
     this.onIdleShutdown = opts.onIdleShutdown ?? (() => {})
     this.onRpcShutdown = opts.onRpcShutdown ?? (() => {})
     this.initialAdoptionTimeoutMs =
@@ -822,6 +827,7 @@ export class DaemonServer {
       role: hello.role,
       clientId: hello.clientId
     })
+    const integrityLevel = this.getIntegrityLevel()
     socket.write(
       encodeNdjson({
         type: 'hello',
@@ -834,7 +840,8 @@ export class DaemonServer {
                 launchNonce: this.launchNonce,
                 ...(this.entryPath ? { entryPath: this.entryPath } : {}),
                 ...(this.appVersion ? { appVersion: this.appVersion } : {}),
-                ...(this.spawnerExecPath ? { spawnerExecPath: this.spawnerExecPath } : {})
+                ...(this.spawnerExecPath ? { spawnerExecPath: this.spawnerExecPath } : {}),
+                ...(integrityLevel ? { integrityLevel } : {})
               }
             }
           : {})

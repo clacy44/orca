@@ -18,6 +18,7 @@ import type {
   LaunchEvidence,
   RecordLaunchParams
 } from '../runtime/orchestration/agent-launch-sessions'
+import { assertHostIntegrityAllowsAgentLaunch } from '../host-integrity/host-integrity-guard'
 import { resolveResumeTranscript } from '../startup/resolve-resume-transcript'
 // [JUDGMENT CALL, see RETURN] `OrchestrationDb` (db.ts), not the raw `Database.Database` the
 // store module (agent-launch-sessions.ts) takes: `OrchestrationDb.db` is private with no public
@@ -53,6 +54,7 @@ import {
   scanEffectiveResumeId,
   scanRefusal,
   locateClaude,
+  sequencedEnvHasClaude,
   tokensOfSubject
 } from './agent-launch-classification'
 
@@ -122,6 +124,24 @@ export async function admitAgentLaunch(
       ? channelResolution.subject
       : (spawnOptions.command ?? '')
     sniffed = sniffSubject.length > 0 && locateClaude(sniffSubject, shell)
+  }
+  // INV-P-023: every agent launch (host-classified, claude on the startup line, or a sequenced
+  // env line that locates claude — N6, closes a caller-authored wrapper's escape) — never a
+  // plain shell.
+  if (
+    spawnOptions.launchAgent !== undefined ||
+    sniffed ||
+    sequencedEnvHasClaude(spawnOptions, shell)
+  ) {
+    await assertHostIntegrityAllowsAgentLaunch({
+      includeDaemon: ctx.executionHostId === LOCAL_EXECUTION_HOST_ID,
+      agent: spawnOptions.launchAgent ?? 'claude',
+      paneKey: spawnOptions.paneKey ?? null,
+      hostId: ctx.hostId,
+      via: 'admission',
+      recordOverride: true,
+      getDb
+    })
   }
   if (!covered && !sniffed) {
     // UNCOVERED: no classification, no write, no delete, no DB touch (§C.3).

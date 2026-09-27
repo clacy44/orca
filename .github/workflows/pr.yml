@@ -437,6 +437,7 @@ jobs:
           src/main/runtime/repo-worktree-admin-fingerprint.test.ts
           src/main/runtime/worktree-scan-admin-fingerprint-gate.test.ts
           src/shared/secure-file-fsync-flags.test.ts
+          src/main/host-integrity/windows-integrity-level.windows.test.ts
 
       - name: Build package inputs
         run: pnpm run build:release

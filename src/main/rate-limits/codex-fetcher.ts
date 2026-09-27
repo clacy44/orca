@@ -43,6 +43,7 @@ import {
 } from '../codex-cli/codex-home-process-lock'
 import { isCodexStateDbBackfillPending } from '../codex/codex-state-db'
 import { startCodexStateDbBackfillRecoveryInBackground } from '../codex/codex-state-db-backfill-recovery'
+import { isHostIntegrityBlockedForAgentProcesses } from '../host-integrity/host-integrity-guard'
 
 const RPC_TIMEOUT_MS = 10_000
 const WSL_RPC_TIMEOUT_MS = 25_000
@@ -52,6 +53,8 @@ const WSL_RPC_TIMEOUT_MS = 25_000
 const RPC_INIT_TIMEOUT_MS = 30_000
 const WSL_RPC_INIT_TIMEOUT_MS = 40_000
 const PTY_TIMEOUT_MS = 15_000
+// [N7, INV-P-023] Warn at most once per process — this probe can be skipped many times.
+let warnedHostIntegrityBlocked = false
 // Why: codex ≥0.145 renders a '›' composer with placeholder text after it, so a
 // prompt-anchored send can never fire; nudge /status after a short boot grace.
 const PTY_STATUS_NUDGE_MS = 2_500
@@ -621,6 +624,15 @@ async function fetchViaRpc(options?: FetchCodexRateLimitsOptions): Promise<Provi
   if (options?.signal?.aborted) {
     return abortedCodexRateLimitResult()
   }
+  // [N7, A6, INV-P-023] Skip the `codex ... app-server` child_process spawn while the host is
+  // blocked, same as the PTY fallback below — this probe never reaches admitAgentLaunch either.
+  if (isHostIntegrityBlockedForAgentProcesses()) {
+    if (!warnedHostIntegrityBlocked) {
+      warnedHostIntegrityBlocked = true
+      console.warn('[host-integrity] usage probe skipped: host blocked (INV-P-023)')
+    }
+    return abortedCodexRateLimitResult()
+  }
   return new Promise<ProviderRateLimits>((resolve) => {
     let buffer = ''
     let stderr = ''
@@ -953,6 +965,15 @@ function parsePtyStatus(output: string): {
 
 async function fetchViaPty(options?: FetchCodexRateLimitsOptions): Promise<ProviderRateLimits> {
   if (options?.signal?.aborted) {
+    return abortedCodexRateLimitResult()
+  }
+  // [N7, INV-P-023] Skip the interactive `codex` PTY usage fallback while the host is blocked
+  // (High/Low/unknown integrity, no override) — this probe never reaches admitAgentLaunch.
+  if (isHostIntegrityBlockedForAgentProcesses()) {
+    if (!warnedHostIntegrityBlocked) {
+      warnedHostIntegrityBlocked = true
+      console.warn('[host-integrity] usage probe skipped: host blocked (INV-P-023)')
+    }
     return abortedCodexRateLimitResult()
   }
   const pty = await import('node-pty')

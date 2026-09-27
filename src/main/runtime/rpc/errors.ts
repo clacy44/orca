@@ -10,6 +10,7 @@ import { AGENT_SESSION_RPC_ERROR_CODES } from '../../../shared/agent-session-hos
 import { ARTIFACT_SHARING_DISABLED_CODE } from '../../../shared/artifact-sharing-gate'
 import { GIT_DIFF_TOO_LARGE_CODE } from '../../../shared/git-diff-transport-budget'
 import { CLAUDE_LANE_REFUSAL_CODES } from '../../../shared/claude-lane-refusals'
+import { HOST_ELEVATED_REFUSED_CODE } from '../../../shared/host-integrity-types'
 
 export function successResponse(id: string, meta: RpcEnvelopeMeta, result: unknown): RpcSuccess {
   return {
@@ -106,6 +107,7 @@ const STRUCTURED_RUNTIME_PASSTHROUGH_CODES: ReadonlySet<string> = new Set([
   // Why: every lane refusal carries a complete human sentence; the client has no code table for
   // them, so the code must pass through with its message rather than collapse to runtime_error.
   ...CLAUDE_LANE_REFUSAL_CODES,
+  HOST_ELEVATED_REFUSED_CODE,
   // S10-1/S10-2b: agent-directory and containment refusals, all thrown with `data.nextSteps` a
   // caller (CLI or programmatic) needs verbatim — collapsing to runtime_error would erase both
   // the discriminator and the recovery guidance. no_pane_identity/agent_quarantined/

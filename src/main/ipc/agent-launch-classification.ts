@@ -51,6 +51,17 @@ export type ChannelResolution =
   | { ok: true; subject: string; channel: 'env' | 'command' }
   | { ok: false; reason: 'sequenced_channel_mismatch' | 'ambiguous_launch_channel' }
 
+/** [INV-P-023 N6] Whether the sequenced-startup env line (host-set, non-wire) locates claude —
+ * shared by resolveExecutedChannel's own channel disambiguation and admitAgentLaunch's sniff
+ * gate, so a bare launch cannot escape the guard by keeping claude off the command channel. */
+export function sequencedEnvHasClaude(
+  spawnOptions: PtySpawnOptions,
+  shell: AgentStartupShell
+): boolean {
+  const seq = spawnOptions.env?.[SETUP_AGENT_SEQUENCE_STARTUP_COMMAND_ENV]
+  return seq !== undefined && locateClaude(seq, shell)
+}
+
 /** [§C.2] `env` is wire-accepted and survives into the spawn env, so the env channel may never be
  * selected on the strength of anything a caller can set — only a host-set, non-wire
  * `admission.sequencedAgentLine` can. */
@@ -71,7 +82,7 @@ export function resolveExecutedChannel(
   }
   const commandHasClaude =
     spawnOptions.command !== undefined && locateClaude(spawnOptions.command, shell)
-  const seqHasClaude = seq !== undefined && locateClaude(seq, shell)
+  const seqHasClaude = sequencedEnvHasClaude(spawnOptions, shell)
   if (commandHasClaude && seqHasClaude) {
     return { ok: false, reason: 'ambiguous_launch_channel' }
   }
