@@ -5,6 +5,7 @@ import {
   appendRecentPointerLines,
   isClaudeDialogOnScreen,
   isClaudeHookDialogPending,
+  isClaudeLegacyTrustPromptOnScreen,
   maskEchoedPointerLines,
   pointerLinesOf,
   type ClaudeDialogHookRow
@@ -95,6 +96,23 @@ describe('Y-window-1: the sibling option row window is six rows, on either side'
 
   it.each([7, -7])('a sibling option row %i rows from the ❯ row does not', (offset) => {
     expect(isClaudeDialogOnScreen(rowsWithSiblingAt(offset))).toBe(false)
+  })
+})
+
+describe("Claude's older trust question: the anchored route's only generic-list entry (F3)", () => {
+  it.each([
+    ['the dialog itself', ['Do you trust the files in this folder?', '', '  /work/backend-dll']],
+    ['wrapped across two rows', ['│ Do you trust the files in │', '│ this folder?             │']]
+  ])('%s is recognised', (_name, rows) => {
+    expect(isClaudeLegacyTrustPromptOnScreen(rows)).toBe(true)
+  })
+
+  it.each([
+    ["Codex's directory trust", ['Do you trust the contents of this directory?']],
+    ['a workspace trust prompt', ['Trust this workspace? press t to trust']],
+    ['permission prose', ['"permission required" … allow once, allow always or deny']]
+  ])("%s is another agent's wording, not Claude's", (_name, rows) => {
+    expect(isClaudeLegacyTrustPromptOnScreen(rows)).toBe(false)
   })
 })
 

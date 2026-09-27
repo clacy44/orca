@@ -37,6 +37,12 @@ export const DELIVERY_ENTER_HOLD_MAX_MS = 30_000
 const SELECTED_OPTION_ROW_RE = /^[\s│┃]*❯\s*\d+\./
 const OPTION_ROW_RE = /^[\s│┃]*\d+\.\s+\S/
 const EXACT_PHRASE_RES = [/enter\s+to\s+select/i, /yes,\s+i\s+trust\s+this\s+folder/i]
+// Claude Code's older folder-trust question (the dialog before "Quick safety check"), drawn inside a
+// box, so a wrap may put a border glyph between its words. It is the one entry of the generic
+// sentinel list that can still be on screen once a fresh foreground read has named claude itself —
+// the anchored route's check (orca-runtime.ts, G1-10z4 final polish F3).
+const CLAUDE_LEGACY_TRUST_RE =
+  /do[\s│┃]+you[\s│┃]+trust[\s│┃]+the[\s│┃]+files[\s│┃]+in[\s│┃]+this[\s│┃]+folder/i
 // Whitespace and the vertical box borders Claude draws round its composer: dropped from both the
 // screen and the pointer before matching, so a wrapped or boxed echo still matches its line.
 const MATCH_IGNORED_UNIT_RE = /[\s│┃]/
@@ -130,6 +136,11 @@ export function isClaudeDialogOnScreen(rows: readonly string[]): boolean {
   }
   const text = rows.join('\n')
   return EXACT_PHRASE_RES.some((re) => re.test(text))
+}
+
+/** Claude Code's older folder-trust question on the (masked) screen, wrapped or not. */
+export function isClaudeLegacyTrustPromptOnScreen(rows: readonly string[]): boolean {
+  return CLAUDE_LEGACY_TRUST_RE.test(rows.join('\n'))
 }
 
 /** The one shape signal (i) needs off a hook snapshot row (a subset of AgentStatusIpcPayload). */

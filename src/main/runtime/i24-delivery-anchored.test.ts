@@ -426,3 +426,144 @@ describe('R270 polish: what the anchored route still requires at write time', ()
     expect(snapshot(runtime, stub).withheldReason).toBe('blocked_modal')
   })
 })
+
+// ── G1-10z4 final polish. F1: the positive-confirm rule at the three other anchored entry points
+// (the leafless-pty branch, the parked replay after a settle, the absence-probe continuation),
+// each with the reviewer's inconclusive reads. F3: on the anchored route the generic sentinel
+// list narrows to Claude's own older trust wording — once a fresh read has named claude, another
+// agent's dialog cannot be what is on screen.
+type SettleInternals = {
+  createPtyWriteFlight: () => unknown
+  messageDeliveryFlightsByPtyId: Map<string, unknown>
+  parkedMessageRedeliveriesByPtyId: Map<string, Map<string, unknown>>
+  settlePendingMessageDelivery: (ptyId: string, flight: unknown) => void
+}
+
+async function anchoredEntryPane(entry: string, read: 'null' | 'node' | 'none') {
+  const ptyId = `pty-r270-${entry}-${read}`
+  const confirm = read === 'node' ? 'node' : read === 'null' ? null : 'claude'
+  if (entry !== 'pty') {
+    const env = await setUpLeafPane({
+      hooks: restoredDone(),
+      fg: 'claude',
+      confirm,
+      ptyId,
+      anchor: { launchToken: ptyId }
+    })
+    return { ...env, ptyId }
+  }
+  const { store, attest } = buildAnchorDeps(ptyId, { launchToken: ptyId })
+  const runtime = new OrcaRuntimeService(store as never, undefined, {
+    getAgentStatusSnapshot: restoredDone(),
+    attestAgentHookCompatibilityAuthority: attest
+  })
+  const write = vi.fn((_p: string, _d: string) => true)
+  const controller = makeController(write, 'claude', confirm)
+  runtime.setPtyController(controller as never)
+  runtime.syncWindowGraph(HEADLESS_RUNTIME_WINDOW_ID, { tabs: [], leaves: [] } as never)
+  const pty = priv(runtime).recordPtyWorktree(ptyId, WORKTREE_ID, {
+    connected: true,
+    paneKey: PANE_KEY,
+    incarnationId: INCARNATION
+  })
+  const handle = priv(runtime).issuePtyHandle(pty)
+  const stub = makeDbStub(() => handle)
+  runtime.setOrchestrationDb(stub.db as never)
+  return { runtime, write, controller, handle, stub, ptyId }
+}
+
+describe('R270 final polish: every anchored entry point needs a read naming claude (F1)', () => {
+  const entries = [
+    ['the leafless-pty branch (E5)', 'pty'],
+    ['the parked replay after a settle', 'settle'],
+    ['the absence-probe continuation', 'absence']
+  ] as const
+  const reads = [
+    ['a null read', 'null'],
+    ['a wrapper read (node)', 'node'],
+    ['no fresh-read capability', 'none']
+  ] as const
+  it.each(
+    entries.flatMap(([where, entry]) =>
+      reads.map(([what, read]) => [where, what, entry, read] as const)
+    )
+  )('%s withholds on %s', async (_where, _what, entry, read) => {
+    vi.useFakeTimers()
+    const env = await anchoredEntryPane(entry, read)
+    if (read === 'none') {
+      Reflect.deleteProperty(env.controller, 'confirmForegroundProcess')
+    }
+    const probePtyLiveness = vi.fn(async () => true)
+    if (entry === 'absence') {
+      Object.assign(env.controller, { probePtyLiveness })
+    }
+    const settle = env.runtime as unknown as SettleInternals
+    // For the parked replay: another structured write is in flight on this pty, so the anchored
+    // push parks behind it until that write settles.
+    const flight = entry === 'settle' ? settle.createPtyWriteFlight() : null
+    if (flight) {
+      settle.messageDeliveryFlightsByPtyId.set(env.ptyId, flight)
+    }
+    env.stub.insert('mail')
+    env.runtime.notifyMessageArrived(env.handle, 'status', null, null)
+    await vi.advanceTimersByTimeAsync(50)
+    if (flight) {
+      expect(settle.parkedMessageRedeliveriesByPtyId.get(env.ptyId)?.size).toBe(1)
+      settle.settlePendingMessageDelivery(env.ptyId, flight)
+    }
+    await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS + 100)
+    if (entry === 'absence') {
+      expect(probePtyLiveness).toHaveBeenCalled()
+    }
+    expect(pointerWrites(env.write, env.ptyId)).toHaveLength(0)
+    expect(enterWrites(env.write, env.ptyId)).toHaveLength(0)
+    expect(priv(env.runtime).withheldDeliveryAttemptsByHandle.get(env.handle)?.reason).toBe(
+      'anchored_confirm_inconclusive'
+    )
+  })
+})
+
+describe("R270 final polish: the anchored route's generic list is Claude's own trust wording only (F3)", () => {
+  it.each([
+    [
+      "Codex's update prompt",
+      '✨ Update available! 0.20.0 -> 0.21.0\r\nSee the release notes.\r\nPress enter to continue\r\n'
+    ],
+    [
+      "Codex's directory-trust prompt",
+      'Do you trust the contents of this directory?\r\n› 1. Yes, continue\r\n  2. No, quit\r\nPress enter to continue\r\n'
+    ],
+    [
+      'a reply quoting a permission prompt',
+      '⏺ The deploy step shows "permission required" and offers allow once, allow always or deny — I chose deny.\r\n\r\n> \r\n'
+    ],
+    [
+      'a reply quoting another agent',
+      '⏺ After the sandbox change Codex printed "press enter to continue"; nothing else is pending.\r\n\r\n> \r\n'
+    ]
+  ])('%s on an anchored pane no longer withholds it', async (_name, screen) => {
+    vi.useFakeTimers()
+    const ptyId = `pty-r270-other-${_name.length}`
+    const { runtime, write, handle, stub } = await anchoredPane(ptyId)
+    runtime.seedTerminalRestoreTail(ptyId, { text: screen })
+    stub.insert('mail')
+    runtime.notifyMessageArrived(handle, 'status', null, null)
+    await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS + 100)
+    expect(pointerWrites(write, ptyId)).toHaveLength(1)
+    expect(enterWrites(write, ptyId)).toHaveLength(1)
+  })
+
+  it("Claude's own older trust wording, even quoted in a reply, still withholds the anchored pane", async () => {
+    vi.useFakeTimers()
+    const ptyId = 'pty-r270-claude-trust-quoted'
+    const { runtime, write, handle, stub } = await anchoredPane(ptyId)
+    runtime.seedTerminalRestoreTail(ptyId, {
+      text: '⏺ Claude asks "Do you trust the files in this folder?" once per repo.\r\n\r\n> \r\n'
+    })
+    stub.insert('mail')
+    runtime.notifyMessageArrived(handle, 'status', null, null)
+    await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS + 100)
+    expect(pointerWrites(write, ptyId)).toHaveLength(0)
+    expect(snapshot(runtime, stub).withheldReason).toBe('blocked_modal')
+  })
+})

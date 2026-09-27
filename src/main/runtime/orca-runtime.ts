@@ -257,6 +257,7 @@ import {
   appendRecentPointerLines,
   isClaudeDialogOnScreen,
   isClaudeHookDialogPending,
+  isClaudeLegacyTrustPromptOnScreen,
   maskEchoedPointerLines,
   pointerLinesOf
 } from './orchestration/claude-delivery-dialog'
@@ -36395,14 +36396,15 @@ export class OrcaRuntimeService {
   // masked out. Scoped to panes identifiable as Claude — the launch/foreground agent, or ANY Claude
   // hook row for the pane key regardless of age: a reattached pane carries no in-memory Claude
   // identity at all, only hook history (A2-B3). The generic sentinel list stays on the mid-turn and
-  // R2 paths (detectDeliveryBlockedModal), where it predates this gate, and joins the check before
-  // an anchored pointer (`withGenericSentinels`, N-A3-2); on L2 its loose phrase pairs match
-  // ordinary conversation and would starve an idle chair.
+  // R2 paths (detectDeliveryBlockedModal), where it predates this gate; on L2 its loose phrase
+  // pairs match ordinary conversation and would starve an idle chair. Before an anchored pointer
+  // only its Claude entry joins (`withClaudeLegacyTrustWording`, N-A3-2 narrowed by the final
+  // polish F3): that route has a fresh read naming claude, so no other agent's dialog can be live.
   private claudeDeliveryDialogBlocks(
     ptyId: string | null,
     resolvedTarget: PendingMessageDeliveryTarget,
     pointerLines: readonly string[] = [],
-    options: { withGenericSentinels?: boolean } = {}
+    options: { withClaudeLegacyTrustWording?: boolean } = {}
   ): boolean {
     const pty = ptyId ? this.ptysById.get(ptyId) : undefined
     if (!ptyId || !pty) {
@@ -36422,9 +36424,10 @@ export class OrcaRuntimeService {
       ? pty
       : (resolvedTarget as RuntimeLeafRecord)
     const rows = this.getDeliveryScreenRows(ptyId, waitSource, pointerLines)
-    return options.withGenericSentinels
-      ? detectDeliveryBlockedModal(rows)
-      : isClaudeDialogOnScreen(rows)
+    return (
+      isClaudeDialogOnScreen(rows) ||
+      (options.withClaudeLegacyTrustWording === true && isClaudeLegacyTrustPromptOnScreen(rows))
+    )
   }
 
   // [S-24-1 (iii)] The pane's current screen for a delivery-gate scan — the last `rows` lines
@@ -38599,8 +38602,8 @@ export class OrcaRuntimeService {
       deliveredWhileBusy?: boolean
       // [R270; G1-10z4 N-A3-1, N-A3-2] Set only where a pane NOT observed live was re-admitted on
       // its anchored Claude identity (hasAnchoredClaudeIdentity). With no live title behind it,
-      // this push needs the fresh foreground read to name claude itself, and it also runs the
-      // generic sentinel list the mid-turn path runs.
+      // this push needs the fresh foreground read to name claude itself, and it also checks for
+      // Claude's older trust wording, the generic sentinel list's one Claude entry.
       anchoredIdentity?: boolean
     } = {}
   ): void {
@@ -38953,9 +38956,10 @@ export class OrcaRuntimeService {
     // masked too: after a restart its own earlier strand may still be on screen (iii).
     if (
       this.claudeDeliveryDialogBlocks(ptyId, resolved.target, pointerLines, {
-        // [G1-10z4 N-A3-2] The anchored route also runs the generic sentinel list the mid-turn
-        // path runs (attemptMidTurnClaudeDelivery), immediately before its pointer.
-        withGenericSentinels: options.anchoredIdentity === true
+        // [G1-10z4 N-A3-2, final polish F3] Before an anchored pointer, also Claude's older trust
+        // question — the generic sentinel list's only entry that a claude-confirmed foreground can
+        // still be showing; its Codex/Antigravity/Cursor entries stay on the mid-turn and R2 paths.
+        withClaudeLegacyTrustWording: options.anchoredIdentity === true
       })
     ) {
       this.recordWithheldDelivery(mailboxHandle, 'blocked_modal')

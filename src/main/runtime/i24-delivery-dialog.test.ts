@@ -827,3 +827,58 @@ describe('S-24-1 (iv): a dialog between the pointer and the Enter holds the Ente
     }
   })
 })
+
+// ── G1-10z4 final polish (F2, F3): the generic sentinel list's loose phrase pairs stay off the L2
+// idle edge (a reply that merely quotes a dialog must not withhold an idle chair), and the
+// mid-turn path (L4) keeps the whole generic list.
+describe('the generic sentinel list stays off L2 and whole on L4', () => {
+  it.each([
+    [
+      "a reply quoting Claude's older trust question",
+      '⏺ Checked the first-run flow: Claude asks "Do you trust the files in this folder?" once per repo.'
+    ],
+    [
+      'a reply quoting a permission prompt',
+      '⏺ The deploy step shows "permission required" and offers allow once, allow always or deny — I chose deny.'
+    ],
+    [
+      'a reply quoting another agent',
+      '⏺ After the sandbox change Codex printed "press enter to continue"; nothing else is pending.'
+    ]
+  ])('L2: %s still delivers, pointer and Enter', async (_name, line) => {
+    vi.useFakeTimers()
+    try {
+      const ptyId = `pty-l2-generic-prose-${_name.length}`
+      const pane = setUpIdlePane(ptyId)
+      pane.runtime.onPtyData(ptyId, `${line}\r\n\r\n> \r\n`, Date.now())
+      pane.stub.insert('mail')
+      pane.runtime.deliverPendingMessagesForHandle(pane.handle)
+      await vi.advanceTimersByTimeAsync(AGENT_PROMPT_SUBMIT_DELAY_MS + 50)
+      expect(pointerCalls(pane.write, ptyId)).toHaveLength(1)
+      expect(enterCallsOf(pane.write, ptyId)).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("L4: another agent's prompt on a busy Claude pane still withholds mid-turn (unchanged)", () => {
+    vi.useFakeTimers()
+    try {
+      const ptyId = 'pty-l4-generic-codex'
+      const pane = setUpIdlePane(ptyId, { working: true })
+      pane.runtime.onPtyData(
+        ptyId,
+        '✨ Update available! 0.20.0 -> 0.21.0\r\nSee the release notes.\r\nPress enter to continue\r\n',
+        Date.now()
+      )
+      pane.stub.insert('mail')
+      pane.runtime.deliverPendingMessagesForHandle(pane.handle)
+      expect(pane.write).not.toHaveBeenCalled()
+      expect(
+        internals(pane.runtime).withheldDeliveryAttemptsByHandle.get(pane.handle)?.reason
+      ).toBe('blocked_modal')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
