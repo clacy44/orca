@@ -33,11 +33,15 @@ export function formatOrchestrationSent(
     delivery.recipient.state === 'unresolved'
       ? 'recipient not currently resolvable'
       : `recipient ${delivery.recipient.state}`
+  // [I-24-1 FIX-4] withheldReason names the actual withholding branch (e.g.
+  // 'no_hydrated_status', 'awaiting_idle_edge', 'blocked_modal') — print it instead of the old
+  // fixed "pane never reported idle", which carried no diagnostic information for any of them.
+  const reasonSuffix = delivery.withheldReason ? ` — ${delivery.withheldReason}` : ''
   const state =
     delivery.state === 'queued_starved'
-      ? `queued, delivery withheld for ${delivery.starvedMinutes ?? 0}m (${delivery.starvedAttempts ?? 0} attempts) — pane never reported idle`
+      ? `queued, delivery withheld for ${delivery.starvedMinutes ?? 0}m (${delivery.starvedAttempts ?? 0} attempts)${reasonSuffix}`
       : delivery.state === 'queued_awaiting_pane'
-        ? 'queued, delivery withheld (pane busy or unconfirmed idle)'
+        ? `queued, delivery withheld (pane busy or unconfirmed idle)${reasonSuffix}`
         : delivery.state
   const headline = `${messageId}: ${state} (${recipient}).`
   // V-6: `environment` is set only for a 'relayed'/'relay_pending' row (the saved-environment

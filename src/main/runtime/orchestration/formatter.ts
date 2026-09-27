@@ -3,6 +3,7 @@ import { ORCHESTRATION_LEGACY_RUN_ID } from '../../../shared/orchestration-rpc-c
 import { sanitizeDirectoryText } from './agent-name-sanitizer'
 import { sanitizeMessageText } from '../../../shared/message-text'
 import { HOST_ID_MAX_LENGTH } from './orchestration-id-grammar'
+import { UNOBSERVED_STARVATION_ESCAPE_FOOTER } from './unobserved-delivery-escape'
 
 // Why generous, not the write-side MESSAGE_BODY_MAX_LENGTH/SUBJECT_MAX_LENGTH
 // (message-gate-writer.ts): these render-side sanitizer calls exist for defense-in-depth against
@@ -267,7 +268,12 @@ export function formatMessagePointer(
   // MESSAGE lines (POINTER_MAX_SHOWN), not this kind of host framing; the footer line is already
   // exempt from that count ("POINTER_MAX_SHOWN message lines plus exactly one contextual footer
   // line"), and this marker is framing of the same kind, not a third message.
-  deliveredWhileBusy?: boolean
+  deliveredWhileBusy?: boolean,
+  // [I-24-1 FIX-1] Set only by the bounded unobserved-starvation escape
+  // (maybeEscapeUnobservedStarvation) — this pane was never observed busy OR idle this
+  // generation at all (no hook, no OSC title), so the deliveredWhileBusy wording above would
+  // misdescribe it. Same "alongside, never in place of" rule as deliveredWhileBusy.
+  unobservedStarvationEscape?: boolean
 ): string {
   // F-16 (Ruling 32 Addendum 5): filter to UNREAD rows defensively — this composer must never
   // trust a caller-supplied array to already be exactly "what's unread" (that trust is exactly
@@ -297,6 +303,9 @@ export function formatMessagePointer(
   lines.push(buildPointerFooter(lastShown, overflow, resolveThreadSensitive))
   if (deliveredWhileBusy) {
     lines.push('[delivered while busy — your pane never reported idle]')
+  }
+  if (unobservedStarvationEscape) {
+    lines.push(`[${UNOBSERVED_STARVATION_ESCAPE_FOOTER}]`)
   }
   return `\n${lines.join('\n')}\n`
 }
