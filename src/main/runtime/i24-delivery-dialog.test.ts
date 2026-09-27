@@ -14,6 +14,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { OrcaRuntimeService } from './orca-runtime'
 import { HEADLESS_RUNTIME_WINDOW_ID } from '../../shared/runtime-types'
+import { AGENT_PROMPT_SUBMIT_DELAY_MS } from '../../shared/agent-prompt-injection'
 
 const WORKTREE_ID = 'repo-1::/tmp/probe-worktree-i24-dialog'
 
@@ -275,6 +276,147 @@ describe('I-24-1 FIX-3 (S-24-1): delivery-path modal scan is CURRENT SCREEN ONLY
       dialog.pty.tailPartialLine = ''
       dialog.pty.preview = ''
       deliverAndAssertDelivered(dialog, write, ptyId)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+// [G1 B4] The reviewer's P3/P4b/P5 findings ported as lane tests, failing first on 8fa8837039.
+describe('G1 B4: broadened marker, the Enter re-check, and the L2 idle edge', () => {
+  function enterCalls(write: ReturnType<typeof vi.fn>, ptyId: string): unknown[][] {
+    return write.mock.calls.filter(([calledPtyId, data]) => calledPtyId === ptyId && data === '\r')
+  }
+
+  // G1 P3 V2/V4/V6: the OLD marker (`❯\s*1\.`) only matched a highlighted FIRST option — any
+  // Claude menu whose highlighted row is not row 1 (a common shape: the safer/second option
+  // pre-selected) reached the write unblocked.
+  it('P3 V2: a permission prompt highlighted on option 2 (not 1) withholds', () => {
+    vi.useFakeTimers()
+    try {
+      const ptyId = 'pty-g1-p3-v2'
+      const write = vi.fn(() => true)
+      const dialog = setUpDialogPane(ptyId, write)
+      dialog.pty.tailBuffer = [
+        'Do you want to proceed?',
+        '  1. Yes',
+        "❯ 2. Yes, and don't ask again for rm commands in this project",
+        '  3. No, and tell Claude what to do differently (esc)'
+      ]
+      dialog.pty.tailPartialLine = ''
+      dialog.pty.preview = ''
+      deliverAndAssertWithheld(dialog, write, 'blocked_modal')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('P3 V4: a plan-approval prompt highlighted on option 2 withholds', () => {
+    vi.useFakeTimers()
+    try {
+      const ptyId = 'pty-g1-p3-v4'
+      const write = vi.fn(() => true)
+      const dialog = setUpDialogPane(ptyId, write)
+      dialog.pty.tailBuffer = [
+        'Would you like to proceed?',
+        '  1. Yes, and auto-accept edits',
+        '❯ 2. Yes, and manually approve edits',
+        '  3. No, keep planning'
+      ]
+      dialog.pty.tailPartialLine = ''
+      dialog.pty.preview = ''
+      deliverAndAssertWithheld(dialog, write, 'blocked_modal')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('P3 V6: a wrapped question, highlighted on option 2, still withholds', () => {
+    vi.useFakeTimers()
+    try {
+      const ptyId = 'pty-g1-p3-v6'
+      const write = vi.fn(() => true)
+      const dialog = setUpDialogPane(ptyId, write)
+      dialog.pty.tailBuffer = [
+        'Do you want',
+        'to proceed?',
+        '  1. Yes',
+        "❯ 2. Yes, and don't ask",
+        '     again for rm',
+        '  3. No (esc)'
+      ]
+      dialog.pty.tailPartialLine = ''
+      dialog.pty.preview = ''
+      deliverAndAssertWithheld(dialog, write, 'blocked_modal')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // G1 N1 control: "do you want to" prose with NO highlighted numbered row must still deliver —
+  // an E1 chair whose own reply asks the owner a plain question must not re-starve forever.
+  it('N1: "do you want to" prose with no highlighted row still delivers', () => {
+    vi.useFakeTimers()
+    try {
+      const ptyId = 'pty-g1-n1-prose'
+      const write = vi.fn(() => true)
+      const dialog = setUpDialogPane(ptyId, write)
+      dialog.pty.tailBuffer = [
+        '⏺ Build is green. Do you want to merge this now, or wait for review?',
+        '',
+        '> '
+      ]
+      dialog.pty.tailPartialLine = ''
+      dialog.pty.preview = ''
+      deliverAndAssertDelivered(dialog, write, ptyId)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // G1 P4b: the pointer write and the delayed '\r' bracket a real window
+  // (AGENT_PROMPT_SUBMIT_DELAY_MS) in which Claude can paint its own dialog — e.g. a
+  // PostToolUse turn-boundary pointer immediately followed by a PermissionRequest for the next
+  // tool. Before B4, the Enter timer wrote '\r' with no re-check at all.
+  it('P4b: a dialog painted between the pointer and the Enter must skip the Enter and roll back', () => {
+    vi.useFakeTimers()
+    try {
+      const ptyId = 'pty-g1-p4b'
+      const write = vi.fn(() => true)
+      const dialog = setUpDialogPane(ptyId, write)
+      dialog.pty.tailBuffer = ['$ '] // No dialog yet — the pointer is authorized to write.
+      dialog.pty.tailPartialLine = ''
+      dialog.pty.preview = ''
+      dialog.stub.insert('mail')
+      dialog.runtime.deliverPendingMessagesForHandle(dialog.handle)
+      expect(pointerCalls(write, ptyId)).toHaveLength(1)
+      expect(enterCalls(write, ptyId)).toHaveLength(0)
+      // Claude paints the PermissionRequest dialog inside the Enter delay.
+      dialog.pty.tailBuffer = [...PERMISSION_PROMPT_LINES]
+      vi.advanceTimersByTime(AGENT_PROMPT_SUBMIT_DELAY_MS + 50)
+      expect(enterCalls(write, ptyId)).toHaveLength(0)
+      const withheld = internals(dialog.runtime).withheldDeliveryAttemptsByHandle.get(dialog.handle)
+      expect(withheld?.reason).toBe('blocked_modal')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // G1 P5: the L2 idle-and-observed-live edge (deliverPendingMessagesForHandle's own leaf/pty
+  // branches, not attemptMidTurnClaudeDelivery) had NO dialog check at all before B4 — an idle
+  // Claude title with a permission prompt still painted on screen typed straight through.
+  it('P5: an idle Claude title with a prompt still on screen is withheld, not typed into', () => {
+    vi.useFakeTimers()
+    try {
+      const ptyId = 'pty-g1-p5'
+      const write = vi.fn(() => true)
+      const dialog = setUpDialogPane(ptyId, write)
+      // Idle title observed live (L2's own authorizing edge) while the dialog is still painted.
+      dialog.runtime.onPtyData(ptyId, '\x1b]0;✳ Claude Code\x07', 200)
+      dialog.pty.tailBuffer = [...PERMISSION_PROMPT_LINES]
+      dialog.pty.tailPartialLine = ''
+      dialog.pty.preview = ''
+      deliverAndAssertWithheld(dialog, write, 'blocked_modal')
     } finally {
       vi.useRealTimers()
     }

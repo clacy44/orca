@@ -463,4 +463,89 @@ describe('orchestration.sent (BUG 3)', () => {
       result: { delivery: { state: 'queued_awaiting_pane' } }
     })
   })
+
+  // [G1 B1, FIX-4 wire] G1's P1 found the RPC wire dropped withheldReason/withheldAt even
+  // though the snapshot carried them (orca-runtime.ts:37508) — orchestration-sent.ts:39-63
+  // destructured a fixed field list that omitted both. This pins the wire, not just the snapshot.
+  it('carries withheldReason and withheldAt on the wire for a queued_starved row (G1 P1 shape)', async () => {
+    setup()
+    const message = db!.insertMessage({ from: 'term_a', to: 'term_ghost', subject: 'hi' })
+    const now = Date.now()
+    ;(
+      runtime as unknown as { withheldDeliveryAttemptsByHandle: Map<string, unknown> }
+    ).withheldDeliveryAttemptsByHandle.set('term_ghost', {
+      firstAt: now - 129 * 60_000,
+      at: now,
+      count: 25,
+      reason: 'no_hydrated_status'
+    })
+
+    const response = await dispatcher.dispatch(
+      request('sent-withheld-reason', 'orchestration.sent', { id: message.id })
+    )
+
+    expect(response).toMatchObject({
+      ok: true,
+      result: {
+        delivery: {
+          state: 'queued_starved',
+          withheldReason: 'no_hydrated_status',
+          withheldAt: now
+        }
+      }
+    })
+  })
+
+  // [G1 B1, N6] withheldReason/withheldAt must be gated to queued_* states — a pointed row must
+  // never surface a stale reason left over from before it was delivered.
+  it('does not carry withheldReason/withheldAt for a pointed row', async () => {
+    setup()
+    const write = vi.fn().mockReturnValue(true)
+    runtime!.setPtyController({
+      write,
+      kill: vi.fn(),
+      getForegroundProcess: async () => null
+    } as never)
+    runtime!.attachWindow(1)
+    runtime!.syncWindowGraph(1, {
+      tabs: [
+        {
+          tabId: 'tab-1',
+          worktreeId: 'repo-1::/tmp/worktree-a',
+          title: 'Codex',
+          activeLeafId: 'pane-b1-pointed',
+          layout: null
+        }
+      ],
+      leaves: [
+        {
+          tabId: 'tab-1',
+          worktreeId: 'repo-1::/tmp/worktree-a',
+          leafId: 'pane-b1-pointed',
+          paneRuntimeId: 1,
+          ptyId: 'pty-b1-pointed',
+          paneTitle: null
+        }
+      ]
+    })
+    const [terminal] = (await runtime!.listTerminals()).terminals
+    runtime!.onPtyData('pty-b1-pointed', '\x1b]0;Codex working\x07', 100)
+    runtime!.onPtyData('pty-b1-pointed', '\x1b]0;Codex done\x07', 101)
+    const message = db!.insertMessage({ from: 'term_a', to: terminal.handle, subject: 'ping' })
+    // Same intervening RPC round trip the pinned "reports pointed" test above uses — real
+    // (non-fake) timers here, and the delivery gate needs the wall-clock gap it provides.
+    await dispatcher.dispatch(
+      request('sent-pre-pointed-no-reason', 'orchestration.sent', { id: message.id })
+    )
+    runtime!.deliverPendingMessagesForHandle(terminal.handle)
+
+    const response = await dispatcher.dispatch(
+      request('sent-pointed-no-reason', 'orchestration.sent', { id: message.id })
+    )
+
+    expect(response).toMatchObject({ ok: true, result: { delivery: { state: 'pointed' } } })
+    const delivery = (response as { result: { delivery: Record<string, unknown> } }).result.delivery
+    expect(delivery.withheldReason).toBeUndefined()
+    expect(delivery.withheldAt).toBeUndefined()
+  })
 })

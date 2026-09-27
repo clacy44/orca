@@ -3439,6 +3439,12 @@ export class OrcaRuntimeService {
   private providerSnapshotsWithLiveModeTransition = new WeakSet<PtyProviderBufferSnapshot>()
   private ptyLifecycleGenerationById = new Map<string, number>()
   private nextPtyLifecycleGeneration = 1
+  // [G1 B3, INV-P-LAUNCH-EDGE] Epoch ms at which the CURRENT lifecycle generation started —
+  // stamped both here (a same-id respawn/cold restore) and at pty-record creation (a fresh
+  // record, or a main-restart reattach). The unobserved-starvation escape's guard (a) measures
+  // its bound from this, not from a possibly-stale starvation record's own firstAt, so starvation
+  // accrued against an earlier generation can never authorize a write into a new one.
+  private ptyLifecycleGenerationStartedAtById = new Map<string, number>()
   // S10-21a C4 (Ruling 34 Addendum 9): D1's exit-observed record for this runtime's current
   // generation — a fresh OrcaRuntimeService instance (a fresh `runtimeId`) starts with an empty
   // set, so "cleared on generation start" needs no explicit reset. Capped oldest-first; a Set
@@ -12575,6 +12581,9 @@ export class OrcaRuntimeService {
 
   private advancePtyLifecycleGeneration(ptyId: string): void {
     this.ptyLifecycleGenerationById.set(ptyId, this.nextPtyLifecycleGeneration++)
+    // [G1 B3] A same-id respawn/cold restore starts a fresh generation with no evidence of its
+    // own yet — stamp its start so guard (a) never inherits an earlier generation's starvation.
+    this.ptyLifecycleGenerationStartedAtById.set(ptyId, Date.now())
     this.legacyWorkerRecoveredPtys.delete(ptyId)
     // Why: a respawn under the same session id needs its own subscriber-driven attach.
     this.subscriberDrivenProviderAttachesByPtyId.delete(ptyId)
@@ -33522,6 +33531,12 @@ export class OrcaRuntimeService {
         this.setPtyManagementTitleFromObservedTitle(pty, state.title, titleObservedAt ?? 0)
       }
       this.ptysById.set(ptyId, pty)
+      // [G1 B3] A brand-new record — whether a genuinely new pty or a main-restart's reattach of
+      // an existing daemon pty (this runtime instance has never seen it before) — starts its own
+      // generation with no evidence yet; guard (a) must not trust starvation older than this.
+      if (!this.ptyLifecycleGenerationStartedAtById.has(ptyId)) {
+        this.ptyLifecycleGenerationStartedAtById.set(ptyId, Date.now())
+      }
       this.ensureLeaflessHandleRecord(ptyId)
       if (wslDistro) {
         this.wslDistroByPtyId.set(ptyId, wslDistro)
@@ -34038,6 +34053,12 @@ export class OrcaRuntimeService {
     this.terminalCwdByPtyId.delete(ptyId)
     this.terminalFileUriHostnameByPtyId.delete(ptyId)
     this.wslDistroByPtyId.delete(ptyId)
+    // [G1 N8] launchFenceExpiredWithoutEvidenceAt and the per-pane escape throttle were never
+    // pruned here — a stale ptyId (reused by a later, unrelated pty) could read a marker or a
+    // throttle stamp that belongs to a process this record has nothing to do with.
+    this.launchFenceExpiredWithoutEvidenceAt.delete(ptyId)
+    this.lastUnobservedStarvationEscapeAtByPtyId.delete(ptyId)
+    this.ptyLifecycleGenerationStartedAtById.delete(ptyId)
     this.clearAgentRowSnapshotsForPty(ptyId)
     const handle = this.handleByPtyId.get(ptyId)
     if (handle) {
@@ -36363,6 +36384,62 @@ export class OrcaRuntimeService {
   // as Claude by a fresh hook status row's own agentType, the same snapshot
   // getFreshExplicitAgentStatusForHandle reads (bounded by AGENT_STATUS_STALE_AFTER_MS so a
   // stale/exited pane's last-known agentType can't authorize a forced write forever).
+  // [G1 B4] The single write chokepoint's own Claude-dialog check — deliverPendingMessages calls
+  // this immediately before both the pointer write and the delayed Enter write, so no entry path
+  // (including the L2 idle-and-observed-live edge, which had none at all) can reach either write
+  // unchecked. Non-Claude panes are unaffected (the generic sentinel list in
+  // detectDeliveryBlockedModal's own findActionableTerminalWaitBlockedSignal branch still covers
+  // them via deliverPendingMessages' pre-existing callers). Pairs FIX-3's screen-modal check with
+  // guard (d)'s newest-Claude-hook waiting/blocked check (any age) — a pane sitting at a dialog
+  // the screen regex still misses must never have Enter typed into it either.
+  private claudeDeliveryDialogBlocks(
+    ptyId: string | null,
+    resolvedTarget: PendingMessageDeliveryTarget
+  ): boolean {
+    if (!ptyId) {
+      return false
+    }
+    const pty = this.ptysById.get(ptyId)
+    // [G1 N3] Same alternative-identity rule as the starvation-bound forced-delivery routing
+    // (isClaudeCodePane || hasFreshClaudeHookStatus, :36773) — a pane attached externally (never
+    // Orca-launched, so launchAgent/foregroundAgent were never stamped 'claude') can still be a
+    // Claude pane the unobserved-starvation escape targets purely on hook evidence (guard (g)
+    // already required at least one such hook to reach this chokepoint at all).
+    if (!this.isClaudeCodePane(pty) && !this.hasFreshClaudeHookStatus(pty?.paneKey ?? null)) {
+      return false
+    }
+    const waitSource = this.isPtyOnlyDeliveryTarget(resolvedTarget)
+      ? pty!
+      : (resolvedTarget as RuntimeLeafRecord)
+    const rows = this.getTerminalSize(ptyId)?.rows ?? DELIVERY_SCREEN_DEFAULT_ROWS
+    const waitText = buildDeliveryScreenWaitText(
+      waitSource.tailBuffer,
+      waitSource.tailPartialLine,
+      waitSource.preview,
+      rows
+    )
+    if (detectDeliveryBlockedModal(waitText)) {
+      return true
+    }
+    const paneKey = pty?.paneKey ?? null
+    if (!paneKey) {
+      return false
+    }
+    let newestState: string | null = null
+    let newestAt = -1
+    for (const entry of this.getAgentStatusSnapshotFn?.() ?? []) {
+      if (entry.paneKey !== paneKey || entry.agentType !== 'claude') {
+        continue
+      }
+      const at = entry.receivedAt ?? 0
+      if (at > newestAt) {
+        newestAt = at
+        newestState = entry.state
+      }
+    }
+    return newestState === 'waiting' || newestState === 'blocked'
+  }
+
   private hasFreshClaudeHookStatus(paneKey: string | null): boolean {
     if (!paneKey) {
       return false
@@ -36646,6 +36723,9 @@ export class OrcaRuntimeService {
       now,
       starvation: this.getDeliveryStarvation(mailboxHandle),
       starvationBoundMs: DELIVERY_STARVATION_BOUND_MS,
+      // [G1 B3, INV-P-LAUNCH-EDGE] This pty's CURRENT generation's own start — never the
+      // starvation record's own firstAt, which can predate a main restart or a same-id respawn.
+      generationStartedAt: this.ptyLifecycleGenerationStartedAtById.get(ptyId),
       ptyConnected: pty.connected,
       fenceHolds: this.launchPromptFenceHolds(pty),
       fenceExpiredWithoutEvidenceAt: this.launchFenceExpiredWithoutEvidenceAt.get(ptyId),
@@ -36675,6 +36755,20 @@ export class OrcaRuntimeService {
         const resolved = this.resolveLiveDeliveryTarget(target)
         const livePty = this.ptysById.get(ptyId)
         if (!resolved || resolved.ptyId !== ptyId || !resolved.writable || !livePty) {
+          return
+        }
+        // [G1 N12] No output-quiet requirement let the escape land mid-paint or into the middle
+        // of a human's own draft (P4b's timing shape) — same FIX-2 expression as the R1+R2
+        // quiet gate (probeTuiIdleForDelivery), evaluated fresh at write time, not at trigger
+        // time. Costs nothing for a genuinely silent E1 pane.
+        const lastKnownOutputAt =
+          (this.isPtyOnlyDeliveryTarget(resolved.target)
+            ? null
+            : (resolved.target as RuntimeLeafRecord).lastOutputAt) ??
+          livePty.lastOutputAt ??
+          livePty.firstObservedAt ??
+          Date.now()
+        if (Date.now() - lastKnownOutputAt < TUI_IDLE_QUIESCENCE_MS) {
           return
         }
         this.lastUnobservedStarvationEscapeAtByHandle.set(mailboxHandle, Date.now())
@@ -37111,9 +37205,16 @@ export class OrcaRuntimeService {
     }
     if (!probedIdle) {
       this.recordWithheldDelivery(mailboxHandle, 'probe_failed')
-      // [I-24-1 FIX-1, E1 primary] R2's own probe failed (not-quiet, blocked modal, or no
-      // recognized agent foreground) — same bounded escape as the no_hydrated_status site above.
-      this.maybeEscapeUnobservedStarvation(currentLeaf.ptyId, currentLeaf, mailboxHandle, options)
+      // [G1 N10] The escape exists ONLY for a pane never observed live this generation
+      // (INV-P-LAUNCH-EDGE's own "no evidence yet" premise) — a pane that turned observed-live
+      // DURING these awaits (busy, not idle — the idle+observedLive case is already handled
+      // above) has a real idle edge (or the ordinary busy ladder) coming; escaping into it here
+      // would misdescribe the pane and duplicate what that ladder already owns.
+      if (!currentLeaf.lastAgentStatusObservedLive) {
+        // [I-24-1 FIX-1, E1 primary] R2's own probe failed (not-quiet, blocked modal, or no
+        // recognized agent foreground) — same bounded escape as the no_hydrated_status site above.
+        this.maybeEscapeUnobservedStarvation(currentLeaf.ptyId, currentLeaf, mailboxHandle, options)
+      }
       return
     }
     // R1+R2 authorized for THIS attempt only — nothing is cached (see the no-cache note
@@ -38385,6 +38486,13 @@ export class OrcaRuntimeService {
 
   // [I-24-1 FIX-1] Bounded unobserved-starvation escape state — see maybeEscapeUnobservedStarvation
   // and orchestration/unobserved-delivery-escape.ts.
+  // RESIDUAL R270 (G1 B3, INV-P-LAUNCH-EDGE): this map, launchPromptFenceSince, and
+  // ptyLifecycleGenerationStartedAtById are all in-memory, per-runtime-instance state — a main
+  // restart starts every one of them fresh rather than restoring the prior runtime's own fence
+  // state per paneKey. G1 B3's fix (guard (a)'s generation-scoped bound + guard (g)'s hook-
+  // existence requirement) closes the write-without-evidence hole this residual describes without
+  // that persistence; the principled alternative (persisting the fence start and this marker per
+  // paneKey, next to the launch-token anchor, re-armed on reattach and on respawn) is not done.
   private readonly unobservedStarvationEscapeInFlight = new Set<string>()
   private readonly launchFenceExpiredWithoutEvidenceAt = new Map<string, number>()
   private readonly lastUnobservedStarvationEscapeAtByHandle = new Map<string, number>()
@@ -38880,6 +38988,15 @@ export class OrcaRuntimeService {
       return
     }
 
+    // [G1 B4] Single write chokepoint: every path into this synchronous tail — including the
+    // L2 idle-and-observed-live edge (deliverPendingMessagesForHandle's own leaf/pty branches),
+    // which previously had no dialog check at all — is checked here, immediately before the
+    // pointer write, whether or not attemptMidTurnClaudeDelivery already ran its own check.
+    if (this.claudeDeliveryDialogBlocks(ptyId, resolved.target)) {
+      this.recordWithheldDelivery(mailboxHandle, 'blocked_modal')
+      return
+    }
+
     const deliveryPtyId = ptyId
     const flight = this.createPtyWriteFlight()
     this.messageDeliveryFlightsByPtyId.set(deliveryPtyId, flight)
@@ -38946,15 +39063,15 @@ export class OrcaRuntimeService {
             // respawn owns its own fresh delivery. Re-pointing here would race that reset.
             return
           }
-          const current = this.resolveLiveDeliveryTarget(target)
-          if (!current || current.ptyId !== deliveryPtyId || !current.writable) {
+          const rollbackUnsentPointer = (): void => {
             // Why rollback here (fix C): the flight-identity check above just proved this is
             // NOT an exit/respawn on this pty — most commonly a graph resync that dropped the
-            // leaf out from under a still-live pane, or hid it from the renderer graph. The
-            // pointer already landed in the pane with no Enter behind it; un-point exactly
-            // these rows and restore the pre-flight watermark so the next authorized push
-            // re-delivers instead of stranding them pointed-but-never-submitted. A duplicated
-            // banner on the eventual resend is acceptable; an invisible strand is not.
+            // leaf out from under a still-live pane, or hid it from the renderer graph (or, per
+            // G1 B4, a Claude dialog painted between the pointer and the Enter). The pointer
+            // already landed in the pane with no Enter behind it; un-point exactly these rows
+            // and restore the pre-flight watermark so the next authorized push re-delivers
+            // instead of stranding them pointed-but-never-submitted. A duplicated banner on the
+            // eventual resend is acceptable; an invisible strand is not.
             const pointedIdsToRollback = this.pointedMessageIdsByHandle.get(mailboxHandle)
             if (pointedIdsToRollback) {
               for (const message of unread) {
@@ -38970,6 +39087,20 @@ export class OrcaRuntimeService {
               this.lastPointedMessageSequenceByHandle.delete(mailboxHandle)
             }
             this.mailPointerRepointScheduler.schedule(mailboxHandle)
+          }
+          const current = this.resolveLiveDeliveryTarget(target)
+          if (!current || current.ptyId !== deliveryPtyId || !current.writable) {
+            rollbackUnsentPointer()
+            return
+          }
+          // [G1 B4(i)] Re-check immediately before '\r': the pointer write and this delayed
+          // Enter bracket a real window (AGENT_PROMPT_SUBMIT_DELAY_MS, longer on win32) in which
+          // Claude can paint its own dialog (e.g. a PostToolUse pointer immediately followed by
+          // a PermissionRequest for the next tool) — G1 P4b. On a hit, skip '\r' and roll back
+          // exactly like the stale-target branch above.
+          if (this.claudeDeliveryDialogBlocks(deliveryPtyId, current.target)) {
+            this.recordWithheldDelivery(mailboxHandle, 'blocked_modal')
+            rollbackUnsentPointer()
             return
           }
           this.ptyController?.write(deliveryPtyId, '\r')
@@ -43328,22 +43459,40 @@ function detectTerminalWaitBlockedReason(preview: string): RuntimeTerminalWaitBl
 }
 
 // [I-24-1 FIX-3, S-24-1] Case-insensitive markers for Claude Code's OWN dialogs — the
-// question/pause menu's "Enter to select … Esc to cancel" numbered options, the folder-trust
-// dialog's "Yes, I trust this folder", and a permission prompt's "Do you want to … ❯ 1. Yes"
-// (observed 2026-09-26, Claude Code v2.1.283). The generic sentinel list above has no Claude
-// marker at all (only Codex/Antigravity/Cursor do), so a real Claude dialog never registered as
-// blocked and the delivery paths typed a pointer + Enter into it (I-24-1 EVIDENCE). Delivery-
-// scoped only — detectTerminalWaitBlockedReason (waiters/agent-status) stays unchanged.
-const CLAUDE_DELIVERY_DIALOG_RE = /enter to select|❯\s*1\.|do you want to|yes, i trust this folder/i
+// question/pause menu's "Enter to select … Esc to cancel" and the folder-trust dialog's
+// "Yes, I trust this folder" (observed 2026-09-26, Claude Code v2.1.283). The generic sentinel
+// list above has no Claude marker at all (only Codex/Antigravity/Cursor do), so a real Claude
+// dialog never registered as blocked and the delivery paths typed a pointer + Enter into it
+// (I-24-1 EVIDENCE). Delivery-scoped only — detectTerminalWaitBlockedReason (waiters/agent-status)
+// stays unchanged.
+const CLAUDE_DELIVERY_DIALOG_RE = /enter to select|yes, i trust this folder/i
+
+// [G1 B4(iii)] Broadened from `❯\s*1\.` (which missed every menu whose highlighted option was
+// not row 1 — G1 P3 V2/V4/V6) to any highlighted numbered option, either cursor glyph.
+const CLAUDE_SELECTED_ROW_RE = /(?:❯|>)\s*\d+\./
+
+// [G1 N1] "do you want to" also matches ordinary Claude prose (a chair's own reply asking the
+// owner a question) — P3 V7. A real dialog always pairs it with a highlighted numbered row on
+// the same screen (caught by CLAUDE_SELECTED_ROW_RE above); bare prose must not re-starve an
+// idle chair forever, so it is deliberately absent from both regexes above.
 
 // [I-24-1 FIX-3] Additive over the generic list (never a replacement) — a delivery path must
 // never type into ANY modal, Claude's own or the pre-existing Codex/Antigravity/Cursor ones.
 function detectDeliveryBlockedModal(screenText: string): boolean {
   const normalized = screenText.toLowerCase()
-  return (
-    findActionableTerminalWaitBlockedSignal(normalized) !== null ||
-    CLAUDE_DELIVERY_DIALOG_RE.test(normalized)
-  )
+  if (findActionableTerminalWaitBlockedSignal(normalized) !== null) {
+    return true
+  }
+  if (CLAUDE_DELIVERY_DIALOG_RE.test(normalized)) {
+    return true
+  }
+  if (CLAUDE_SELECTED_ROW_RE.test(screenText)) {
+    return true
+  }
+  // [G1 N1] Prose-only "do you want to" never blocks on its own — only alongside a highlighted
+  // numbered row, which the branch above already catches. Kept as an explicit branch (rather
+  // than folded into the regex above) so the "prose alone never blocks" rule stays legible.
+  return false
 }
 
 // [I-24-1 FIX-3] Default viewport when the controller cannot report a real size — same fallback

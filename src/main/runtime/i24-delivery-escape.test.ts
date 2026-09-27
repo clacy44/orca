@@ -10,209 +10,31 @@
  * FIX-5 (E6): the two silent, non-rescheduling returns in `attemptHydratedProbedDeliveryUnguarded`
  * now record a withhold so a live record's retry chain never freezes.
  *
- * Harness: mirrors the validated I-24-1 probe (i24-fix-probe.test.ts, reviewer-copied under
- * runs/s10-24/probes-dr-i24/) and s10-21f-r147-delivery-starvation-bound.test.ts's fixtures.
+ * Harness: shared with i24-delivery-escape-guards.test.ts (split at 800 counted lines) via
+ * i24-delivery-escape-harness.ts — see that file's own doc comment.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { AGENT_PROMPT_SUBMIT_DELAY_MS } from '../../shared/agent-prompt-injection'
 import { OrcaRuntimeService } from './orca-runtime'
 import { HEADLESS_RUNTIME_WINDOW_ID } from '../../shared/runtime-types'
-import { makePaneKey } from '../../shared/stable-pane-id'
 import type { AgentStatusIpcPayload } from '../../shared/agent-status-types'
-import { AGENT_PROMPT_SUBMIT_DELAY_MS } from '../../shared/agent-prompt-injection'
-
-const WORKTREE_ID = 'repo-1::/tmp/probe-worktree-i24-escape'
-const TAB_ID = 'tab-i24-escape'
-const LEAF_ID = '24242424-2424-4242-8242-242424242424'
-const PANE_KEY = makePaneKey(TAB_ID, LEAF_ID)
-const MIN = 60_000
-
-type WithheldRecord = { firstAt: number; at: number; count: number; reason: string }
-
-type PtyRecordForTest = {
-  ptyId: string
-  launchAgent: string | null
-  connected: boolean
-  paneKey: string | null
-  launchPromptFenceSince: number | null
-}
-
-type LeafRecordForTest = { writable: boolean }
-
-type RuntimeInternals = {
-  ptysById: Map<string, PtyRecordForTest>
-  leaves: Map<string, LeafRecordForTest>
-  withheldDeliveryAttemptsByHandle: Map<string, WithheldRecord>
-  getLeafKey: (tabId: string, leafId: string) => string
-  recordPtyWorktree: (
-    ptyId: string,
-    worktreeId: string,
-    state?: { connected?: boolean; paneKey?: string | null }
-  ) => PtyRecordForTest
-  issuePtyHandle: (pty: unknown) => string
-}
-
-function priv(runtime: OrcaRuntimeService): RuntimeInternals {
-  return runtime as unknown as RuntimeInternals
-}
-
-function makeController(
-  write: ReturnType<typeof vi.fn>,
-  fg: string | null,
-  confirm: string | null
-) {
-  return {
-    spawn: vi.fn(async () => ({ id: 'never' })),
-    write,
-    kill: () => true,
-    getForegroundProcess: vi.fn(async () => fg),
-    confirmForegroundProcess: vi.fn(async () => confirm)
-  }
-}
-
-type StoredMessageRow = {
-  id: string
-  run_id: string
-  from_handle: string
-  to_handle: string
-  subject: string
-  body: string
-  type: string
-  priority: string
-  thread_id: string | null
-  payload: string | null
-  read: number
-  sequence: number
-  created_at: string
-  delivered_at: string | null
-  sender_pane_key: null
-}
-
-function makeDbStub(toHandle: () => string) {
-  const rows: StoredMessageRow[] = []
-  return {
-    rows,
-    insert(subject: string): void {
-      rows.push({
-        id: `msg_${rows.length + 1}`,
-        run_id: 'run_test',
-        from_handle: 'term_sender',
-        to_handle: toHandle(),
-        subject,
-        body: '',
-        type: 'status',
-        priority: 'normal',
-        thread_id: null,
-        payload: null,
-        read: 0,
-        sequence: rows.length + 1,
-        created_at: 'now',
-        delivered_at: null,
-        sender_pane_key: null
-      })
-    },
-    db: {
-      getUndeliveredUnreadMessages: (handle: string) =>
-        rows.filter((row) => row.to_handle === handle && row.read === 0 && !row.delivered_at),
-      getUndeliveredUnreadMailboxHandles: () => [],
-      getActiveCoordinatorRun: () => null,
-      getCurrentRunForPane: () => undefined,
-      getActiveDispatchForTerminal: () => null,
-      getActiveDispatchForIdentity: () => undefined,
-      findActiveRemoteAttachmentForPane: () => undefined,
-      listDispatchInputObservationTargets: () => [],
-      getRecipientPaneKeyForBareHandle: () => null,
-      findOrphanedIdentityCandidate: () => undefined,
-      markAsDelivered: vi.fn(),
-      close: () => {}
-    }
-  }
-}
-
-function pointerWrites(write: ReturnType<typeof vi.fn>, ptyId: string): unknown[][] {
-  return write.mock.calls.filter(
-    ([p, d]) => p === ptyId && typeof d === 'string' && (d as string).includes('[from:')
-  )
-}
-
-function enterWrites(write: ReturnType<typeof vi.fn>, ptyId: string): unknown[][] {
-  return write.mock.calls.filter(([p, d]) => p === ptyId && d === '\r')
-}
-
-function claudeHook(
-  state: AgentStatusIpcPayload['state'],
-  receivedAt: number
-): AgentStatusIpcPayload {
-  return {
-    paneKey: PANE_KEY,
-    state,
-    prompt: '',
-    agentType: 'claude',
-    connectionId: null,
-    receivedAt,
-    stateStartedAt: receivedAt,
-    tabId: TAB_ID,
-    worktreeId: WORKTREE_ID
-  }
-}
-
-/** A renderer-leaf pane on a reattached pty: launchAgent null (reattach), no OSC title seen. */
-async function setUpLeafPane(opts: {
-  hooks: () => AgentStatusIpcPayload[]
-  fg: string | null
-  confirm: string | null
-  ptyId: string
-  launchAgent?: string | null
-}) {
-  const runtime = new OrcaRuntimeService(null, undefined, { getAgentStatusSnapshot: opts.hooks })
-  const write = vi.fn((_p: string, _d: string) => true)
-  const controller = makeController(write, opts.fg, opts.confirm)
-  runtime.setPtyController(controller as never)
-  runtime.attachWindow(1)
-  runtime.syncWindowGraph(1, {
-    tabs: [
-      {
-        tabId: TAB_ID,
-        worktreeId: WORKTREE_ID,
-        title: 'backend-dll',
-        activeLeafId: LEAF_ID,
-        layout: null
-      }
-    ],
-    leaves: [
-      {
-        tabId: TAB_ID,
-        worktreeId: WORKTREE_ID,
-        leafId: LEAF_ID,
-        paneRuntimeId: 1,
-        ptyId: opts.ptyId,
-        paneTitle: null,
-        title: ''
-      }
-    ]
-  } as never)
-  const pty = priv(runtime).ptysById.get(opts.ptyId)!
-  if (opts.launchAgent !== undefined) {
-    pty.launchAgent = opts.launchAgent
-  }
-  const [terminal] = (await runtime.listTerminals()).terminals
-  const handle = terminal.handle as string
-  const stub = makeDbStub(() => handle)
-  runtime.setOrchestrationDb(stub.db as never)
-  return { runtime, write, controller, handle, stub, pty }
-}
-
-async function advance(ms: number, step = 30_000): Promise<void> {
-  for (let t = 0; t < ms; t += step) {
-    await vi.advanceTimersByTimeAsync(Math.min(step, ms - t))
-  }
-}
-
-function snapshot(
-  runtime: OrcaRuntimeService,
-  stub: { rows: StoredMessageRow[] }
-): ReturnType<OrcaRuntimeService['getMessageDeliverySnapshot']> {
-  return runtime.getMessageDeliverySnapshot(stub.rows[0] as never)
-}
+import {
+  MIN,
+  TAB_ID,
+  LEAF_ID,
+  WORKTREE_ID,
+  PANE_KEY,
+  type WithheldRecord,
+  advance,
+  claudeHook,
+  enterWrites,
+  makeController,
+  makeDbStub,
+  pointerWrites,
+  priv,
+  setUpLeafPane,
+  snapshot
+} from './i24-delivery-escape-harness'
 
 beforeEach(() => {
   vi.spyOn(Math, 'random').mockReturnValue(0.5)
@@ -226,8 +48,11 @@ describe('I-24-1 FIX-1: bounded unobserved-starvation escape (E1)', () => {
   it('T1: E1 pane escapes once the bound crosses, on a positive claude confirm (one marked pointer + Enter)', async () => {
     vi.useFakeTimers()
     const ptyId = 'pty-i24-t1'
+    const t0 = Date.now()
+    // [G1 B3, guard (g)] A restored `done` row (any age — restored rows count) is the positive
+    // prior agent evidence guard (g) requires; without it the escape must never fire at all.
     const { runtime, write, controller, handle, stub } = await setUpLeafPane({
-      hooks: () => [],
+      hooks: () => [claudeHook('done', t0 - 6 * 60 * MIN)],
       fg: 'claude',
       confirm: 'claude',
       ptyId
@@ -273,8 +98,11 @@ describe('I-24-1 FIX-1: bounded unobserved-starvation escape (E1)', () => {
   it('T1-neg-modal: a Claude trust dialog on the current screen withholds (blocked_modal)', async () => {
     vi.useFakeTimers()
     const ptyId = 'pty-i24-t1-modal'
+    const t0 = Date.now()
+    // [G1 B3, guard (g)] Restored evidence so the escape reaches its OWN modal check (this test's
+    // subject) instead of being refused earlier by guard (g) for the wrong reason.
     const { runtime, write, handle, stub } = await setUpLeafPane({
-      hooks: () => [],
+      hooks: () => [claudeHook('done', t0 - 6 * 60 * MIN)],
       fg: 'claude',
       confirm: 'claude',
       ptyId
@@ -400,15 +228,230 @@ describe('I-24-1 FIX-1: bounded unobserved-starvation escape (E1)', () => {
     expect(pointerWrites(write, ptyId)).toHaveLength(1)
     expect(payload).toContain('delivered without an observed idle edge')
   })
+
+  // [G1 B3, INV-P-LAUNCH-EDGE] G1 P4a: a main restart (new runtime, same daemon pty) forgets the
+  // launch-prompt fence AND the evidence-less-expiry marker (both in-memory, per-runtime-instance
+  // state — RESIDUAL R270). Before B3, the only remaining protection was the screen regex, and
+  // the reattaching runtime's OWN pane record has no restored hook row either — guard (g) refuses
+  // it for that reason alone, with no dependency on the marker/fence surviving the restart.
+  it('B3 P4a: a main-restart reattach of a stuck-startup-menu pane never escapes (no restored hook evidence)', async () => {
+    vi.useFakeTimers()
+    const ptyId = 'pty-i24-b3-p4a'
+    const stuckStartupMenu = [
+      ' \u273b Welcome to Claude Code!',
+      '   cwd: /work/backend-dll',
+      ' New MCP servers found in .mcp.json',
+      ' > 1. Use this and all future MCP servers in this project',
+      '   2. Use this MCP server',
+      '   3. Continue without using this MCP server',
+      ' Enter to confirm \u00b7 Esc to reject'
+    ].join('\r\n')
+    // Runtime A: the host launch, fence armed, never any agent evidence — the pane sits at a
+    // startup menu forever.
+    const a = await setUpLeafPane({
+      hooks: () => [],
+      fg: 'claude',
+      confirm: 'claude',
+      ptyId,
+      launchAgent: 'claude'
+    })
+    a.pty.launchPromptFenceSince = Date.now()
+    a.runtime.onPtyData(ptyId, stuckStartupMenu, Date.now())
+    a.stub.insert('mail')
+    a.runtime.notifyMessageArrived(a.handle, 'status', null, null)
+    await advance(20 * MIN)
+    expect(pointerWrites(a.write, ptyId)).toHaveLength(0)
+    // Main restart: a NEW runtime re-attaches the SAME daemon pty (launchAgent null — never
+    // re-armed — no fence, no marker, and this fresh runtime instance has never seen a Claude
+    // hook for this pane at all). Deliberately a plain banner with NO recognizable dialog text —
+    // isolates guard (g) as the thing standing between the escape and the write (a menu-shaped
+    // restore tail would ALSO be caught by B4's own broadened marker; this proves guard (g) holds
+    // even when the screen itself gives no protection at all).
+    const plainStartupBanner = [
+      ' ✻ Welcome to Claude Code!',
+      '   cwd: /work/backend-dll',
+      ' Type your message or / for commands'
+    ].join('\r\n')
+    const b = await setUpLeafPane({ hooks: () => [], fg: 'claude', confirm: 'claude', ptyId })
+    b.runtime.seedTerminalRestoreTail(ptyId, { text: plainStartupBanner })
+    b.stub.insert('mail')
+    b.runtime.notifyMessageArrived(b.handle, 'status', null, null)
+    await advance(12 * MIN)
+    expect(pointerWrites(b.write, ptyId)).toHaveLength(0)
+    expect(enterWrites(b.write, ptyId)).toHaveLength(0)
+  })
+
+  // [G1 B3, INV-P-LAUNCH-EDGE] G1 P6: a same-id daemon respawn/cold restore resets the pty's
+  // output-sequence generation. Starvation accrued against the OLD generation must not authorize
+  // a write seconds into the REPLACEMENT process, which has shown no evidence of its own yet.
+  it('B3 P6: starvation accrued pre-respawn does not authorize a write seconds after a same-id respawn', async () => {
+    vi.useFakeTimers()
+    const ptyId = 'pty-i24-b3-p6'
+    let fg = 'pwsh.exe'
+    // A restored hook exists throughout (guard (g) is satisfied) — isolates guard (a)'s own
+    // generation-scoped fix as the thing standing between the escape and the write.
+    const runtime = new OrcaRuntimeService(null, undefined, {
+      getAgentStatusSnapshot: () => [claudeHook('done', Date.now() - 6 * 60 * MIN)]
+    })
+    const write = vi.fn((_p: string, _d: string) => true)
+    const controller = {
+      spawn: vi.fn(async () => ({ id: 'never' })),
+      write,
+      kill: () => true,
+      getForegroundProcess: vi.fn(async () => fg),
+      confirmForegroundProcess: vi.fn(async () => fg)
+    }
+    runtime.setPtyController(controller as never)
+    runtime.attachWindow(1)
+    runtime.syncWindowGraph(1, {
+      tabs: [
+        {
+          tabId: TAB_ID,
+          worktreeId: WORKTREE_ID,
+          title: 'backend-dll',
+          activeLeafId: LEAF_ID,
+          layout: null
+        }
+      ],
+      leaves: [
+        {
+          tabId: TAB_ID,
+          worktreeId: WORKTREE_ID,
+          leafId: LEAF_ID,
+          paneRuntimeId: 1,
+          ptyId,
+          paneTitle: null,
+          title: ''
+        }
+      ]
+    } as never)
+    const [terminal] = (await runtime.listTerminals()).terminals
+    const handle = terminal.handle as string
+    const stub = makeDbStub(() => handle)
+    runtime.setOrchestrationDb(stub.db as never)
+    runtime.onPtyData(ptyId, 'PS C:\\work\\backend-dll> \r\n', Date.now())
+    stub.insert('mail 1')
+    runtime.notifyMessageArrived(handle, 'status', null, null)
+    await advance(11 * MIN)
+    const before = pointerWrites(write, ptyId).length
+    // Same-id daemon respawn / cold restore: provider output sequence resets, advancing the
+    // pty's lifecycle generation (and re-stamping its start).
+    const rt = runtime as unknown as {
+      getPtyOutputSequence: (id: string) => number
+      synchronizePtyOutputSequenceFromProvider: (
+        id: string,
+        s: { value: number; generation: 'reset' | 'continued' },
+        at: number
+      ) => number
+    }
+    const seq = rt.getPtyOutputSequence(ptyId)
+    rt.synchronizePtyOutputSequenceFromProvider(ptyId, { value: 0, generation: 'reset' }, seq)
+    // The replacement process is Claude, still starting (banner only, no prompt yet).
+    fg = 'claude'
+    runtime.onPtyData(ptyId, ' \u273b Welcome to Claude Code!\r\n', Date.now())
+    await vi.advanceTimersByTimeAsync(5_000)
+    stub.insert('mail 2')
+    runtime.notifyMessageArrived(handle, 'status', null, null)
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(before).toBe(0)
+    expect(pointerWrites(write, ptyId)).toHaveLength(0)
+  })
+
+  // [G1 B2, guard (f)] G1 P2: a same-id daemon respawn (provider 'reset' sequence -> lifecycle
+  // generation advances) lands INSIDE the escape's confirm await. Guard (f) — the pty lifecycle
+  // generation unchanged across that await — must refuse the write.
+  it('B2 P2 (guard f): a respawn landing inside the confirm await means the escape never writes', async () => {
+    vi.useFakeTimers()
+    const ptyId = 'pty-i24-b2-p2'
+    const t0 = Date.now()
+    let confirms = 0
+    let runtimeRef: {
+      synchronizePtyOutputSequenceFromProvider: (
+        id: string,
+        s: { value: number; generation: 'reset' | 'continued' },
+        at: number
+      ) => number
+    } | null = null
+    const { runtime, write, handle, stub } = await setUpLeafPane({
+      hooks: () => [claudeHook('done', t0 - 6 * 60 * MIN)],
+      fg: 'claude',
+      confirm: 'claude',
+      ptyId
+    })
+    // Override confirmForegroundProcess so the respawn lands the instant the confirm resolves —
+    // exactly inside the window guard (f) exists to close.
+    const controller = (
+      runtime as unknown as {
+        ptyController: { confirmForegroundProcess: (id: string) => Promise<string | null> }
+      }
+    ).ptyController
+    const originalConfirm = controller.confirmForegroundProcess.bind(controller)
+    controller.confirmForegroundProcess = async (id: string) => {
+      confirms += 1
+      const result = await originalConfirm(id)
+      runtimeRef?.synchronizePtyOutputSequenceFromProvider(id, { value: 0, generation: 'reset' }, 0)
+      return result
+    }
+    runtimeRef = runtime as never
+    stub.insert('mail')
+    runtime.notifyMessageArrived(handle, 'status', null, null)
+    await advance(25 * MIN)
+    expect(confirms).toBeGreaterThanOrEqual(1)
+    expect(pointerWrites(write, ptyId)).toHaveLength(0)
+  })
+  // MUTANT PROOF (guard f): deleting `if (this.getPtyLifecycleGeneration(ptyId) !== generation)
+  // return` at orca-runtime.ts's maybeEscapeUnobservedStarvation call site makes this test fail
+  // (the escape writes into the replacement generation) — see the lane return for the verbatim
+  // tail.
+
+  // [G1 B2] A writable-drop test alongside guard (f)'s own respawn test: the pane stops being
+  // writable (a graph resync, or the leaf hidden from the renderer) DURING the confirm await —
+  // the caller's own re-resolve (`!resolved.writable`) must refuse the write.
+  it('B2 writable-drop: the pane becomes unwritable during the confirm await -> the escape never writes', async () => {
+    vi.useFakeTimers()
+    const ptyId = 'pty-i24-b2-writable-drop'
+    const t0 = Date.now()
+    const { runtime, write, handle, stub } = await setUpLeafPane({
+      hooks: () => [claudeHook('done', t0 - 6 * 60 * MIN)],
+      fg: 'claude',
+      confirm: 'claude',
+      ptyId
+    })
+    const controller = (
+      runtime as unknown as {
+        ptyController: { confirmForegroundProcess: (id: string) => Promise<string | null> }
+      }
+    ).ptyController
+    const originalConfirm = controller.confirmForegroundProcess.bind(controller)
+    const leaf = priv(runtime).leaves.get(priv(runtime).getLeafKey(TAB_ID, LEAF_ID))!
+    controller.confirmForegroundProcess = async (id: string) => {
+      const result = await originalConfirm(id)
+      // The leaf drops out of the writable set while the confirm was in flight.
+      ;(leaf as unknown as { writable: boolean }).writable = false
+      return result
+    }
+    stub.insert('mail')
+    runtime.notifyMessageArrived(handle, 'status', null, null)
+    await advance(25 * MIN)
+    expect(pointerWrites(write, ptyId)).toHaveLength(0)
+  })
+  // MUTANT PROOF (guard f, the writable half): guard (f)'s own `!resolved.writable` re-resolve
+  // AND deliverPendingMessages' own independent `!resolved.writable` check (its single write
+  // chokepoint, G1 B4) are both live here — deleting EITHER alone still leaves the other in
+  // place and this test still passes; deleting BOTH together makes it fail (verified manually;
+  // see the lane return for the verbatim tail). Genuine defense in depth, not a single point of
+  // failure — left as-is rather than treated as dead code.
 })
 
 describe('I-24-1 FIX-1: per-pane throttle (further guard alongside the per-mailbox one)', () => {
   it('two mailboxes resolving to the same ptyId get exactly one forced pointer within the window; the second escapes only after it', async () => {
     vi.useFakeTimers()
     const ptyId = 'pty-i24-t1-pty-throttle'
+    const t0 = Date.now()
     let currentToHandle = 'mbx-a'
+    // [G1 B3, guard (g)] Restored evidence — see T1's own comment.
     const { runtime, write, pty } = await setUpLeafPane({
-      hooks: () => [],
+      hooks: () => [claudeHook('done', t0 - 6 * 60 * MIN)],
       fg: 'claude',
       confirm: 'claude',
       ptyId,
@@ -434,9 +477,13 @@ describe('I-24-1 FIX-1: per-pane throttle (further guard alongside the per-mailb
     // deliverPendingMessages silently no-ops, so pass the real leaf record as the target, the
     // same shape every real leaf-branch call site uses.
     const target = priv(runtime).leaves.get(priv(runtime).getLeafKey(TAB_ID, LEAF_ID))
+    // [G1 B3] Guard (a) now measures the bound from max(firstAt, the pty's generation start) —
+    // a fabricated old firstAt with no elapsed real/fake time since generation start (t0) would
+    // no longer cross the bound. Advance real time instead of back-dating firstAt.
+    await advance(11 * MIN)
     const now = Date.now()
     const crossedRecord: WithheldRecord = {
-      firstAt: now - 11 * MIN,
+      firstAt: t0,
       at: now,
       count: 3,
       reason: 'no_hydrated_status'
@@ -466,7 +513,11 @@ describe('I-24-1 FIX-1: per-pane throttle (further guard alongside the per-mailb
 describe('I-24-1 FIX-1: bounded unobserved-starvation escape (E2)', () => {
   it('T2: a leafless pty never observed live escapes after the bound on a positive claude confirm', async () => {
     vi.useFakeTimers()
-    const runtime = new OrcaRuntimeService(null, undefined, { getAgentStatusSnapshot: () => [] })
+    const t0 = Date.now()
+    // [G1 B3, guard (g)] Restored evidence — see T1's own comment.
+    const runtime = new OrcaRuntimeService(null, undefined, {
+      getAgentStatusSnapshot: () => [claudeHook('done', t0 - 6 * 60 * MIN)]
+    })
     const write = vi.fn((_p: string, _d: string) => true)
     runtime.setPtyController(makeController(write, 'claude', 'claude') as never)
     runtime.syncWindowGraph(HEADLESS_RUNTIME_WINDOW_ID, { tabs: [], leaves: [] } as never)

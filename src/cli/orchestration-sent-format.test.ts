@@ -144,6 +144,9 @@ describe('formatOrchestrationSent', () => {
   // [S10-21f b4, R147] 'queued_starved' — a withheld record that has crossed
   // DELIVERY_STARVATION_BOUND_MS. Renders the actual starved-minutes/attempts count rather than
   // a fixed "10m+", so it stays honest for a mailbox starved much longer than the bound.
+  // [G1 B1 correction, N7] Restored verbatim to base (c332c074b3): a queued_starved row with no
+  // withheldReason (e.g. an older wire peer that predates FIX-4) must not render an emptier
+  // suffix than before — the fixed "pane never reported idle" sentence is the fallback.
   it('renders queued_starved with the actual starved minutes and attempt count', () => {
     const result: OrchestrationSentResult = {
       delivery: {
@@ -155,7 +158,7 @@ describe('formatOrchestrationSent', () => {
     }
     const out = formatOrchestrationSent(result, 'msg_6', 'orca')
     expect(out).toBe(
-      'msg_6: queued, delivery withheld for 17m (4 attempts) ' +
+      'msg_6: queued, delivery withheld for 17m (4 attempts) — pane never reported idle ' +
         '(recipient not currently resolvable).\n' +
         'Next step: orca orchestration sent --id msg_6 --json — check again for a state change.'
     )

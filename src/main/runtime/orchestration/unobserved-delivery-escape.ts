@@ -30,6 +30,16 @@ export type UnobservedStarvationEscapeGuardInput = {
   /** Guard (a): this mailbox's withheld record. */
   readonly starvation: DeliveryStarvationRecord | undefined
   readonly starvationBoundMs: number
+  /** [G1 B3, INV-P-LAUNCH-EDGE] Guard (a) fix: the pty's CURRENT lifecycle generation's own
+   *  start (stamped by the caller at `advancePtyLifecycleGeneration` and at pty-record creation
+   *  — orca-runtime.ts). A starvation record accrued against an EARLIER generation (a main
+   *  restart, or a same-id daemon respawn/cold restore) must not authorize a write into a
+   *  generation that has shown no evidence of its own — the bound is measured from
+   *  `max(starvation.firstAt, generationStartedAt)`, never `starvation.firstAt` alone.
+   *  Undefined reads as "no known generation start" (the caller could not resolve one) — treated
+   *  as 0, i.e. no additional restriction beyond `starvation.firstAt` (fail-open only for a
+   *  caller defect, never for a genuinely later generation start, which is always resolvable). */
+  readonly generationStartedAt: number | undefined
   /** Guard (b): the pty is connected and the launch-prompt fence does not hold. */
   readonly ptyConnected: boolean
   readonly fenceHolds: boolean
@@ -38,20 +48,35 @@ export type UnobservedStarvationEscapeGuardInput = {
   readonly fenceExpiredWithoutEvidenceAt: number | undefined
   readonly paneKey: string | null
   /** Guard (d) reads this same snapshot for "the newest Claude hook of any age". Guard (c)'s
-   *  clearing check reads it too, filtered to entries at/after `fenceExpiredWithoutEvidenceAt`. */
+   *  clearing check reads it too, filtered to entries at/after `fenceExpiredWithoutEvidenceAt`.
+   *  Guard (g) reads it for "does ANY Claude hook row exist for this pane key at all". */
   readonly claudeHooks: readonly ClaudeHookSnapshotEntry[]
 }
 
-/** Guards (a)-(d): starvation bound crossed; pty connected and fence not holding; no
- *  evidence-less fence expiry still outstanding; and the newest Claude hook (any age) is not
- *  `waiting`/`blocked` — a pane sitting at a permission/question dialog the modal detector does
- *  not recognize must never have Enter typed into it. Does NOT check guards (e)/(f) — the fresh
+/** Guards (a)-(d) and (g): starvation bound crossed (measured from the pty's CURRENT generation,
+ *  not a possibly-stale record — G1 B3); pty connected and fence not holding; no evidence-less
+ *  fence expiry still outstanding; the newest Claude hook (any age) is not `waiting`/`blocked` —
+ *  a pane sitting at a permission/question dialog the modal detector does not recognize must
+ *  never have Enter typed into it; and at least one Claude hook row exists for the pane key at
+ *  all (restored rows count — agent-hooks/server.ts keeps them 7 days) — positive prior agent
+ *  evidence, so a pane this runtime has NEVER heard from (a reattached record with no hook
+ *  history at all) can never be the escape's target. Does NOT check guards (e)/(f) — the fresh
  *  confirm and the post-await re-resolve are the caller's own async work. */
 export function canAttemptUnobservedStarvationEscape(
   input: UnobservedStarvationEscapeGuardInput
 ): boolean {
   // (a)
-  if (!input.starvation || !hasCrossedBound(input.starvation, input.now, input.starvationBoundMs)) {
+  if (!input.starvation) {
+    return false
+  }
+  const effectiveFirstAt = Math.max(input.starvation.firstAt, input.generationStartedAt ?? 0)
+  if (
+    !hasCrossedBound(
+      { ...input.starvation, firstAt: effectiveFirstAt },
+      input.now,
+      input.starvationBoundMs
+    )
+  ) {
     return false
   }
   // (b)
@@ -72,6 +97,10 @@ export function canAttemptUnobservedStarvationEscape(
   // (d)
   const newestHook = newestClaudeHookForPane(input.claudeHooks, input.paneKey)
   if (newestHook && (newestHook.state === 'waiting' || newestHook.state === 'blocked')) {
+    return false
+  }
+  // (g) [G1 B3, INV-P-LAUNCH-EDGE]
+  if (!newestHook) {
     return false
   }
   return true
