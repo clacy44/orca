@@ -144,6 +144,9 @@ describe('formatOrchestrationSent', () => {
   // [S10-21f b4, R147] 'queued_starved' — a withheld record that has crossed
   // DELIVERY_STARVATION_BOUND_MS. Renders the actual starved-minutes/attempts count rather than
   // a fixed "10m+", so it stays honest for a mailbox starved much longer than the bound.
+  // [G1 B1 correction, N7] Restored verbatim to base (c332c074b3): a queued_starved row with no
+  // withheldReason (e.g. an older wire peer that predates FIX-4) must not render an emptier
+  // suffix than before — the fixed "pane never reported idle" sentence is the fallback.
   it('renders queued_starved with the actual starved minutes and attempt count', () => {
     const result: OrchestrationSentResult = {
       delivery: {
@@ -158,6 +161,40 @@ describe('formatOrchestrationSent', () => {
       'msg_6: queued, delivery withheld for 17m (4 attempts) — pane never reported idle ' +
         '(recipient not currently resolvable).\n' +
         'Next step: orca orchestration sent --id msg_6 --json — check again for a state change.'
+    )
+  })
+
+  // [I-24-1 FIX-4] withheldReason names the real withholding branch — the fixed "pane never
+  // reported idle" text carried no diagnostic information (I-24-1 EVIDENCE: it was hard-coded
+  // for every queued_starved reason).
+  it('renders the real withheldReason instead of the old fixed "pane never reported idle" text', () => {
+    const result: OrchestrationSentResult = {
+      delivery: {
+        state: 'queued_starved',
+        recipient: { state: 'connected', lastSeenAt: null },
+        starvedMinutes: 129,
+        starvedAttempts: 25,
+        withheldReason: 'no_hydrated_status',
+        withheldAt: 1234
+      }
+    }
+    const out = formatOrchestrationSent(result, 'msg_7', 'orca')
+    expect(out).toContain('queued, delivery withheld for 129m (25 attempts) — no_hydrated_status')
+    expect(out).not.toContain('pane never reported idle')
+  })
+
+  it('renders withheldReason on queued_awaiting_pane too', () => {
+    const result: OrchestrationSentResult = {
+      delivery: {
+        state: 'queued_awaiting_pane',
+        recipient: { state: 'connected', lastSeenAt: null },
+        withheldReason: 'awaiting_idle_edge',
+        withheldAt: 1234
+      }
+    }
+    const out = formatOrchestrationSent(result, 'msg_8', 'orca')
+    expect(out).toContain(
+      'queued, delivery withheld (pane busy or unconfirmed idle) — awaiting_idle_edge'
     )
   })
 })

@@ -51,6 +51,15 @@ export type OrchestrationMessageDelivery = {
    *  instead of a fixed "10m+" that stays wrong for a mailbox starved much longer. */
   starvedMinutes?: number
   starvedAttempts?: number
+  /** [I-24-1 FIX-4] Set whenever a withheld record exists for this mailbox (any withheld
+   *  disposition, not only 'queued_starved') — the specific branch that withheld the last push
+   *  attempt (e.g. 'no_hydrated_status', 'awaiting_idle_edge', 'blocked_modal'), so the CLI can
+   *  print the real reason instead of a fixed "pane never reported idle" that carries no
+   *  diagnostic information (I-24-1 EVIDENCE). */
+  withheldReason?: string
+  /** [I-24-1 FIX-4] Epoch ms of the withheld record's own `at` (its most recent withhold),
+   *  companion to `withheldReason`. */
+  withheldAt?: number
 }
 
 export type OrchestrationSentResult = {

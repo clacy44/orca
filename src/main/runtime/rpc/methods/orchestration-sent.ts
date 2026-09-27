@@ -43,8 +43,13 @@ export const ORCHESTRATION_SENT_METHODS: RpcMethod[] = [
         relayedAt,
         deliveryConfirmed,
         starvedMinutes,
-        starvedAttempts
+        starvedAttempts,
+        withheldReason,
+        withheldAt
       } = runtime.getMessageDeliverySnapshot(message)
+      // [G1 B1] FIX-4 fields carried through for the queued_* states only (N6) — a
+      // pointed/read/relayed row must never show a stale withhold reason for older mail.
+      const isQueuedState = delivery === 'queued_awaiting_pane' || delivery === 'queued_starved'
       return {
         delivery: {
           state: delivery,
@@ -58,7 +63,9 @@ export const ORCHESTRATION_SENT_METHODS: RpcMethod[] = [
           // [S10-21f b4, R147] Carried through additively, same shape rule; set only when
           // `state` is 'queued_starved'.
           ...(starvedMinutes !== undefined ? { starvedMinutes } : {}),
-          ...(starvedAttempts !== undefined ? { starvedAttempts } : {})
+          ...(starvedAttempts !== undefined ? { starvedAttempts } : {}),
+          ...(isQueuedState && withheldReason !== undefined ? { withheldReason } : {}),
+          ...(isQueuedState && withheldAt !== undefined ? { withheldAt } : {})
         }
       }
     }
