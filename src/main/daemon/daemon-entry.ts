@@ -29,6 +29,7 @@ import { MacosLoginSessionDeathWatch } from './macos-login-session-death-watch'
 import { readCurrentProcessMacSystemResolverHealth } from '../network/macos-system-resolver-health'
 import { readCurrentDaemonReadyIdentity } from './daemon-ready-identity'
 import { publishDaemonPidFile } from './daemon-spawner'
+import { startDaemonIntegrityReport } from '../host-integrity/windows-integrity-level'
 
 export type ParsedDaemonArgs = {
   socketPath: string
@@ -286,6 +287,7 @@ async function main(): Promise<void> {
     ...(entryPath ? { entryPath } : {}),
     ...(appVersion ? { appVersion } : {}),
     ...(spawnerExecPath ? { spawnerExecPath } : {}),
+    getIntegrityLevel: startDaemonIntegrityReport(daemonLog).current,
     ...(pidPath && launchNonce
       ? {
           publishEndpointOwnership: () =>

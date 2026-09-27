@@ -18,6 +18,7 @@ import type {
   DaemonEvent
 } from './types'
 import { addNodePtyRecoveryHint } from './node-pty-error-hints'
+import { isProcessIntegrityLevel } from '../../shared/host-integrity-types'
 import { decodeDaemonResponseError } from './daemon-errors'
 
 const CONNECT_TIMEOUT_MS = 5000
@@ -528,6 +529,7 @@ function parseDaemonEndpointIdentity(value: unknown): DaemonEndpointIdentity | n
     entryPath?: unknown
     appVersion?: unknown
     spawnerExecPath?: unknown
+    integrityLevel?: unknown
   }
   if (
     !Number.isSafeInteger(identity.pid) ||
@@ -552,6 +554,13 @@ function parseDaemonEndpointIdentity(value: unknown): DaemonEndpointIdentity | n
       : {}),
     ...(typeof identity.spawnerExecPath === 'string' && identity.spawnerExecPath.length > 0
       ? { spawnerExecPath: identity.spawnerExecPath }
+      : {}),
+    ...(identity.integrityLevel !== undefined
+      ? {
+          integrityLevel: isProcessIntegrityLevel(identity.integrityLevel)
+            ? identity.integrityLevel
+            : 'unknown'
+        }
       : {})
   }
 }

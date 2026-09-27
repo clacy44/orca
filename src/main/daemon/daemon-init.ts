@@ -49,6 +49,8 @@ import { DegradedDaemonPtyProvider } from './degraded-daemon-pty-provider'
 import { trackDaemonReplaced, trackDaemonRetired } from './daemon-lifecycle-event'
 import { recordDurableCrashBreadcrumb } from '../crash-reporting/durable-crash-breadcrumb'
 import type { DaemonReplaceReason } from '../../shared/daemon-lifecycle-telemetry'
+import type { DaemonIntegrityReport } from '../../shared/host-integrity-types'
+import { classifyDaemonIntegrity } from '../host-integrity/host-integrity-guard'
 import {
   getLocalPtyProvider,
   setLocalPtyProvider,
@@ -123,6 +125,9 @@ let restartInFlight: Promise<RestartDaemonResult> | null = null
 // A narrow callback, not a full runtime import, to keep this module's daemon-lifecycle-only
 // dependency graph unchanged.
 let onDaemonDiedFanout: ((ptyIds: readonly string[]) => void) | null = null
+
+// INV-P-023: nonces this process forked a daemon with — such a daemon runs on our token.
+const selfSpawnedDaemonLaunchNonces = new Set<string>()
 
 export function setDaemonDiedFanoutHandler(
   handler: ((ptyIds: readonly string[]) => void) | null
@@ -876,6 +881,7 @@ function createOutOfProcessLauncher(
       // Why (H16, Ruling 35 Addendum 3 fd leak): fork() can throw synchronously (EMFILE, a bad
       // forkEntryPath). Without this, a throw here leaks the parent's copy of stderrFd forever —
       // close it before the error reaches the outer catch, which owns everything else.
+      selfSpawnedDaemonLaunchNonces.add(launchNonce)
       let child: ChildProcess
       try {
         child = fork(
@@ -1315,6 +1321,16 @@ async function reconcileSeededClaudeLivePtys(provider: DaemonProvider): Promise<
 // Why: a narrow getter (not a raw export) keeps the "swap on restart" invariant in one place (replaceDaemonProvider).
 export function getDaemonProvider(): DaemonProvider | null {
   return adapter
+}
+
+/** INV-P-023: the integrity a fresh local agent PTY inherits from the current daemon. */
+export function getCurrentDaemonIntegrity(): DaemonIntegrityReport | null {
+  return adapter
+    ? classifyDaemonIntegrity(
+        getCurrentDaemonAdapter(adapter).getLastAuthenticatedDaemonIdentity(),
+        selfSpawnedDaemonLaunchNonces
+      )
+    : null
 }
 
 // Why: computed from the pid record on demand (not cached at adoption) so the Settings

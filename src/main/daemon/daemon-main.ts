@@ -11,6 +11,7 @@ export type DaemonStartOptions = {
   entryPath?: string
   appVersion?: string
   spawnerExecPath?: string
+  getIntegrityLevel?: DaemonServerOptions['getIntegrityLevel']
   /** Direct-construction seam for versioned protocol fixtures; never CLI/env configured. */
   protocolVersion?: number
   spawnSubprocess: DaemonServerOptions['spawnSubprocess']
@@ -40,6 +41,7 @@ export async function startDaemon(opts: DaemonStartOptions): Promise<DaemonHandl
     ...(opts.entryPath ? { entryPath: opts.entryPath } : {}),
     ...(opts.appVersion ? { appVersion: opts.appVersion } : {}),
     ...(opts.spawnerExecPath ? { spawnerExecPath: opts.spawnerExecPath } : {}),
+    ...(opts.getIntegrityLevel ? { getIntegrityLevel: opts.getIntegrityLevel } : {}),
     ...(opts.protocolVersion !== undefined ? { protocolVersion: opts.protocolVersion } : {}),
     spawnSubprocess: opts.spawnSubprocess,
     ...(opts.preparePtySpawn ? { preparePtySpawn: opts.preparePtySpawn } : {}),
