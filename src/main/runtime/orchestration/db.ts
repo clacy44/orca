@@ -104,6 +104,7 @@ import {
   newestHostScopedLaunchForSession as newestHostScopedLaunchForSessionImpl,
   type NewestHostScopedLaunchOptions
 } from './agent-launch-session-lookup'
+import { paneCallerResumedIntoHeldIdentity as paneCallerResumedIntoHeldIdentityImpl } from './caller-resumed-pane'
 import {
   rebindRestoredPane as rebindRestoredPaneImpl,
   type RebindRestoredPaneParams,
@@ -5539,6 +5540,11 @@ export class OrchestrationDb {
     isPaneLive?: (paneKey: string) => boolean
   ): AgentRow | undefined {
     return findSoleOrphanedIdentityCandidate(this.db, hostId, worktreePath, isPaneLive)
+  }
+
+  // 10z.5 R290 (T18): a pane caller-resumed into a session whose identity is bound to another pane.
+  paneCallerResumedIntoHeldIdentity(hostId: string, paneKey: string): boolean {
+    return paneCallerResumedIntoHeldIdentityImpl(this, this.db, hostId, paneKey)
   }
 
   // F-9b (Ruling 33 Addendum 1): idempotent catch-up for a successor that missed succession on

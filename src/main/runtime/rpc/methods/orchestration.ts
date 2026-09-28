@@ -1553,7 +1553,9 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         let orphanedIdentityNotice: string | undefined
         if (
           attestedForAgentCheck &&
-          (!effectiveCallerAgentRow || effectiveCallerAgentRow.derived === 1)
+          (!effectiveCallerAgentRow || effectiveCallerAgentRow.derived === 1) &&
+          // [Artifact 10z.5 R290] A pane caller-resumed into a held identity is not offered another.
+          !db.paneCallerResumedIntoHeldIdentity(agentHostId, attestedForAgentCheck.paneKey)
         ) {
           const liveTerminalForCaller = await findLiveTerminalByHandle(
             runtime,
