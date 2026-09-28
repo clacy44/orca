@@ -399,6 +399,7 @@ import {
   isSessionIdRefusalToken
 } from '../../shared/covered-launch-agents'
 import {
+  resolveStartupShell,
   tokenizeStartupCommand,
   type AgentStartupShell
 } from '../../shared/tui-agent-startup-shell'
@@ -601,6 +602,7 @@ import {
   findHostScopedManifestChairForSession,
   type ChairsManifestEntry
 } from './orchestration/chair-succession-manifest-entry'
+import { resolveCallerResumeLaunchPreferences } from './orchestration/caller-resume-launch-preferences'
 import { resolveLocalWindowsAgentStartupShell } from '../../shared/windows-terminal-shell'
 import {
   getTuiAgentLaunchCommand,
@@ -28540,6 +28542,27 @@ export class OrcaRuntimeService {
       settings,
       agent: request.agent
     })
+    // [Artifact 10z.5 R289] A caller (non-internal) claude resume of a session attributed to a
+    // registered identity inherits that session's host-scoped pins; runs after every refusal above.
+    const launchPreferences =
+      request.launchPreferences ??
+      (internal || request.agent !== 'claude'
+        ? undefined
+        : await resolveCallerResumeLaunchPreferences(
+            this.getOrchestrationDb(),
+            this.getOrchestrationCompatibilityHostId(),
+            workspace.connectionId
+              ? toSshExecutionHostId(workspace.connectionId)
+              : workspace.repo
+                ? getRepoExecutionHostId(workspace.repo)
+                : LOCAL_EXECUTION_HOST_ID,
+            identity.providerSession.id,
+            {
+              agentArgs: request.agentArgs ?? undefined,
+              appendAgentArgs: request.appendAgentArgs ?? undefined,
+              shell: resolveStartupShell(platform, shell)
+            }
+          ).catch(() => undefined))
     const startup = buildAgentResumeStartupPlan({
       agent: request.agent,
       providerSession: identity.providerSession,
@@ -28550,7 +28573,7 @@ export class OrcaRuntimeService {
           : appendAgentArgs(laneScoped.agentArgs, request.appendAgentArgs),
       agentEnv: laneScoped.agentEnv,
       ompResumeFilePath: request.ompResumeFilePath,
-      sessionOptions: this.toAgentSessionOptions(request.launchPreferences),
+      sessionOptions: this.toAgentSessionOptions(launchPreferences),
       platform,
       shell,
       isRemote
@@ -28586,7 +28609,7 @@ export class OrcaRuntimeService {
       // orchestration-federation-existing-worktree.ts): thread the request's launchPreferences
       // through to createTerminal so a relaunch (host-restore or caller resume) records what it
       // launched with instead of nulling pref_model/pref_effort on every cold restart.
-      ...(request.launchPreferences ? { launchPreferences: request.launchPreferences } : {}),
+      ...(launchPreferences ? { launchPreferences } : {}),
       signal: caller.signal
     })
     return {
@@ -36276,6 +36299,11 @@ export class OrcaRuntimeService {
       return
     }
     const hostId = this.getOrchestrationCompatibilityHostId()
+    // [Artifact 10z.5 R290] A pane caller-resumed into a session whose identity is bound to another
+    // pane already has an owner elsewhere. Optional call: hand-rolled db doubles omit the method.
+    if (db.paneCallerResumedIntoHeldIdentity?.(hostId, paneKey)) {
+      return
+    }
     const candidate = db.findOrphanedIdentityCandidate(hostId, worktreePath, (candidatePaneKey) => {
       const signals = this.getAgentDirectoryLivenessSignals(candidatePaneKey)
       return signals.terminalHandle !== null || signals.observedLive
