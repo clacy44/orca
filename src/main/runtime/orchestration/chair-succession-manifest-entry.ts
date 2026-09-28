@@ -9,6 +9,7 @@ import { homedir, hostname } from 'node:os'
 import { join } from 'node:path'
 import { OrchestrationError } from './orchestration-error'
 import { parseChairsManifest, type ChairsManifestEntry } from './chairs-manifest'
+import { chairTargetSessionId } from './chairs-restore-plan'
 
 export type { ChairsManifestEntry }
 /** @deprecated use `ChairsManifestEntry` from `chairs-manifest.ts` directly. */
@@ -16,6 +17,33 @@ export type ManifestEntryWithSuccession = ChairsManifestEntry
 
 export function defaultChairsManifestPath(): string {
   return join(homedir(), '.orca', 'chairs.json')
+}
+
+/** An entry applies on this machine iff `host` is unset or equals `os.hostname()`. */
+function chairAppliesOnThisHost(chair: ChairsManifestEntry): boolean {
+  return chair.host === undefined || chair.host === hostname()
+}
+
+/** The host-scoped manifest chair whose resumable session (`lastSessionId ?? conversationId`) is
+ * `sessionId`, on this host only. Never throws: a missing, unreadable or invalid manifest is null. */
+export async function findHostScopedManifestChairForSession(
+  sessionId: string
+): Promise<ManifestEntryWithSuccession | null> {
+  try {
+    const parsed = parseChairsManifest(
+      JSON.parse(await readFile(defaultChairsManifestPath(), 'utf8'))
+    )
+    if (!parsed.ok) {
+      return null
+    }
+    return (
+      (parsed.manifest.chairs.find(
+        (c) => chairAppliesOnThisHost(c) && chairTargetSessionId(c) === sessionId
+      ) as ManifestEntryWithSuccession | undefined) ?? null
+    )
+  } catch {
+    return null
+  }
 }
 
 export async function readManifestEntry(
@@ -39,9 +67,8 @@ export async function readManifestEntry(
   if (!parsed.ok) {
     throw new OrchestrationError('succession_not_a_chair', parsed.reason)
   }
-  const machineId = hostname()
   const entry = parsed.manifest.chairs.find(
-    (c) => c.name === chairName && (c.host === undefined || c.host === machineId)
+    (c) => c.name === chairName && chairAppliesOnThisHost(c)
   ) as ManifestEntryWithSuccession | undefined
   if (!entry) {
     throw new OrchestrationError(

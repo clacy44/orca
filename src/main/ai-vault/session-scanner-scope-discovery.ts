@@ -125,7 +125,7 @@ function scopePathCandidates(scopePath: string): string[] {
  * comparison key would lowercase Windows paths and never match on disk. Encode
  * the raw path, plus its NFC spelling, since macOS hands us NFD (#10832).
  */
-function encodeClaudeProjectPaths(pathValue: string): string[] {
+export function encodeClaudeProjectPaths(pathValue: string): string[] {
   const raw = encodeClaudeProjectPath(pathValue)
   const composed = encodeClaudeProjectPath(pathValue.normalize('NFC'))
   return raw === composed ? [raw] : [raw, composed]

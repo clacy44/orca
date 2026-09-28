@@ -101,6 +101,11 @@ import {
   type RecordSelfReportRotationResult
 } from './agent-launch-sessions'
 import {
+  newestHostScopedLaunchForSession as newestHostScopedLaunchForSessionImpl,
+  type NewestHostScopedLaunchOptions
+} from './agent-launch-session-lookup'
+import { paneCallerResumedIntoHeldIdentity as paneCallerResumedIntoHeldIdentityImpl } from './caller-resumed-pane'
+import {
   rebindRestoredPane as rebindRestoredPaneImpl,
   type RebindRestoredPaneParams,
   type RebindRestoredPaneResult
@@ -5367,6 +5372,21 @@ export class OrchestrationDb {
     return launchBySessionIdImpl(this.db, sessionId)
   }
 
+  newestHostScopedLaunchForSession(
+    hostId: string,
+    executionHostId: string,
+    sessionId: string,
+    options?: NewestHostScopedLaunchOptions
+  ): AgentLaunchSessionRow | undefined {
+    return newestHostScopedLaunchForSessionImpl(
+      this.db,
+      hostId,
+      executionHostId,
+      sessionId,
+      options
+    )
+  }
+
   // [S10-21d b3] Who currently holds session X, per current_sessions — the launcher's own
   // pre-adoption read (requestChairRestore), re-read again inside the pane lock before deciding.
   paneHoldingSession(hostId: string, sessionId: string): string | undefined {
@@ -5520,6 +5540,11 @@ export class OrchestrationDb {
     isPaneLive?: (paneKey: string) => boolean
   ): AgentRow | undefined {
     return findSoleOrphanedIdentityCandidate(this.db, hostId, worktreePath, isPaneLive)
+  }
+
+  // 10z.5 R290 (T18): a pane caller-resumed into a session whose identity is bound to another pane.
+  paneCallerResumedIntoHeldIdentity(hostId: string, paneKey: string): boolean {
+    return paneCallerResumedIntoHeldIdentityImpl(this, this.db, hostId, paneKey)
   }
 
   // F-9b (Ruling 33 Addendum 1): idempotent catch-up for a successor that missed succession on

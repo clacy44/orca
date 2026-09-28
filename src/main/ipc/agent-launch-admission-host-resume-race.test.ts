@@ -52,6 +52,7 @@ describe('D-R163 H1/H2 LOW: checkHostResumeHolderUnmoved (the pane-lock re-check
       notice: () => {},
       contestedLineage: () => {},
       findConnectedPtyForPane: () => false,
+      callerResume: null,
       ...overrides
     }
   }

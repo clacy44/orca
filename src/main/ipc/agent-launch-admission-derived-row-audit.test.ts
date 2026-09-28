@@ -80,6 +80,7 @@ describe('S10-21c B-final F5, D-R159 finding 5: derived registered row supersess
       notice: () => {},
       contestedLineage: () => {},
       findConnectedPtyForPane: () => false,
+      callerResume: null,
       ...overrides
     }
   }

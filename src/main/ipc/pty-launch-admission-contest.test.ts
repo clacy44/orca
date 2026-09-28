@@ -155,3 +155,31 @@ describe('S10-21a C11: launchAdmissionBundle notice text (snapshot)', () => {
     )
   })
 })
+
+// [10z.5 R287] `ctx.callerResume`: the runtime itself (it satisfies the deps structurally), or null
+// for a stub without `confirmClaudeForegroundOnPane` (unwired: rules 1-2 skipped).
+describe('10z.5 R287: launchAdmissionBundle callerResume wiring', () => {
+  it('passes the runtime as callerResume when it has confirmClaudeForegroundOnPane', () => {
+    const runtimeStub = {
+      getOrchestrationCompatibilityHostId: () => 'local',
+      getLaunchGenerationId: () => 'gen-1',
+      getOrchestrationDb: () => ({}),
+      confirmClaudeForegroundOnPane: async () => true
+    } as unknown as OrcaRuntimeService
+
+    const { ctx } = launchAdmissionBundle(runtimeStub, null)
+
+    expect(ctx.callerResume).toBe(runtimeStub)
+  })
+
+  it('is null for a stub without the method, and for an absent runtime', () => {
+    const runtimeStub = {
+      getOrchestrationCompatibilityHostId: () => 'local',
+      getLaunchGenerationId: () => 'gen-1',
+      getOrchestrationDb: () => ({})
+    } as unknown as OrcaRuntimeService
+
+    expect(launchAdmissionBundle(runtimeStub, null).ctx.callerResume).toBeNull()
+    expect(launchAdmissionBundle(undefined, null).ctx.callerResume).toBeNull()
+  })
+})

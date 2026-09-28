@@ -212,7 +212,10 @@ const STRUCTURED_RUNTIME_PASSTHROUGH_CODES: ReadonlySet<string> = new Set([
   'checkpoint_secret_shape',
   'checkpoint_unsupported_claim',
   // N3: validateEmbeddedCharterText's refusal at seal time (data.line/data.code).
-  'charter_invalid'
+  'charter_invalid',
+  // 10z.5 R287: a caller-resume refused because another pane still runs the session. Deliberately
+  // NOT in AGENT_SESSION_RPC_ERROR_CODES: a client must never take a legacy retry on it.
+  'resume_target_owned_by_another_pane'
 ])
 
 export function mapRuntimeError(id: string, meta: RpcEnvelopeMeta, error: unknown): RpcFailure {

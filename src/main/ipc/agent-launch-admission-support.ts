@@ -5,6 +5,7 @@ import type { PtySpawnResult } from '../providers/pty-spawn-result'
 import type { RecordLaunchParams } from '../runtime/orchestration/agent-launch-sessions'
 import type { OrchestrationDb } from '../runtime/orchestration/db'
 import type { resolveResumeTranscript } from '../startup/resolve-resume-transcript'
+import type { CallerResumeLivenessDeps } from './agent-launch-admission-caller-resume'
 
 // [S10-21d R118, design (a)] Split out of agent-launch-admission.ts (same max-lines-budget
 // reason this whole file exists) — takes the narrow shape directly rather than the full
@@ -71,6 +72,10 @@ export type AgentLaunchAdmissionContext = {
    * `admitAgentLaunch` (agent-launch-admission.ts:131-133) refuses `launch_store_unavailable`
    * before this field is ever read. */
   findConnectedPtyForPane: (paneKey: string) => boolean
+  /** [10z.5 R287, D-R104 F-3 style] REQUIRED. The caller_resume arm's liveness reads (claude
+   * foreground on the holder, DEC-3 report check). `null` = unwired: rules 1-2 are skipped, which
+   * is today's behaviour. */
+  callerResume: CallerResumeLivenessDeps | null
 }
 
 /** [S10-21a C7f, D-R114 fix 1] The admission outcome pty.ts's post-spawn-commit gate needs at
@@ -123,7 +128,7 @@ export async function preflightResumeTranscript(
   resolve: typeof resolveResumeTranscript,
   agentType: string,
   sessionId: string
-): Promise<{ ok: true } | { ok: false; reasonCode: string }> {
+): Promise<{ ok: true; path: string } | { ok: false; reasonCode: string }> {
   let resumeTranscript: Awaited<ReturnType<typeof resolveResumeTranscript>>
   try {
     resumeTranscript = await resolve(agentType, sessionId)
@@ -136,7 +141,7 @@ export async function preflightResumeTranscript(
   if (!resumeTranscript || !resumeTranscript.hasTurn) {
     return { ok: false, reasonCode: 'resume_target_absent' }
   }
-  return { ok: true }
+  return { ok: true, path: resumeTranscript.path }
 }
 
 export function audit(
@@ -145,10 +150,11 @@ export function audit(
   hostId: string,
   verb: string,
   outcome: string,
-  reasonCode: string | null
+  reasonCode: string | null,
+  agentId: string | null = null
 ): void {
   db.writeAgentAudit({
-    agentId: null,
+    agentId,
     actorPaneKey: paneKey,
     actorHostId: hostId,
     verb,

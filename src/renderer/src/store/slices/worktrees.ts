@@ -95,6 +95,7 @@ import {
   settingsForWorktreeOperationRoute
 } from '@/lib/worktree-operation-route'
 import { captureWorktreeOperationGenerationGuard } from '@/lib/worktree-operation-generation'
+import { dropSleepingRecordsOfPurgedWorktrees } from './worktree-purge-sleeping-records'
 import { getEnvironmentSshStateGeneration } from './runtime-environment-ssh'
 import { getRuntimeEnvironmentConnectionGeneration } from './runtime-status'
 import {
@@ -2632,10 +2633,14 @@ function buildWorktreePurgeState(s: AppState, worktreeIds: string[]): Partial<Ap
     ...(nextAgentStatusByPaneKey !== s.agentStatusByPaneKey
       ? { agentStatusEpoch: s.agentStatusEpoch + 1 }
       : {}),
-    agentLaunchConfigByPaneKey: omitByPaneKeyTabPrefix(s.agentLaunchConfigByPaneKey),
+    // Why: also drops orphaned saved records naming the purged worktree (tab already closed) with their launch configs.
+    ...dropSleepingRecordsOfPurgedWorktrees(
+      omitByPaneKeyTabPrefix(s.sleepingAgentSessionsByPaneKey),
+      omitByPaneKeyTabPrefix(s.agentLaunchConfigByPaneKey),
+      worktreeIdSet
+    ),
     acknowledgedAgentsByPaneKey: omitByPaneKeyTabPrefix(s.acknowledgedAgentsByPaneKey),
     paneForegroundAgentByPaneKey: omitByPaneKeyTabPrefix(s.paneForegroundAgentByPaneKey),
-    sleepingAgentSessionsByPaneKey: omitByPaneKeyTabPrefix(s.sleepingAgentSessionsByPaneKey),
     unreadTerminalTabs: omitByTabId(s.unreadTerminalTabs),
     unreadTerminalPanes: omitByPaneKeyTabPrefix(s.unreadTerminalPanes),
     unreadAgentCompletionPanes: omitByPaneKeyTabPrefix(s.unreadAgentCompletionPanes),

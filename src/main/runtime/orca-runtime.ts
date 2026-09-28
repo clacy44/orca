@@ -399,6 +399,7 @@ import {
   isSessionIdRefusalToken
 } from '../../shared/covered-launch-agents'
 import {
+  resolveStartupShell,
   tokenizeStartupCommand,
   type AgentStartupShell
 } from '../../shared/tui-agent-startup-shell'
@@ -597,6 +598,11 @@ import {
   isTuiAgentEnabled,
   pickTuiAgent
 } from '../../shared/tui-agent-selection'
+import {
+  findHostScopedManifestChairForSession,
+  type ChairsManifestEntry
+} from './orchestration/chair-succession-manifest-entry'
+import { resolveCallerResumeLaunchPreferences } from './orchestration/caller-resume-launch-preferences'
 import { resolveLocalWindowsAgentStartupShell } from '../../shared/windows-terminal-shell'
 import {
   getTuiAgentLaunchCommand,
@@ -28536,6 +28542,33 @@ export class OrcaRuntimeService {
       settings,
       agent: request.agent
     })
+    // [Artifact 10z.5 R289] A caller (non-internal) claude resume of a session attributed to a
+    // registered identity inherits that session's host-scoped pins; runs after every refusal above.
+    // The lookup never throws out of ensureAgentSession: the orchestration DB is acquired inside the
+    // guarded boundary, so a runtime with no attachable DB resolves to no pins instead of failing.
+    const launchPreferences =
+      request.launchPreferences ??
+      (internal || request.agent !== 'claude'
+        ? undefined
+        : await Promise.resolve()
+            .then(() =>
+              resolveCallerResumeLaunchPreferences(
+                this.getOrchestrationDb(),
+                this.getOrchestrationCompatibilityHostId(),
+                workspace.connectionId
+                  ? toSshExecutionHostId(workspace.connectionId)
+                  : workspace.repo
+                    ? getRepoExecutionHostId(workspace.repo)
+                    : LOCAL_EXECUTION_HOST_ID,
+                identity.providerSession.id,
+                {
+                  agentArgs: request.agentArgs ?? undefined,
+                  appendAgentArgs: request.appendAgentArgs ?? undefined,
+                  shell: resolveStartupShell(platform, shell)
+                }
+              )
+            )
+            .catch(() => undefined))
     const startup = buildAgentResumeStartupPlan({
       agent: request.agent,
       providerSession: identity.providerSession,
@@ -28546,7 +28579,7 @@ export class OrcaRuntimeService {
           : appendAgentArgs(laneScoped.agentArgs, request.appendAgentArgs),
       agentEnv: laneScoped.agentEnv,
       ompResumeFilePath: request.ompResumeFilePath,
-      sessionOptions: this.toAgentSessionOptions(request.launchPreferences),
+      sessionOptions: this.toAgentSessionOptions(launchPreferences),
       platform,
       shell,
       isRemote
@@ -28582,7 +28615,7 @@ export class OrcaRuntimeService {
       // orchestration-federation-existing-worktree.ts): thread the request's launchPreferences
       // through to createTerminal so a relaunch (host-restore or caller resume) records what it
       // launched with instead of nulling pref_model/pref_effort on every cold restart.
-      ...(request.launchPreferences ? { launchPreferences: request.launchPreferences } : {}),
+      ...(launchPreferences ? { launchPreferences } : {}),
       signal: caller.signal
     })
     return {
@@ -36058,6 +36091,26 @@ export class OrcaRuntimeService {
     return { verdict: 'not_agent', processName: confirmed }
   }
 
+  // 10z.5 R287: the caller-resume admission's liveness read on a session holder — the delivery
+  // gate's own fresh confirm, true only when it names claude itself (the anchored route's rule).
+  // No connected pty, an 'unknown' read or any other process is false.
+  async confirmClaudeForegroundOnPane(paneKey: string): Promise<boolean> {
+    const pty = this.findConnectedPtyForPane(paneKey)
+    if (!pty) {
+      return false
+    }
+    const { processName } = await this.confirmDeliveryForeground(pty.ptyId)
+    return processName !== null && isExpectedAgentProcess(processName, 'claude')
+  }
+
+  terminalHandleForPane(paneKey: string): string | null {
+    return this.getTerminalHandleForPaneKey(paneKey)
+  }
+
+  manifestChairForSession(sessionId: string): Promise<ChairsManifestEntry | null> {
+    return findHostScopedManifestChairForSession(sessionId)
+  }
+
   // S10-23a G1 repair: the --inject gate's resolve edge. isPeerPaneForegroundAgentLive
   // (:4619) is the W-3 beforeWrite check and returns false for every renderer leaf handle
   // (it only resolves a `pty:` tab-id record) — dispatch handles are overwhelmingly renderer
@@ -36252,6 +36305,11 @@ export class OrcaRuntimeService {
       return
     }
     const hostId = this.getOrchestrationCompatibilityHostId()
+    // [Artifact 10z.5 R290] A pane caller-resumed into a session whose identity is bound to another
+    // pane already has an owner elsewhere. Optional call: hand-rolled db doubles omit the method.
+    if (db.paneCallerResumedIntoHeldIdentity?.(hostId, paneKey)) {
+      return
+    }
     const candidate = db.findOrphanedIdentityCandidate(hostId, worktreePath, (candidatePaneKey) => {
       const signals = this.getAgentDirectoryLivenessSignals(candidatePaneKey)
       return signals.terminalHandle !== null || signals.observedLive

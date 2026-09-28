@@ -48,7 +48,8 @@ describe('S10-21d b6, R119 fix 3: SELF_RESUME passThrough confirm/compensate', (
       launchGeneration: 'gen-1',
       notice: () => {},
       contestedLineage: () => {},
-      findConnectedPtyForPane: () => false
+      findConnectedPtyForPane: () => false,
+      callerResume: null
     }
   }
 
