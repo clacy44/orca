@@ -138,4 +138,36 @@ describe('10z.5 R287 rule 4: transcript must sit in the new pane project', () =>
     expect(scopedCalls()).toEqual([])
     expect(lastAudit(db).reason_code).toBe('resume_target_owned_by_pane_without_live_pty')
   })
+  it('a THROWING scoped lookup is not a hit: unrecorded resume_target_outside_pane_project, spawn proceeds', async () => {
+    const db = freshDb()
+    resolve.mockImplementation((async (_agent: string, _id: string, options?: Options) => {
+      if (options?.claudeProjectsDir === undefined) {
+        return HIT
+      }
+      throw new Error('scoped scan could not run')
+    }) as never)
+    const admitted = await admit(db, { cwd: '/work/proj' })
+    expect(admitted.spawnOptions.command).toBe(`claude --resume ${X}`)
+    expect(scopedCalls()).toEqual([join(DEFAULT_ROOT, '-work-proj')])
+    expect(db.newestLaunchForPane(HOST_ID, PANE)).toBeUndefined()
+    expect(lastAudit(db)).toMatchObject({
+      verb: 'launch_unrecorded',
+      outcome: 'admitted',
+      reason_code: 'resume_target_outside_pane_project'
+    })
+  })
+
+  it('rule 3 fires before rule 4: an absent transcript is resume_target_absent, never the project reason', async () => {
+    const db = freshDb()
+    resolve.mockResolvedValue(null as never)
+    const admitted = await admit(db, { cwd: '/work/proj' })
+    expect(admitted.spawnOptions.command).toBe(`claude --resume ${X}`)
+    expect(scopedCalls()).toEqual([])
+    expect(db.newestLaunchForPane(HOST_ID, PANE)).toBeUndefined()
+    expect(lastAudit(db)).toMatchObject({
+      verb: 'launch_unrecorded',
+      outcome: 'admitted',
+      reason_code: 'resume_target_absent'
+    })
+  })
 })

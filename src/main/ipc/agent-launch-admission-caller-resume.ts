@@ -117,7 +117,8 @@ export async function refuseIfResumeTargetLive(
 }
 
 /** Rule 4: with no holder, a caller resume is recorded only when X's transcript resolves inside the
- * new pane's own Claude project directory. Absent cwd, a non-claude agent or a holder skips it. */
+ * new pane's own Claude project directory. Absent cwd, a non-claude agent or a holder skips it. A
+ * throwing scoped lookup is not a hit: it returns true (unrecorded, spawn proceeds). */
 export async function resumeTranscriptOutsidePaneProject(
   db: OrchestrationDb,
   ctx: AgentLaunchAdmissionContext,
@@ -141,7 +142,7 @@ export async function resumeTranscriptOutsidePaneProject(
       }
     }
   } catch {
-    return false
+    return true
   }
   return true
 }

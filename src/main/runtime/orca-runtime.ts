@@ -28544,25 +28544,31 @@ export class OrcaRuntimeService {
     })
     // [Artifact 10z.5 R289] A caller (non-internal) claude resume of a session attributed to a
     // registered identity inherits that session's host-scoped pins; runs after every refusal above.
+    // The lookup never throws out of ensureAgentSession: the orchestration DB is acquired inside the
+    // guarded boundary, so a runtime with no attachable DB resolves to no pins instead of failing.
     const launchPreferences =
       request.launchPreferences ??
       (internal || request.agent !== 'claude'
         ? undefined
-        : await resolveCallerResumeLaunchPreferences(
-            this.getOrchestrationDb(),
-            this.getOrchestrationCompatibilityHostId(),
-            workspace.connectionId
-              ? toSshExecutionHostId(workspace.connectionId)
-              : workspace.repo
-                ? getRepoExecutionHostId(workspace.repo)
-                : LOCAL_EXECUTION_HOST_ID,
-            identity.providerSession.id,
-            {
-              agentArgs: request.agentArgs ?? undefined,
-              appendAgentArgs: request.appendAgentArgs ?? undefined,
-              shell: resolveStartupShell(platform, shell)
-            }
-          ).catch(() => undefined))
+        : await Promise.resolve()
+            .then(() =>
+              resolveCallerResumeLaunchPreferences(
+                this.getOrchestrationDb(),
+                this.getOrchestrationCompatibilityHostId(),
+                workspace.connectionId
+                  ? toSshExecutionHostId(workspace.connectionId)
+                  : workspace.repo
+                    ? getRepoExecutionHostId(workspace.repo)
+                    : LOCAL_EXECUTION_HOST_ID,
+                identity.providerSession.id,
+                {
+                  agentArgs: request.agentArgs ?? undefined,
+                  appendAgentArgs: request.appendAgentArgs ?? undefined,
+                  shell: resolveStartupShell(platform, shell)
+                }
+              )
+            )
+            .catch(() => undefined))
     const startup = buildAgentResumeStartupPlan({
       agent: request.agent,
       providerSession: identity.providerSession,

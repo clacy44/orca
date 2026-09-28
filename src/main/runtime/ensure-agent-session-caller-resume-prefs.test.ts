@@ -10,6 +10,10 @@ import { join } from 'node:path'
 import { mkdirSync as realMkdirSync } from 'node:fs'
 import type * as Wsl from '../wsl'
 import { OrchestrationDb } from './orchestration/db'
+import {
+  configureHostIntegrityForTests,
+  resetHostIntegrityForTests
+} from '../host-integrity/host-integrity-guard'
 
 const {
   handleMock,
@@ -660,14 +664,19 @@ describe('10z.5 R289: caller-kind ensureAgentSession pins through the REAL admis
     expect(row?.pref_effort).toBeNull()
   })
 
-  it('the R266 refusal throws before any resolution', async () => {
+  it('the R266 host-integrity refusal throws before any R289 resolution', async () => {
     db = new OrchestrationDb(':memory:')
     seedAttributedSession({ model: 'opus' })
     const { runtime, spawn } = freshRuntime()
     const lookup = vi.spyOn(db, 'newestHostScopedLaunchForSession')
-    await expect(runtime.ensureAgentSession(request({ kind: 'automatic' }))).rejects.toThrow(
-      'agent_session_resume_not_authorized'
-    )
+    configureHostIntegrityForTests({ probe: async () => ({ level: 'high', detail: 'r266 order' }) })
+    try {
+      await expect(runtime.ensureAgentSession(request())).rejects.toMatchObject({
+        code: 'host_elevated_refused'
+      })
+    } finally {
+      resetHostIntegrityForTests()
+    }
     expect(lookup).not.toHaveBeenCalled()
     expect(spawn).not.toHaveBeenCalled()
   })
