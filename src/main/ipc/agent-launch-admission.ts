@@ -27,6 +27,7 @@ import { resolveResumeTranscript } from '../startup/resolve-resume-transcript'
 // delegate methods (recordLaunch/newestLaunchForPane/getAgentByPaneKey/writeAgentAudit, plus the
 // deleteLaunchRow delegate this commit adds to db.ts — the only one that was missing).
 import type { OrchestrationDb } from '../runtime/orchestration/db'
+import * as callerResume from './agent-launch-admission-caller-resume'
 import { LaunchAdmissionRefusedError } from './agent-launch-admission-errors'
 import {
   resolveHostResumeRecordLaunch,
@@ -311,6 +312,8 @@ export async function admitAgentLaunch(
       if (!isSessionId(x)) {
         return unrecorded('resume_target_unparseable')
       }
+      // [10z.5 R287, D-R241] Refuse (audit, then throw) when X's holder runs claude or a report stands.
+      await callerResume.refuseIfResumeTargetLive(db, ctx, paneKey, x)
       // [S10-21c B-final F4, D-R159 finding 4] X is shaped like a session id, but shape alone
       // does not prove it NAMES one — S4's own preflight (resolve-resume-transcript.ts) refuses
       // exactly this at the NEXT sweep (`sweep_resume_target_absent`), after this arm has already
@@ -325,6 +328,9 @@ export async function admitAgentLaunch(
       if (!preflight.ok) {
         return unrecorded(preflight.reasonCode)
       }
+      if (await callerResume.resumeTranscriptOutsidePaneProject(db, ctx, x, spawnOptions)) {
+        return unrecorded('resume_target_outside_pane_project')
+      }
       const recorded = db.recordLaunch({
         hostId: ctx.hostId,
         paneKey,
@@ -335,30 +341,10 @@ export async function admitAgentLaunch(
         evidence: 'caller_resume',
         ...launchPrefsForCtx(ctx.launchPreferences)
       })
-      // [S10-21c B3c, D-R151 HIGH, chair ruling 21c-E2] `current_sessions` has no liveness test:
-      // the UNIQUE(host_id, session_id) collision this arm sees fires for ANY pane that has ever
-      // recorded X, dead panes included — on this box, 6 of 8 rows name panes whose tab no longer
-      // exists. A hard refusal here throws (LaunchAdmissionRefusedError), which
-      // `spawnWithLane` does not catch, so `provider.spawn` never runs — regressing a launch the
-      // base performed for the common "resume my old conversation in a new pane" recovery. The
-      // fence INV-P-022's amendment protects (a session another pane currently holds is refused,
-      // never SUPERSEDED) is fully served by not recording: no row, no current_sessions move, X
-      // stays pointed at its original holder. `unrecorded` is still LOUD — launch_unrecorded
-      // audit row plus the pane notice — it just lets the spawn proceed instead of failing it.
-      // Scoping this to a genuinely LIVE holder is deferred to R84 (next train).
+      // [S10-21c B3c, chair ruling 21c-E2; 10z.5 R287, D-R241] A holder that passed the liveness refusal
+      // above shows no life: X stays recorded on it, this pane spawns unrecorded (never superseded).
       if (!recorded.ok) {
-        // [S10-21f b2-10q, R143's sibling reason-code split] Display-only split — no behaviour
-        // change (still `unrecorded`, spawn still proceeds either way): a connected pty on the
-        // current holder distinguishes "genuinely live" from "owned by a pane without a live
-        // pty" for the operator, rather than one reason code covering both.
-        const holderPaneKey = db.paneHoldingSession(ctx.hostId, x)
-        const holderHasLivePty =
-          holderPaneKey !== undefined && ctx.findConnectedPtyForPane(holderPaneKey)
-        return unrecorded(
-          holderHasLivePty
-            ? 'resume_target_owned_by_another_pane'
-            : 'resume_target_owned_by_pane_without_live_pty'
-        )
+        return callerResume.unrecordedHeldResume(db, ctx, paneKey, x, spawnOptions)
       }
       // [S10-21c B3b, D-R149 MEDIUM 1] The same contested-lineage signal SELF_RESUME(caller)
       // raises above (:326) — this arm writes to the pane too, and a registered chair's pane

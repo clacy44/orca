@@ -597,6 +597,10 @@ import {
   isTuiAgentEnabled,
   pickTuiAgent
 } from '../../shared/tui-agent-selection'
+import {
+  findHostScopedManifestChairForSession,
+  type ChairsManifestEntry
+} from './orchestration/chair-succession-manifest-entry'
 import { resolveLocalWindowsAgentStartupShell } from '../../shared/windows-terminal-shell'
 import {
   getTuiAgentLaunchCommand,
@@ -36056,6 +36060,26 @@ export class OrcaRuntimeService {
       return { verdict: 'unknown', processName: confirmed }
     }
     return { verdict: 'not_agent', processName: confirmed }
+  }
+
+  // 10z.5 R287: the caller-resume admission's liveness read on a session holder — the delivery
+  // gate's own fresh confirm, true only when it names claude itself (the anchored route's rule).
+  // No connected pty, an 'unknown' read or any other process is false.
+  async confirmClaudeForegroundOnPane(paneKey: string): Promise<boolean> {
+    const pty = this.findConnectedPtyForPane(paneKey)
+    if (!pty) {
+      return false
+    }
+    const { processName } = await this.confirmDeliveryForeground(pty.ptyId)
+    return processName !== null && isExpectedAgentProcess(processName, 'claude')
+  }
+
+  terminalHandleForPane(paneKey: string): string | null {
+    return this.getTerminalHandleForPaneKey(paneKey)
+  }
+
+  manifestChairForSession(sessionId: string): Promise<ChairsManifestEntry | null> {
+    return findHostScopedManifestChairForSession(sessionId)
   }
 
   // S10-23a G1 repair: the --inject gate's resolve edge. isPeerPaneForegroundAgentLive

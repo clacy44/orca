@@ -101,6 +101,10 @@ import {
   type RecordSelfReportRotationResult
 } from './agent-launch-sessions'
 import {
+  newestHostScopedLaunchForSession as newestHostScopedLaunchForSessionImpl,
+  type NewestHostScopedLaunchOptions
+} from './agent-launch-session-lookup'
+import {
   rebindRestoredPane as rebindRestoredPaneImpl,
   type RebindRestoredPaneParams,
   type RebindRestoredPaneResult
@@ -5365,6 +5369,21 @@ export class OrchestrationDb {
 
   launchBySessionId(sessionId: string): AgentLaunchSessionRow | undefined {
     return launchBySessionIdImpl(this.db, sessionId)
+  }
+
+  newestHostScopedLaunchForSession(
+    hostId: string,
+    executionHostId: string,
+    sessionId: string,
+    options?: NewestHostScopedLaunchOptions
+  ): AgentLaunchSessionRow | undefined {
+    return newestHostScopedLaunchForSessionImpl(
+      this.db,
+      hostId,
+      executionHostId,
+      sessionId,
+      options
+    )
   }
 
   // [S10-21d b3] Who currently holds session X, per current_sessions — the launcher's own

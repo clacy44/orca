@@ -83,6 +83,7 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
       notice: () => {},
       contestedLineage: () => {},
       findConnectedPtyForPane: () => false,
+      callerResume: null,
       ...overrides
     }
   }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { mapRuntimeError } from './errors'
 import { OrchestrationError } from '../orchestration/orchestration-error'
+import { ResumeTargetLiveRefusedError } from '../../ipc/agent-launch-admission-errors'
 import {
   ARTIFACT_SHARING_DISABLED_CODE,
   ARTIFACT_SHARING_DISABLED_MESSAGE,
@@ -62,6 +63,31 @@ describe('mapRuntimeError', () => {
     expect(response).toMatchObject({
       ok: false,
       error: { code: 'succession_directory_full' }
+    })
+  })
+
+  // 10z.5 R287: a caller-resume refused for a live holder keeps its sentence and recovery steps
+  // across the wire (structured passthrough) instead of collapsing to `runtime_error`.
+  it('preserves resume_target_owned_by_another_pane with its message and data', () => {
+    const data = {
+      sessionId: '44444444-4444-4444-8444-444444444444',
+      holderPaneKey: 'tab1:leaf-victim',
+      holderTerminal: 'term_abc',
+      via: 'claude_foreground' as const,
+      chair: null,
+      nextSteps: ['Use that pane, or close it first: orca terminal close --terminal term_abc']
+    }
+    const error = new ResumeTargetLiveRefusedError('Claude session X is already running.', data)
+
+    const response = mapRuntimeError('req_1', { runtimeId: 'runtime-1' }, error)
+
+    expect(response).toMatchObject({
+      ok: false,
+      error: {
+        code: 'resume_target_owned_by_another_pane',
+        message: 'Claude session X is already running.',
+        data
+      }
     })
   })
 

@@ -951,7 +951,9 @@ export function launchAdmissionBundle(
       findConnectedPtyForPane: (paneKey) =>
         typeof runtime?.findConnectedPtyForPane === 'function'
           ? runtime.findConnectedPtyForPane(paneKey) !== undefined
-          : false
+          : false,
+      // [10z.5 R287] A stub without the confirm is unwired: rules 1-2 are skipped.
+      callerResume: typeof runtime?.confirmClaudeForegroundOnPane === 'function' ? runtime : null
     }
   }
 }

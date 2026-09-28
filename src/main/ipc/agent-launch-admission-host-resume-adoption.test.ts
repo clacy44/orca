@@ -48,6 +48,7 @@ describe('D-R163 M3 negatives 3/4: HOST_RESUME null-predecessor success, and hos
       notice: () => {},
       contestedLineage: () => {},
       findConnectedPtyForPane: () => false,
+      callerResume: null,
       ...overrides
     }
   }
@@ -175,5 +176,39 @@ describe('D-R163 M3 negatives 3/4: HOST_RESUME null-predecessor success, and hos
       .prepare(`SELECT * FROM agent_audit ORDER BY seq DESC LIMIT 1`)
       .get() as { verb: string }
     expect(auditRow.verb).toBe('launch_spawn_failed')
+  })
+
+  // [10z.5 R287] HOST_RESUME is the sweep's own restore: it never reads the caller-resume liveness
+  // deps, even when they would refuse a caller resume of the same session.
+  it('10z.5 R287: a host_restore admission never calls the caller-resume liveness deps', async () => {
+    const db = freshDb()
+    const never = vi.fn(() => {
+      throw new Error('caller-resume deps must not be called')
+    })
+    const callerResume = {
+      findConnectedPtyForPane: never,
+      getPersistedPtyIdForLeaf: never,
+      confirmClaudeForegroundOnPane: never,
+      liveReportPanesForSession: never,
+      takeControllerInventoryForSweep: never,
+      terminalHandleForPane: never,
+      manifestChairForSession: never
+    }
+    const admission: LaunchAdmission = {
+      kind: 'host-resume',
+      sessionId: 'unheld-sess',
+      predecessorPaneKey: null,
+      executionHostId: HOST_ID,
+      launchGeneration: 'gen-1',
+      evidence: 'host_restore'
+    }
+    await admitAgentLaunch(
+      () => db,
+      opts({ command: 'claude --resume unheld-sess' }),
+      admission,
+      ctx({ callerResume } as never)
+    )
+    expect(never).not.toHaveBeenCalled()
+    expect(db.newestLaunchForPane(HOST_ID, 'tab1:leaf-a')?.evidence).toBe('host_restore')
   })
 })

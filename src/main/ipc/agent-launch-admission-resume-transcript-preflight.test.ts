@@ -57,6 +57,7 @@ describe('S10-21c B-final F4, D-R159 finding 4: caller_resume resume-transcript 
       notice: () => {},
       contestedLineage: () => {},
       findConnectedPtyForPane: () => false,
+      callerResume: null,
       ...overrides
     }
   }

@@ -60,6 +60,7 @@ describe('INV-P-023: admitAgentLaunch host-integrity chokepoint', () => {
       notice: () => {},
       contestedLineage: () => {},
       findConnectedPtyForPane: () => false,
+      callerResume: null,
       ...overrides
     }
   }
