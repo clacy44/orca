@@ -9,6 +9,7 @@
 import { readFileSync } from 'node:fs'
 import { startDaemon, type DaemonHandle } from './daemon-main'
 import { createPtySubprocess } from './pty-subprocess'
+import { createDaemonRunawayProtection } from './daemon-runaway-protection'
 import { warmWindowsConptyOnce } from './windows-conpty-warmup'
 import { warmPwshAvailabilityCache } from '../pwsh'
 import {
@@ -137,6 +138,7 @@ async function main(): Promise<void> {
     daemonLog.log('predecessor-end', predecessorEnd)
   }
   void warmPwshAvailabilityCache()
+  const protection = createDaemonRunawayProtection(daemonLog, logFilePath)
 
   // Why: detached daemons destroy stderr, so the preflight's console.warn is lost;
   // surface a degraded TCC attribution here where it's diagnosable (F2).
@@ -302,6 +304,7 @@ async function main(): Promise<void> {
         }
       : {}),
     log: daemonLog,
+    onHeapPressureExit: protection.onHeapPressureExit,
     preparePtySpawn: runMacosLoginPreflight,
     ...(deathWatch
       ? {
@@ -312,6 +315,7 @@ async function main(): Promise<void> {
     spawnSubprocess: (opts) =>
       createPtySubprocess({
         ...opts,
+        onForegroundScanAnomaly: protection.foregroundScanAnomalyFor(opts.sessionId),
         ...(process.platform === 'darwin'
           ? {
               onMacosTccSpawnStrategy: (strategy) =>
@@ -334,6 +338,7 @@ async function main(): Promise<void> {
     }
   })
   deathWatch?.start()
+  protection.startStallWatchdog()
 
   // Signal readiness to parent via IPC (if available)
   if (process.send) {

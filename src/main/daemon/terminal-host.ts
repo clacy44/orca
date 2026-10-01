@@ -30,6 +30,7 @@ export class TerminalHost {
   private spawnSubprocess: TerminalHostOptions['spawnSubprocess']
   private onSessionReaped: TerminalHostOptions['onSessionReaped']
   private onFinalCheckpoint: TerminalHostOptions['onFinalCheckpoint']
+  private onResizeRejected: TerminalHostOptions['onResizeRejected']
   private maxTombstones: number
   private creationFenced = false
   private disposePromise: Promise<void> | null = null
@@ -40,6 +41,7 @@ export class TerminalHost {
     this.spawnSubprocess = opts.spawnSubprocess
     this.onSessionReaped = opts.onSessionReaped
     this.onFinalCheckpoint = opts.onFinalCheckpoint
+    this.onResizeRejected = opts.onResizeRejected
     this.maxTombstones = opts.maxTombstones ?? DEFAULT_MAX_TOMBSTONES
     this.killedTombstones = new TerminalHostTombstones(this.maxTombstones)
   }
@@ -63,6 +65,7 @@ export class TerminalHost {
           killedTombstones: this.killedTombstones,
           spawnSubprocess: this.spawnSubprocess,
           creationFenced: this.creationFenced,
+          onResizeRejected: this.onResizeRejected,
           onDeadSessionRemoved: (sessionId) => this.agentSessionGenerations.forget(sessionId),
           onSessionCreated: (sessionId, generation, isAlive) =>
             this.agentSessionGenerations.remember(sessionId, generation, isAlive),
@@ -224,6 +227,17 @@ export class TerminalHost {
 
   listSessions(): SessionInfo[] {
     return listLiveTerminalHostSessions(this.sessions, this.agentSessionOwners)
+  }
+
+  /** W2 heap shed: number of live sessions whose pending output was dropped. */
+  shedPendingOutput(): number {
+    let shed = 0
+    for (const session of this.sessions.values()) {
+      if (session.isAlive && session.shedPendingOutput() > 0) {
+        shed += 1
+      }
+    }
+    return shed
   }
 
   /** R117 FIX 5: per-session pendingOutputBytes for the 60s heap/backlog self-report — bypasses

@@ -25,6 +25,13 @@ import { readCurrentProcessMacSystemResolverHealth } from '../network/macos-syst
 import { PRODUCER_PAUSE_FAILSAFE_MS, type SubprocessHandle } from './session'
 import { checkPtySpawnHealth } from './pty-subprocess'
 import { createNoopDaemonFileLog, type DaemonFileLog } from './daemon-file-log'
+import {
+  createRateLimitedEventLog,
+  type RateLimitedEventLog
+} from './daemon-rate-limited-event-log'
+import { createResizeRejectedLog } from './daemon-pty-size'
+import { destroyOverdeepSockets, startDaemonHeapPressureGuard } from './daemon-heap-pressure-guard'
+import { SOCKET_WRITE_CEILING_BYTES } from './daemon-stream-socket-write-ceiling'
 import { isTuiAgent } from '../../shared/tui-agent-config'
 import { parsePtyStartupIngressIntent } from '../../shared/pty-startup-ingress'
 import { unlinkOwnedDaemonPidFile, unlinkOwnedDaemonTokenFile } from './daemon-spawner'
@@ -71,6 +78,8 @@ export type DaemonServerOptions = {
   protocolVersion?: number
   onIdleShutdown?: () => void
   onRpcShutdown?: () => void
+  /** W2: ends the process once the heap-pressure guard has logged daemon_heap_exit; absent in tests. */
+  onHeapPressureExit?: () => void
   /** Direct-construction-only controls; production uses the compiled initial-adoption timeout. */
   initialAdoptionTestConfig?: {
     timeoutMs: number
@@ -125,6 +134,7 @@ export const PRODUCER_PAUSE_REASSERT_MS = Math.round(
 // distinct from the RPC pausePty/resumePty path's 'main', so one controller's resume can never
 // release the other's pause.
 const SOCKET_DEPTH_PAUSE_REASON = 'socket-depth'
+const STREAM_CEILING_HOLD_LOG_INTERVAL_MS = 60_000
 
 export class DaemonServer {
   // Why: survive long enough to adopt a first client pair, but don't orphan forever if the parent crashes first.
@@ -162,6 +172,8 @@ export class DaemonServer {
   private ptySpawnHealthCheck: () => Promise<void>
   private preparePtySpawn: () => Promise<void>
   private log: DaemonFileLog
+  private logStreamCeilingHold: RateLimitedEventLog = () => {}
+  private logResizeRejected: ReturnType<typeof createResizeRejectedLog> = () => {}
   private transportSockets = new Set<Socket>()
   private createOrAttachInFlight = 0
   private idleShutdownState: 'running' | 'idle-shutdown-pending' | 'shutting-down' = 'running'
@@ -190,7 +202,13 @@ export class DaemonServer {
         return (
           extracted.statelessQueryData + extracted.statefulQueryData + extracted.oscColorQueryData
         )
-      }
+      },
+      onCeilingHold: ({ sessionId, writableLength, droppedChars }) =>
+        this.logStreamCeilingHold(sessionId, {
+          sessionIdSuffix: sessionId.slice(-10),
+          writableLength,
+          droppedChars
+        })
     }
   )
   // Facts ride the stream queue as control entries so they hold byte order (else a fact could arrive after the reveal snapshot).
@@ -212,6 +230,7 @@ export class DaemonServer {
   private historySeedTransfers = new TerminalHistorySeedTransferRegistry()
   private stopStreamBacklogProbe: () => void = () => {}
   private stopHeapObservabilitySampler: () => void = () => {}
+  private stopHeapPressureGuard: () => void = () => {}
   // R117 FIX 3: sessionId -> {clientId, reassert interval} while that session's producer is paused
   // off its own client socket's depth; re-fires below the session-side PRODUCER_PAUSE_FAILSAFE_MS
   // (5s) self-resume. clientId lets a 'drain' on that client resume every session it paused (H1).
@@ -259,6 +278,7 @@ export class DaemonServer {
     this.onAuthenticatedClientPair = opts.onAuthenticatedClientPair ?? (() => {})
     this.host = new TerminalHost({
       spawnSubprocess: opts.spawnSubprocess,
+      onResizeRejected: (sessionId, size) => this.logResizeRejected(sessionId, size),
       // Why host-level and not the attach callback: a session whose client transport already dropped
       // has no attachment left to fire exit bookkeeping, and the daemon must still notice it can idle.
       onSessionReaped: (sessionId) => {
@@ -283,6 +303,12 @@ export class DaemonServer {
       backgroundedSessionIdSuffixes: this.transientFactRelay.backgroundedSessionIdSuffixes()
     }))
     this.log = opts.log ?? createNoopDaemonFileLog()
+    this.logResizeRejected = createResizeRejectedLog(this.log)
+    this.logStreamCeilingHold = createRateLimitedEventLog(
+      this.log,
+      'stream-ceiling-hold',
+      STREAM_CEILING_HOLD_LOG_INTERVAL_MS
+    )
     // R117 FIX 5: unconditional (no env gate), unlike startDaemonStreamBacklogProbe above.
     this.stopHeapObservabilitySampler = startDaemonHeapObservabilitySampler(
       () => ({
@@ -295,6 +321,31 @@ export class DaemonServer {
       }),
       this.log
     )
+    this.stopHeapPressureGuard = startDaemonHeapPressureGuard({
+      log: this.log,
+      describe: () => ({
+        clients: Array.from(this.clients.values(), (client) => ({
+          clientId: client.clientId,
+          streamWritableLength: client.streamSocket?.writableLength ?? 0,
+          controlWritableLength: client.controlSocket.writableLength ?? 0,
+          batcherQueuedChars: this.streamDataBatcher.queuedCharsForClient(client.clientId)
+        })),
+        sessions: this.host.listPendingOutputByteCounts()
+      }),
+      shed: () => {
+        const batcher = this.streamDataBatcher.shedDroppableQueues()
+        return {
+          batcherSessions: batcher.sessions,
+          batcherDroppedChars: batcher.droppedChars,
+          pendingSessionsOverflowed: this.host.shedPendingOutput(),
+          socketsDestroyed: destroyOverdeepSockets(
+            this.clients.values(),
+            SOCKET_WRITE_CEILING_BYTES
+          )
+        }
+      },
+      exit: opts.onHeapPressureExit ?? (() => {})
+    }).stop
   }
 
   // R117 FIX 3 (D-R164 H1): pause this session's producer while its client socket is deep, with
@@ -619,6 +670,7 @@ export class DaemonServer {
     this.stopEndpointOwnershipWatch()
     this.stopStreamBacklogProbe()
     this.stopHeapObservabilitySampler()
+    this.stopHeapPressureGuard()
     for (const sessionId of Array.from(this.producerPauseReassertTimers.keys())) {
       this.clearProducerPauseReassert(sessionId)
     }

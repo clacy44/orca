@@ -23,6 +23,8 @@ export type StreamQueueEntry = {
   sequenceChars?: number
   seq?: number
   transformed?: boolean
+  /** Query copy left by a keep-tail drop; never itself dropped, or it would re-salvage forever. */
+  salvage?: boolean
   control?: DaemonEvent
 }
 
@@ -87,10 +89,10 @@ export function dropOldestQueuedForSession(
   sessionId: string,
   keepTailChars: number,
   salvageDroppedData: (dropped: string) => string
-): void {
+): number {
   let toDrop = (batch.queuedCharsBySession.get(sessionId) ?? 0) - keepTailChars
   if (toDrop <= 0) {
-    return
+    return 0
   }
   const totalDropped = toDrop
   let droppedSequenceChars = 0
@@ -105,7 +107,7 @@ export function dropOldestQueuedForSession(
   let insertGapAt = -1
   for (let i = 0; i < batch.queue.length && toDrop > 0; i++) {
     const entry = batch.queue[i]
-    if (entry.sessionId !== sessionId) {
+    if (entry.sessionId !== sessionId || entry.salvage) {
       continue
     }
     if (entry.control) {
@@ -143,7 +145,7 @@ export function dropOldestQueuedForSession(
   }
   const dropped = totalDropped - toDrop
   if (dropped <= 0) {
-    return
+    return 0
   }
   batch.queuedChars -= dropped
   batch.queuedCharsBySession.set(
@@ -177,11 +179,25 @@ export function dropOldestQueuedForSession(
     const at = existingGap
       ? batch.queue.findIndex((e) => e.control === existingGap) + 1
       : insertGapAt
-    batch.queue.splice(at, 0, { sessionId, data: salvaged, sequenceChars: 0 })
-    batch.queuedChars += salvaged.length
-    batch.queuedCharsBySession.set(
-      sessionId,
-      (batch.queuedCharsBySession.get(sessionId) ?? 0) + salvaged.length
-    )
+    const prior = batch.queue[at]
+    if (prior?.salvage && prior.sessionId === sessionId) {
+      // Why: salvage entries are never re-dropped, so a repeat drop folds into the standing one under the same O(1) cap.
+      const merged = (prior.data + salvaged).slice(0, DROPPED_QUERY_SALVAGE_MAX_CHARS)
+      const added = merged.length - prior.data.length
+      prior.data = merged
+      batch.queuedChars += added
+      batch.queuedCharsBySession.set(
+        sessionId,
+        (batch.queuedCharsBySession.get(sessionId) ?? 0) + added
+      )
+    } else {
+      batch.queue.splice(at, 0, { sessionId, data: salvaged, sequenceChars: 0, salvage: true })
+      batch.queuedChars += salvaged.length
+      batch.queuedCharsBySession.set(
+        sessionId,
+        (batch.queuedCharsBySession.get(sessionId) ?? 0) + salvaged.length
+      )
+    }
   }
+  return dropped
 }

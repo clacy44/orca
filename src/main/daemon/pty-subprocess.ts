@@ -57,7 +57,10 @@ import {
 } from '../pty/powerlevel10k-wizard-env'
 import { isWindowsGitBashShellPath, resolveWindowsGitBashShellPath } from '../git-bash'
 import { WINDOWS_GIT_BASH_SHELL } from '../../shared/windows-terminal-shell'
-import { resolveAgentForegroundProcessWithAvailability } from '../providers/agent-foreground-process'
+import {
+  resolveAgentForegroundProcessWithAvailability,
+  type AgentForegroundResolutionOptions
+} from '../providers/agent-foreground-process'
 import { readWindowsConptyProcessIds } from '../providers/windows-conpty-process-membership'
 import {
   isAgentForegroundWrapperProcess,
@@ -136,6 +139,18 @@ export type PtySubprocessOptions = {
   terminalWindowsWslDistro?: string | null
   terminalWindowsPowerShellImplementation?: 'auto' | 'powershell.exe' | 'pwsh.exe'
   onMacosTccSpawnStrategy?: (strategy: 'wrapped' | 'direct') => void
+  /** Stale parent links (PID reuse) skipped by a foreground scan; counts only, no commands or paths. */
+  onForegroundScanAnomaly?: (anomaly: ForegroundScanAnomaly) => void
+}
+
+export type ForegroundScanAnomaly = {
+  staleEdgesSkipped: number
+  rowCount: number
+  descendantCount: number
+  cycleLength: number
+  cutIndex: number
+  cutBy: 'creation-time' | 'midpoint'
+  fresh: boolean
 }
 
 function deleteRequestedDaemonEnvKeys(
@@ -972,6 +987,29 @@ export function createPtySubprocess(opts: PtySubprocessOptions): SubprocessHandl
       shouldInspectOuterWrapperFallback(fallbackProcess) ||
       // Why: agent-spawned helpers can become the PTY foreground child, but the Unix process tree still identifies the parent agent.
       process.platform !== 'win32')
+  const foregroundScanAnomalyOption: Pick<AgentForegroundResolutionOptions, 'onTreeAnomaly'> =
+    opts.onForegroundScanAnomaly
+      ? {
+          onTreeAnomaly: ({
+            staleEdgesSkipped,
+            rows,
+            descendants,
+            cycleLength,
+            cutIndex,
+            cutBy,
+            fresh
+          }) =>
+            opts.onForegroundScanAnomaly?.({
+              staleEdgesSkipped,
+              rowCount: rows.length,
+              descendantCount: descendants.length,
+              cycleLength,
+              cutIndex,
+              cutBy,
+              fresh
+            })
+        }
+      : {}
   const scheduleAgentForegroundRefresh = (fallbackProcess: string | null): void => {
     if (dead || !proc.pid) {
       return
@@ -1037,7 +1075,8 @@ export function createPtySubprocess(opts: PtySubprocessOptions): SubprocessHandl
       }
     }
     void resolveAgentForegroundProcessWithAvailability(proc.pid, fallbackProcess, {
-      contextPaths: agentForegroundContextPaths
+      contextPaths: agentForegroundContextPaths,
+      ...foregroundScanAnomalyOption
     })
       .then<string | void>(({ processName, available }) => {
         if (dead) {
@@ -1157,6 +1196,7 @@ export function createPtySubprocess(opts: PtySubprocessOptions): SubprocessHandl
           {
             contextPaths: agentForegroundContextPaths,
             fresh: true,
+            ...foregroundScanAnomalyOption,
             ...(process.platform === 'win32'
               ? {
                   forceProcessScan: true,

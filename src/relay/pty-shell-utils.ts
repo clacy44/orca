@@ -11,6 +11,7 @@ import {
 } from '../shared/agent-process-recognition'
 import { getFirstCommandToken } from '../shared/command-token-scanner'
 import { getProcessTableSnapshot, type ProcessTableRow } from '../shared/process-table-snapshot'
+import { collectProcessDescendants } from '../shared/process-tree-descendants'
 import {
   resolveOuterWrapperForegroundProcess,
   shouldInspectOuterWrapperForegroundProcess
@@ -193,29 +194,6 @@ export function isProcessAlive(pid: number): boolean {
   }
 }
 
-function collectDescendants(
-  rows: ProcessTableRow[],
-  rootPid: number
-): (ProcessTableRow & { depth: number })[] {
-  const childrenByParent = new Map<number, ProcessTableRow[]>()
-  for (const row of rows) {
-    const children = childrenByParent.get(row.ppid) ?? []
-    children.push(row)
-    childrenByParent.set(row.ppid, children)
-  }
-
-  const descendants: (ProcessTableRow & { depth: number })[] = []
-  const stack = (childrenByParent.get(rootPid) ?? []).map((row) => ({ row, depth: 1 }))
-  while (stack.length > 0) {
-    const { row, depth } = stack.pop()!
-    descendants.push({ ...row, depth })
-    for (const child of childrenByParent.get(row.pid) ?? []) {
-      stack.push({ row: child, depth: depth + 1 })
-    }
-  }
-  return descendants
-}
-
 function candidateScore(row: ProcessTableRow & { depth: number }): number {
   return (row.stat.includes('+') ? 10_000 : 0) + row.depth
 }
@@ -238,7 +216,7 @@ async function getRecognizedForegroundDescendant(
   try {
     const rows = await getProcessTableSnapshot()
     const root = rows.find((row) => row.pid === pid)
-    const candidates = collectDescendants(rows, pid).sort(
+    const candidates = collectProcessDescendants(rows, pid).descendants.sort(
       (a, b) => candidateScore(b) - candidateScore(a)
     )
     // Why: SSH relays do not have the daemon's async wrapper cache. Inspect the

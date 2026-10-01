@@ -21,6 +21,7 @@ export type DaemonStartOptions = {
   log?: DaemonFileLog
   onIdleShutdown?: () => void
   onRpcShutdown?: () => void
+  onHeapPressureExit?: DaemonServerOptions['onHeapPressureExit']
   initialAdoptionTestConfig?: DaemonServerOptions['initialAdoptionTestConfig']
 }
 
@@ -52,6 +53,7 @@ export async function startDaemon(opts: DaemonStartOptions): Promise<DaemonHandl
     ...(opts.log ? { log: opts.log } : {}),
     ...(opts.onIdleShutdown ? { onIdleShutdown: opts.onIdleShutdown } : {}),
     ...(opts.onRpcShutdown ? { onRpcShutdown: opts.onRpcShutdown } : {}),
+    ...(opts.onHeapPressureExit ? { onHeapPressureExit: opts.onHeapPressureExit } : {}),
     ...(opts.initialAdoptionTestConfig
       ? { initialAdoptionTestConfig: opts.initialAdoptionTestConfig }
       : {})

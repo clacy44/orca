@@ -24,6 +24,7 @@ export function appendDaemonStreamData(
   if (
     last?.sessionId === sessionId &&
     !last.control &&
+    !last.salvage &&
     !last.transformed &&
     options.transformed !== true &&
     last.data.length < COALESCE_MAX_CHARS
@@ -48,4 +49,39 @@ export function appendDaemonStreamData(
   const queuedAfter = (batch.queuedCharsBySession.get(sessionId) ?? 0) + data.length
   batch.queuedCharsBySession.set(sessionId, queuedAfter)
   return queuedAfter
+}
+
+export function queuedCharsForSession(batch: PendingStreamDataBatch, sessionId: string): number {
+  let chars = 0
+  for (const entry of batch.queue) {
+    if (entry.sessionId === sessionId) {
+      chars += entry.data.length
+    }
+  }
+  return chars
+}
+
+/** Removes and returns the session's queued entries (in order), settling the batch's char accounting. */
+export function takeSessionEntries(
+  batch: PendingStreamDataBatch,
+  sessionId: string
+): PendingStreamDataBatch['queue'] {
+  const taken: PendingStreamDataBatch['queue'] = []
+  const retained: PendingStreamDataBatch['queue'] = []
+  let takenChars = 0
+  for (const entry of batch.queue) {
+    if (entry.sessionId === sessionId) {
+      taken.push(entry)
+      takenChars += entry.data.length
+    } else {
+      retained.push(entry)
+    }
+  }
+  if (taken.length > 0) {
+    batch.queue = retained
+    batch.queuedChars -= takenChars
+    batch.queuedCharsBySession.delete(sessionId)
+    batch.droppableQueuedSessionIds.delete(sessionId)
+  }
+  return taken
 }

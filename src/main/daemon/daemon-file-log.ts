@@ -153,6 +153,8 @@ export type PredecessorEndClassification =
   | 'fatal_exception'
   | 'endpoint_lost'
   | 'login_session_retired'
+  | 'heap_pressure_exit'
+  | 'stall_abort'
   | 'aborted_start'
   | 'silent_death'
   | 'no_predecessor'
@@ -170,13 +172,17 @@ const CLEAN_TERMINAL_EVENT = 'daemon-log-closed'
 // close() that would make it 'clean_shutdown'.
 const DIAGNOSABLE_ABRUPT_EVENTS: Readonly<Record<string, PredecessorEndClassification>> = {
   'uncaught-exception-fatal': 'fatal_exception',
-  'endpoint-ownership-lost': 'endpoint_lost'
+  'endpoint-ownership-lost': 'endpoint_lost',
+  // D-26b W1: the watchdog worker SIGKILLs right after this line, so no close() ever follows it.
+  'daemon-stall-abort': 'stall_abort'
 }
 // S10-12 R4 fix: onRetire logs this immediately before close() — a crash-style exit (no PTY
 // teardown, per daemon-entry.ts's own comment) that the terminal 'daemon-log-closed' marker
 // which follows it would otherwise misreport as an ordinary clean_shutdown.
 const ABNORMAL_EVENTS_BEFORE_CLOSE: Readonly<Record<string, PredecessorEndClassification>> = {
-  'login-session-dead-retire': 'login_session_retired'
+  'login-session-dead-retire': 'login_session_retired',
+  // D-26b W2: logged immediately before the guard's close() + process.exit.
+  daemon_heap_exit: 'heap_pressure_exit'
 }
 // S10-12 R4 fix: every generation appends its own 'startup' (and 'predecessor-end', if it had
 // a predecessor) BEFORE startDaemon() runs. A process that dies in that narrow window — e.g.

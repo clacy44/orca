@@ -26,6 +26,8 @@ export type TerminalHostOptions = {
     snapshot: TerminalSnapshot,
     records: TakePendingOutputResult['records']
   ) => void
+  // Why: a refused resize must be visible in daemon.log; the daemon owns the log.
+  onResizeRejected?: (sessionId: string, size: { cols: number; rows: number }) => void
   // Why: tests need deterministic tombstone eviction without thousands of sessions.
   maxTombstones?: number
 }

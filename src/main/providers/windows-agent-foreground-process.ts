@@ -9,6 +9,7 @@ import {
   resolveOuterWrapperForegroundProcess,
   shouldInspectOuterWrapperForegroundProcess
 } from '../../shared/foreground-wrapper-agent'
+import type { ProcessTreeAnomaly } from '../../shared/process-tree-descendants'
 import { isShellProcess } from '../../shared/shell-process-detection'
 import {
   queryWindowsProcessDescendants,
@@ -24,6 +25,8 @@ export type AgentForegroundResolutionOptions = {
   forceProcessScan?: boolean
   /** Lazily proves which global descendants still belong to this ConPTY. */
   readWindowsConptyProcessIds?: () => Promise<ReadonlySet<number> | null>
+  /** Called when the walk skipped stale parent links (PID reuse); receives only the scan result, never logged raw. */
+  onTreeAnomaly?: (anomaly: ProcessTreeAnomaly) => void
 }
 
 export type WindowsAgentForegroundResolution = {
@@ -55,10 +58,10 @@ export async function resolveWindowsAgentForegroundProcessWithAvailability(
   fallbackProcess: string,
   options: AgentForegroundResolutionOptions
 ): Promise<WindowsAgentForegroundResolution> {
-  const candidates = await queryWindowsProcessDescendants(
-    shellPid,
-    options.fresh === true ? { fresh: true } : {}
-  )
+  const candidates = await queryWindowsProcessDescendants(shellPid, {
+    ...(options.fresh === true ? { fresh: true } : {}),
+    ...(options.onTreeAnomaly ? { onTreeAnomaly: options.onTreeAnomaly } : {})
+  })
   if (!candidates) {
     return { available: false, processName: null }
   }
@@ -218,11 +221,17 @@ function windowsCandidateIsAncestor(
   other: WindowsProcessRow,
   candidatesByPid: ReadonlyMap<number, WindowsProcessRow>
 ): boolean {
+  // Why: stale parent links can form a cycle; a seen-set capped at the map size keeps the walk finite.
+  const seen = new Set<number>([other.pid])
   let current = candidatesByPid.get(other.ppid)
-  while (current) {
+  while (current && seen.size <= candidatesByPid.size) {
     if (current.pid === candidate.pid) {
       return true
     }
+    if (seen.has(current.pid)) {
+      return false
+    }
+    seen.add(current.pid)
     current = candidatesByPid.get(current.ppid)
   }
   return false
