@@ -54,14 +54,13 @@ export function collectProcessDescendants<Row extends ProcessTreeRow>(
 
   const childrenByParent = new Map<number, Row[]>()
   let staleEdgesSkipped = 0
-  let creationTimeCuts = 0
+  const ageCutRows: Row[] = []
   for (const row of rows) {
     if (row.pid === rootPid) {
       continue
     }
     if (isOlderThanParent(row)) {
-      staleEdgesSkipped += 1
-      creationTimeCuts += 1
+      ageCutRows.push(row)
       continue
     }
     const children = childrenByParent.get(row.ppid)
@@ -93,12 +92,24 @@ export function collectProcessDescendants<Row extends ProcessTreeRow>(
     descendants.push({ ...row, depth })
     pushChildren(row.pid, depth + 1)
   }
+  // Why: an age cut only matters where the walk would have crossed it — the root's own ancestor chain,
+  // or a recycled-PID holder inside the walked tree. An unrelated orphan elsewhere is not an anomaly.
+  const countedCuts = new Set<number>()
+  if (upWalk.cutChildPid !== undefined) {
+    countedCuts.add(upWalk.cutChildPid)
+  }
+  for (const row of ageCutRows) {
+    if (visited.has(row.ppid)) {
+      countedCuts.add(row.pid)
+    }
+  }
+  staleEdgesSkipped += countedCuts.size
   return {
     descendants,
     staleEdgesSkipped,
     cycleLength: upWalk.cycleLength,
     cutIndex: upWalk.ancestors.length,
-    cutBy: upWalk.usedMidpoint || creationTimeCuts === 0 ? 'midpoint' : 'creation-time'
+    cutBy: upWalk.usedMidpoint || countedCuts.size === 0 ? 'midpoint' : 'creation-time'
   }
 }
 
@@ -107,16 +118,22 @@ function walkUpFromRoot<Row extends ProcessTreeRow>(
   rootPid: number,
   maxSteps: number,
   isOlderThanParent: (row: Row) => boolean
-): { ancestors: number[]; cycleLength: number; usedMidpoint: boolean } {
+): {
+  ancestors: number[]
+  cycleLength: number
+  usedMidpoint: boolean
+  /** The chain member (or the root) whose parent link was cut by age. */
+  cutChildPid?: number
+} {
   const chain: number[] = []
   const seen = new Set<number>([rootPid])
   const rootRow = rowsByPid.get(rootPid)
   let child = rootRow
   let current = rowsByPid.get(rootRow?.ppid ?? Number.NaN)
-  let cutByCreationTime = false
+  let cutChildPid: number | undefined
   while (child && current && !seen.has(current.pid) && chain.length < maxSteps) {
     if (isOlderThanParent(child)) {
-      cutByCreationTime = true
+      cutChildPid = child.pid
       break
     }
     chain.push(current.pid)
@@ -124,15 +141,16 @@ function walkUpFromRoot<Row extends ProcessTreeRow>(
     child = current
     current = rowsByPid.get(current.ppid)
   }
-  if (!cutByCreationTime && child && current && isOlderThanParent(child)) {
-    cutByCreationTime = true
+  if (cutChildPid === undefined && child && current && isOlderThanParent(child)) {
+    cutChildPid = child.pid
   }
-  if (cutByCreationTime) {
+  if (cutChildPid !== undefined) {
     // Why: the raw cycle length (ignoring ages) only feeds diagnostics.
     return {
       ancestors: chain,
       cycleLength: rawCycleLength(rowsByPid, rootPid, maxSteps),
-      usedMidpoint: false
+      usedMidpoint: false,
+      cutChildPid
     }
   }
   // Why: a chain that returns to the root is a cycle, and without creation times ppid alone cannot say which

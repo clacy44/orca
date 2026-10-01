@@ -64,16 +64,18 @@ describe('stall poller CPU gate on the duration abort', () => {
     expect(log.mock.calls.some((c) => c[0] === 'daemon-stall-abort')).toBe(false)
   })
 
-  it('needs CPU growth of at least 0.8x the stall duration', () => {
+  it('needs CPU growth of at least the configured ratio of the stall duration', () => {
+    const ratio = DEFAULT_STALL_WATCHDOG_THRESHOLDS.abortCpuRatio
+    expect(ratio).toBe(0.5)
     const slow = poller()
-    run(slow, 31_000, 0.79)
+    run(slow, 31_000, ratio - 0.01)
     expect(abort).not.toHaveBeenCalled()
 
     nowMs = 0
     cpuMs = 0
     log.mockReset()
     const fast = poller()
-    run(fast, 31_000, 0.8)
+    run(fast, 31_000, ratio)
     expect(abort).toHaveBeenCalledTimes(1)
   })
 
@@ -122,6 +124,9 @@ describe('daemon stall watchdog worker (CPU gate, no log file, failed kill)', ()
     abortStallMs: 500,
     abortRssGrowthStallMs: 60_000,
     abortRssGrowthBytes: 4_000 * 1024 * 1024,
+    // Why: a loaded CI host may give the spinning thread well under a full core; the pure poller
+    // tests above pin the production ratio.
+    abortCpuRatio: 0.2,
     resyncGapMs: 10_000,
     ...extra
   })

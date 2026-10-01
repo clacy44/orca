@@ -33,7 +33,7 @@ export const DEFAULT_STALL_WATCHDOG_THRESHOLDS: StallWatchdogThresholds = {
   abortStallMs: 30_000,
   abortRssGrowthStallMs: 6_000,
   abortRssGrowthBytes: 512 * 1024 * 1024,
-  abortCpuRatio: 0.8,
+  abortCpuRatio: 0.5,
   blockedLogIntervalMs: 30_000,
   resyncGapMs: 2_000
 }

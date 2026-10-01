@@ -216,12 +216,12 @@ function parseWindowsProcessJsonRows(stdout: string): WindowsProcessRow[] | null
   }
 }
 
-// Why: Windows PowerShell 5.1 serializes DateTime as "/Date(ms)/", PowerShell 7 as ISO-8601, and
-// wmic as "yyyymmddHHMMSS.ffffff+UUU" (UUU = minutes east of UTC).
-function parseWindowsCreationDate(value: unknown): number | undefined {
-  if (typeof value === 'number') {
-    return Number.isFinite(value) ? value : undefined
-  }
+// Why: Windows PowerShell 5.1 serializes DateTime as "/Date(ms)/", PowerShell 7 as ISO-8601 with an
+// offset or Z, and wmic as "yyyymmddHHMMSS.ffffff+UUU" (UUU = minutes east of UTC). Nothing else is
+// trusted: a lenient parse of garbage (e.g. "0") would date a process and cut a real parent link.
+const STRICT_ISO_8601 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/
+
+export function parseWindowsCreationDate(value: unknown): number | undefined {
   if (typeof value !== 'string') {
     return undefined
   }
@@ -235,8 +235,11 @@ function parseWindowsCreationDate(value: unknown): number | undefined {
     const utcMs = Date.UTC(+y, +mo - 1, +d, +h, +mi, +s) + Number(micro) / 1000
     return utcMs - Number(offset) * 60_000
   }
-  const parsed = Date.parse(value)
-  return Number.isFinite(parsed) ? parsed : undefined
+  if (STRICT_ISO_8601.test(value)) {
+    const parsed = Date.parse(value)
+    return Number.isFinite(parsed) ? parsed : undefined
+  }
+  return undefined
 }
 
 function stringFromWindowsProcessField(value: unknown): string {

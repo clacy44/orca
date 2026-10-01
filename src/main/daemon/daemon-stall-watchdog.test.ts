@@ -167,6 +167,9 @@ describe('daemon stall watchdog worker', () => {
     abortStallMs: 60_000,
     abortRssGrowthStallMs: 60_000,
     abortRssGrowthBytes: 4_000 * MB,
+    // Why: a loaded host may give the spinning thread well under a full core; the pure poller
+    // tests pin the production ratio.
+    abortCpuRatio: 0.2,
     resyncGapMs: 10_000,
     ...extra
   })
@@ -209,10 +212,14 @@ describe('daemon stall watchdog worker', () => {
     await waitFor(() => onAbort.mock.calls.length > 0)
 
     const events = readEvents()
-    expect(events.map((e) => e.event)).toEqual(['daemon-event-loop-stall', 'daemon-stall-abort'])
+    const names = events.map((e) => e.event)
+    expect(names.indexOf('daemon-event-loop-stall')).toBeGreaterThanOrEqual(0)
+    expect(names.indexOf('daemon-event-loop-stall')).toBeLessThan(
+      names.indexOf('daemon-stall-abort')
+    )
     expect(events[0]).toMatchObject({ src: 'daemon', pid: process.pid })
     expect(events[0].stalledMs as number).toBeGreaterThanOrEqual(100)
-    expect(events[1]).toMatchObject({ reason: 'duration', exitCode: DAEMON_EXIT_STALL })
+    expect(events.at(-1)).toMatchObject({ reason: 'duration', exitCode: DAEMON_EXIT_STALL })
     expect(onAbort).toHaveBeenCalledTimes(1)
     expect(onAbort.mock.calls[0][0]).toMatchObject({ reason: 'duration' })
   })
@@ -313,10 +320,13 @@ describe('daemon stall watchdog worker', () => {
     expect(
       result.signal === 'SIGKILL' || (process.platform === 'win32' && result.status === 1)
     ).toBe(true)
-    expect(readEvents().map((e) => e.event)).toEqual([
-      'daemon-event-loop-stall',
-      'daemon-stall-abort'
-    ])
-    expect(readEvents()[1]).toMatchObject({ reason: 'duration', exitCode: DAEMON_EXIT_STALL })
+    // Why: a stall-blocked line may legitimately interleave on a loaded host, so assert order, not the list.
+    const names = readEvents().map((e) => e.event)
+    expect(names.indexOf('daemon-event-loop-stall')).toBeGreaterThanOrEqual(0)
+    expect(names.indexOf('daemon-event-loop-stall')).toBeLessThan(
+      names.indexOf('daemon-stall-abort')
+    )
+    expect(names.at(-1)).toBe('daemon-stall-abort')
+    expect(readEvents().at(-1)).toMatchObject({ reason: 'duration', exitCode: DAEMON_EXIT_STALL })
   })
 })
