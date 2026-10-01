@@ -57,6 +57,10 @@ import {
   unbindLocalProviderListeners,
   rebindLocalProviderListeners
 } from '../ipc/pty'
+import { notifyDaemonDiedFanout } from './daemon-died-fanout-registry'
+
+// Why re-exported: index.ts and the daemon-init tests have always reached the handler through here.
+export { notifyDaemonDiedFanout, setDaemonDiedFanoutHandler } from './daemon-died-fanout-registry'
 import { isStartupDiagnosticsEnabled, logStartupDiagnostic } from '../startup/startup-diagnostics'
 import { getDaemonLogFilePath, getDaemonStderrLogFilePath } from '../observability/logs-directory'
 import {
@@ -119,21 +123,8 @@ let adapter: DaemonProvider | null = null
 // Why: coalesce concurrent restartDaemon() calls so two entries can't race the 7-step sequence against a half-spawned replacement.
 let restartInFlight: Promise<RestartDaemonResult> | null = null
 
-// [S10-21a C7d, Ruling 34 Addendum 23] Set once from index.ts (which holds the orchestration db
-// and hostId this module has no coupling to) — invoked with every ptyId the synthetic-exit
-// fanout kills, so main can write one 'daemon_died' audit row per pane before the respawn lands.
-// A narrow callback, not a full runtime import, to keep this module's daemon-lifecycle-only
-// dependency graph unchanged.
-let onDaemonDiedFanout: ((ptyIds: readonly string[]) => void) | null = null
-
 // INV-P-023: nonces this process forked a daemon with — such a daemon runs on our token.
 const selfSpawnedDaemonLaunchNonces = new Set<string>()
-
-export function setDaemonDiedFanoutHandler(
-  handler: ((ptyIds: readonly string[]) => void) | null
-): void {
-  onDaemonDiedFanout = handler
-}
 
 function getRuntimeDir(): string {
   const dir = join(app.getPath('userData'), 'daemon')
@@ -1207,6 +1198,9 @@ export async function initDaemonPtyProvider(
     runtimeDir,
     packagedAppVersion: process.platform === 'darwin' && app.isPackaged ? app.getVersion() : null,
     historyPath: getHistoryDir(),
+    // Why: R315 — a manual restart owns the teardown, so its socket loss is not a crash to recover from.
+    isRecoverySuppressed: () => Boolean(restartInFlight),
+    recordBreadcrumb: (name, data) => recordDurableCrashBreadcrumb(name, data),
     // Why: on daemon death, ensureConnected() detects the dead socket and calls this to fork a replacement before retrying.
     respawn: async (reason: DaemonRespawnReason) => {
       // Why: attribute rather than emit — the launcher below is the one that completes the
@@ -1449,7 +1443,7 @@ async function runRestartDaemon(): Promise<RestartDaemonResult> {
   // BEFORE the fanout below reaches the renderer — see `setDaemonDiedFanoutHandler`'s own doc
   // comment for why this is a callback rather than a direct orchestration-db import here.
   if (killedPtyIds.size > 0) {
-    onDaemonDiedFanout?.([...killedPtyIds])
+    notifyDaemonDiedFanout([...killedPtyIds])
   }
   currentOnly.fanoutSyntheticExits(-1)
   if (currentAdapter instanceof DegradedDaemonPtyProvider) {
@@ -1482,6 +1476,8 @@ async function runRestartDaemon(): Promise<RestartDaemonResult> {
     runtimeDir,
     packagedAppVersion: process.platform === 'darwin' && app.isPackaged ? app.getVersion() : null,
     historyPath: getHistoryDir(),
+    isRecoverySuppressed: () => Boolean(restartInFlight),
+    recordBreadcrumb: (name, data) => recordDurableCrashBreadcrumb(name, data),
     respawn: async (reason: DaemonRespawnReason) => {
       // Why: attribute rather than emit — the launcher below is the one that completes the
       // replacement, and emitting here would fire before the outcome is known.

@@ -6,6 +6,8 @@ import {
 } from '../../../shared/agent-session-resume'
 import { parsePaneKey } from '../../../shared/stable-pane-id'
 import { lastInputBlocksHibernation } from './agent-hibernation-input-guard'
+import { guardRefusal, hasUnsettledOrUnknownDispatch } from './agent-hibernation-guard'
+import type { HibernationGuardSnapshot } from '../../../shared/hibernation-guard-types'
 import { isCompletedPiCompatibleAgentWithLiveRecoveryRecord } from './pi-compatible-live-recovery-record'
 import type { GlobalSettings } from '../../../shared/global-settings-types'
 import type { TerminalLayoutSnapshot, TerminalTab } from '../../../shared/terminal-tab-types'
@@ -29,6 +31,8 @@ export type AgentHibernationPlannerSnapshot = {
   sleepingAgentSessionsByPaneKey: Record<string, SleepingAgentSessionRecord | undefined>
   lastTerminalInputAtByPaneKey: Record<string, number | undefined>
   foregroundTerminalLastSeenAtByTabId: Record<string, number | undefined>
+  // Why: R316 — host-computed protected set + background-work verdicts; null fails closed.
+  hibernationGuard: HibernationGuardSnapshot | null
   now: number
 }
 
@@ -111,12 +115,6 @@ function getEntryTabId(entry: AgentStatusEntry): string | null {
   return parsePaneKey(entry.paneKey)?.tabId ?? null
 }
 
-// Why: provider done hooks can fire mid-Dispatch; only runtime-confirmed settlement makes sleep safe.
-const hasUnsettledOrUnknownDispatch = ({ orchestration }: AgentStatusEntry): boolean =>
-  orchestration
-    ? !['completed', 'failed', 'circuit_broken'].includes(orchestration.dispatchStatus ?? '')
-    : false
-
 function getEligiblePane(args: {
   entry: AgentStatusEntry
   tab: TerminalTab
@@ -126,6 +124,7 @@ function getEligiblePane(args: {
   lastTerminalInputAtByPaneKey: AgentHibernationPlannerSnapshot['lastTerminalInputAtByPaneKey']
   foregroundTerminalLastSeenAtByTabId: AgentHibernationPlannerSnapshot['foregroundTerminalLastSeenAtByTabId']
   mobileLockedPtyIds: Set<string>
+  hibernationGuard: HibernationGuardSnapshot
   now: number
   idleMs: number
 }): EligiblePane | null {
@@ -149,6 +148,7 @@ function getEligiblePane(args: {
     entry.interrupted === true ||
     Boolean(entry.subagents?.length) ||
     hasUnsettledOrUnknownDispatch(entry) ||
+    guardRefusal(entry, args.hibernationGuard) ||
     (sleepingRecord && !hasOnlyLivePiCompatibleRecoveryIdentity)
   ) {
     return null
@@ -251,7 +251,7 @@ function getAgentEntriesByTabId(
 export function planAgentHibernationCandidates(
   snapshot: AgentHibernationPlannerSnapshot
 ): AgentHibernationCandidate[] {
-  if (snapshot.settings?.experimentalAgentHibernation !== true) {
+  if (snapshot.settings?.experimentalAgentHibernation !== true || !snapshot.hibernationGuard) {
     return []
   }
   const idleMs = getEffectiveAgentHibernationIdleMs(snapshot.settings.agentHibernationIdleMs)
@@ -296,6 +296,7 @@ export function planAgentHibernationCandidates(
           lastTerminalInputAtByPaneKey: snapshot.lastTerminalInputAtByPaneKey,
           foregroundTerminalLastSeenAtByTabId: snapshot.foregroundTerminalLastSeenAtByTabId,
           mobileLockedPtyIds,
+          hibernationGuard: snapshot.hibernationGuard,
           now: snapshot.now,
           idleMs
         })

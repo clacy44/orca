@@ -24,6 +24,7 @@ import {
   type TerminalOutputFrameChunk,
   type TerminalOutputMeta
 } from '../terminal-output-frame-chunks'
+import { HIBERNATION_GUARD_MAX_PANE_KEYS } from '../../../../shared/hibernation-guard-types'
 import { TERMINAL_PANE_SPLIT_SOURCES } from '../../../../shared/feature-education-telemetry'
 import type { TerminalOscLinkRange } from '../../../../shared/terminal-osc-link-ranges'
 import {
@@ -1232,6 +1233,12 @@ const TerminalSetAutoRestoreFit = z.object({
   ms: z.number().nullable()
 })
 
+// Why: R316 — the renderer's agent-sleep planner asks the host which panes are protected and
+// whether any background work is still running behind each one.
+const TerminalHibernationGuard = z.object({
+  paneKeys: z.array(z.string().min(1).max(256)).max(HIBERNATION_GUARD_MAX_PANE_KEYS)
+})
+
 export const TERMINAL_METHODS: RpcAnyMethod[] = [
   defineMethod({
     name: 'terminal.list',
@@ -1271,6 +1278,11 @@ export const TERMINAL_METHODS: RpcAnyMethod[] = [
           }
         : result
     }
+  }),
+  defineMethod({
+    name: 'terminal.hibernationGuard',
+    params: TerminalHibernationGuard,
+    handler: async (params, { runtime }) => runtime.hibernationGuardForPanes(params.paneKeys)
   }),
   defineMethod({
     name: 'terminal.resolveActive',

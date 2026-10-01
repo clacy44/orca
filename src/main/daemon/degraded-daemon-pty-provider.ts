@@ -236,6 +236,10 @@ export class DegradedDaemonPtyProvider implements IPtyProvider {
     )
   }
 
+  // R315: same daemon-adapters-only scope as onWriteUnavailable above.
+  onSessionsLostToDaemonDeath: NonNullable<IPtyProvider['onSessionsLostToDaemonDeath']> = (cb) =>
+    combineUnsubscribes(this.allDaemonAdapters().map((a) => a.onSessionsLostToDaemonDeath(cb)))
+
   // S10-12 R2: same daemon-adapters-only scope as onWriteUnavailable above.
   onTransportDisconnected(callback: () => void): () => void {
     return combineUnsubscribes(

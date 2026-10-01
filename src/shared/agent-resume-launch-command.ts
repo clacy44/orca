@@ -65,6 +65,8 @@ export function finishAgentResumeStartupPlan(
     agentEnv?: Record<string, string> | null
     ompResumeFilePath?: string | null
     sessionOptions?: Record<string, SessionOptionValue>
+    /** R315: Claude-only host-authored prompt appended last; never reaches launchConfig. */
+    resumePrompt?: string | null
   },
   baseCommand: Extract<ResolvedAgentLaunchCommand, { ok: true }> | { ok: true; command: string },
   argv: readonly string[],
@@ -89,7 +91,8 @@ export function finishAgentResumeStartupPlan(
       baseCommand.command,
       argv,
       shell,
-      modelEffort
+      modelEffort,
+      args.resumePrompt
     ),
     expectedProcess,
     followupPrompt: null,
@@ -155,11 +158,12 @@ export function buildAgentResumeLaunchCommand(
   // `--model`/`--effort`, agent-session-option-catalog-claude-codex.ts:88/164-166) — undefined
   // fields are never stripped or added, so a pane with no stored prefs gets a byte-identical
   // command to today (design (d)).
-  modelEffort?: { model?: string; effort?: string }
+  modelEffort?: { model?: string; effort?: string },
+  resumePrompt?: string | null
 ): string {
   const argv = resumeArgv.slice(1)
   if (agent === 'claude') {
-    return buildClaudeResumeLaunchCommand(baseCommand, argv, shell, modelEffort)
+    return buildClaudeResumeLaunchCommand(baseCommand, argv, shell, modelEffort, resumePrompt)
   }
   const resumeArgs = argv.map((arg) => quoteStartupArg(arg, shell)).join(' ')
   return resumeArgs ? `${baseCommand} ${resumeArgs}` : baseCommand
@@ -180,7 +184,9 @@ export function buildClaudeResumeLaunchCommand(
   baseCommand: string,
   resumeArgs: readonly string[],
   shell: AgentStartupShell,
-  modelEffort?: { model?: string; effort?: string }
+  modelEffort?: { model?: string; effort?: string },
+  // R315: appended LAST, only on the fully-modelled splice path; every fallback omits it.
+  resumePrompt?: string | null
 ): string {
   // [G1-10o B7/C45 fix, narrowed per D-R170 M15] Neither pref field is allow-listed at every
   // writer (model has no allow-list at all — chairs-manifest.ts:67-69). A dash-leading value
@@ -298,7 +304,13 @@ export function buildClaudeResumeLaunchCommand(
   for (let i = cuts.length - 1; i >= 0; i -= 1) {
     result = `${result.slice(0, cuts[i].start)}${result.slice(cuts[i].end)}`
   }
-  return terminatorStart !== null ? result : `${result} ${insertion}`
+  if (terminatorStart !== null) {
+    // Why: after claude's own `--` a trailing token would be positional input, so the prompt is dropped.
+    return result
+  }
+  return resumePrompt
+    ? `${result} ${insertion} ${quoteStartupArg(resumePrompt, shell)}`
+    : `${result} ${insertion}`
 }
 
 export type ClaudeSessionIdSpliceResult = { ok: true; command: string } | { ok: false }

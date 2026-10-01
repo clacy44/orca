@@ -69,6 +69,13 @@ export type PtyApi = {
   write: (id: string, data: string) => void
   writeAccepted: (id: string, data: string) => Promise<boolean>
   onWriteUnavailable?: (callback: (payload: { id: string }) => void) => () => void
+  /** R315: main announces ptys that died with the daemon (boolean chair verdict, never text). */
+  onSessionsLostToDaemonDeath?: (
+    callback: (payload: {
+      epoch: number
+      sessions: { id: string; paneKey: string | null; reanchor: boolean }[]
+    }) => void
+  ) => () => void
   resize: (id: string, cols: number, rows: number) => void
   claimViewport: (id: string, cols: number, rows: number) => void
   reportGeometry: (id: string, cols: number, rows: number) => void

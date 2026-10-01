@@ -111,6 +111,14 @@ export type { PtyProcessInfo, PtySpawnResult }
 
 type PtyProbeOptions = { signal?: AbortSignal }
 
+export type PtySessionsLostToDaemonDeathEvent = {
+  /** Monotonic per adapter; with an id it names one death, so a reused pty id is a new death. */
+  epoch: number
+  sessions: { id: string; incarnationId?: string }[]
+  /** Milliseconds from the unplanned transport loss to this announcement (diagnostics only). */
+  sinceDisconnectMs?: number
+}
+
 export type IPtyProvider = {
   /** Fresh local spawns currently route to an in-process, non-persistent fallback. */
   readonly routesFreshSpawnsToLocalProvider?: true
@@ -162,6 +170,14 @@ export type IPtyProvider = {
    * only respawnable endpoints like the daemon adapter can signal it.
    */
   onWriteUnavailable?: (callback: (payload: { id: string }) => void) => () => void
+  /**
+   * R315: ptys that died WITH the daemon, announced only after the replacement daemon answered an
+   * authoritative inventory (never on an unknown one). Once per death epoch per id. Optional:
+   * only respawnable daemon endpoints can signal it.
+   */
+  onSessionsLostToDaemonDeath?: (
+    callback: (event: PtySessionsLostToDaemonDeathEvent) => void
+  ) => () => void
   /**
    * S10-12 R2: the provider's authenticated transport itself closed or errored
    * (daemon socket death) — distinct from onWriteUnavailable (write-failure-driven,

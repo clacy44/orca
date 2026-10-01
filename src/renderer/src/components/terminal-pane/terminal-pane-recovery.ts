@@ -1,5 +1,6 @@
 import { useAppStore } from '@/store'
 import { recordRendererCrashBreadcrumb } from '@/lib/crash-breadcrumb-recorder'
+import { markDaemonSessionLostRelaunch } from './pty-daemon-session-loss-registry'
 import {
   _resetTerminalInputQuarantineForTests,
   armTerminalInputQuarantine
@@ -29,6 +30,11 @@ export type TerminalPaneRecoveryReason =
   | 'input-rejected-by-host'
   // A restore was requested for a certified-dead pipeline (reveal path).
   | 'restore-blocked'
+  // R315: main announced this pty died WITH the daemon, after the replacement daemon answered an
+  // authoritative inventory. Skips the liveness probe for the same reason as
+  // 'input-rejected-by-host': the evidence came from the process that owns the truth, and the
+  // local probe only reads a stale activeSessionIds cache that deliberately keeps lost ids.
+  | 'daemon-session-lost'
 
 type RecoveryRequest = {
   tabId: string
@@ -58,6 +64,11 @@ type RecoveryRequest = {
    * used to capture a sleeping record before a daemon-death-class remount, so it presents as a
    * RESTORE rather than a fresh session. */
   paneKey?: string
+  /** R315: main's verdict that this lost pane is a host-scoped chair. Only meaningful for
+   *  'daemon-session-lost'; it reaches the sleeping record as a flag, never as text. */
+  reanchor?: boolean
+  /** R315: every lost pane key of the tab; marked as the recovery relaunch once the remount lands. */
+  relaunchPaneKeys?: string[]
 }
 
 // Why a cap exists: recovery must never loop. If the remounted pane wedges
@@ -260,9 +271,21 @@ export async function requestTerminalPaneRecovery(request: RecoveryRequest): Pro
   // certified-dead all reattach to the SAME still-alive shell, never a respawn). Idempotent
   // (the action itself never overwrites an existing record) and best-effort — a throw here must
   // never block the remount that actually recovers the pane.
-  if (request.reason === 'input-undeliverable' && request.paneKey) {
+  // R315: 'daemon-session-lost' captures too (a no-op when the dispatcher already captured every
+  // lost pane first — the action never overwrites), now carrying the chair verdict.
+  if (
+    (request.reason === 'input-undeliverable' || request.reason === 'daemon-session-lost') &&
+    request.paneKey
+  ) {
     try {
-      useAppStore.getState().captureSleepingAgentSessionForDaemonDeath(request.paneKey)
+      const { captureSleepingAgentSessionForDaemonDeath } = useAppStore.getState()
+      if (request.reason === 'daemon-session-lost') {
+        captureSleepingAgentSessionForDaemonDeath(request.paneKey, {
+          reanchor: request.reanchor === true
+        })
+      } else {
+        captureSleepingAgentSessionForDaemonDeath(request.paneKey)
+      }
     } catch {
       // Best-effort — see the comment above.
     }
@@ -292,6 +315,12 @@ export async function requestTerminalPaneRecovery(request: RecoveryRequest): Pro
       reason: request.reason
     })
     return false
+  }
+  if (request.reason === 'daemon-session-lost') {
+    markDaemonSessionLostRelaunch([
+      ...(request.relaunchPaneKeys ?? []),
+      ...(request.paneKey ? [request.paneKey] : [])
+    ])
   }
   const timestamps = recoveryTimestampsByTabId.get(request.tabId) ?? []
   timestamps.push(Date.now())

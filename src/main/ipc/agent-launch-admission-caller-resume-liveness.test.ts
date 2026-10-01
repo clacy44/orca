@@ -9,12 +9,14 @@ import { admitAgentLaunch, type LaunchAdmission } from './agent-launch-admission
 import type { CallerResumeLivenessDeps } from './agent-launch-admission-caller-resume'
 import { resolveResumeTranscript } from '../startup/resolve-resume-transcript'
 import type { PtySpawnOptions } from '../providers/pty-provider-contract'
+import { DAEMON_DEATH_REANCHOR_PROMPT } from '../../shared/daemon-death-reanchor-prompt'
 
 vi.mock('../startup/resolve-resume-transcript', () => ({
   resolveResumeTranscript: vi.fn(async () => ({ path: '/fake/transcript.jsonl', hasTurn: true }))
 }))
 
 const X = '44444444-4444-4444-8444-444444444444'
+const ROTATED = '77777777-7777-4777-8777-777777777777'
 const HOLDER = 'tab1:leaf-victim'
 const CLAIMANT = 'tab1:leaf-a'
 const OTHER = 'tab2:66666666-6666-4666-8666-666666666666'
@@ -112,6 +114,43 @@ describe('10z.5 R287: caller-resume liveness refusal', () => {
     expect(db.newestLaunchForPane(HOST_ID, HOLDER)?.session_id).toBe(X)
     expect(db.paneHoldingSession(HOST_ID, X)).toBe(HOLDER)
   }
+
+  // R315 (T10): the same refusal with the chair re-anchor prompt appended to the resume command,
+  // for a pane whose own newest row is NOT X (Claude rotated the session before the row did).
+  it('R315 T10: a prompt-bearing `--resume X` into a pane whose newest row is not X is refused when another pane runs claude on X — nothing superseded', async () => {
+    const db = freshDb()
+    db.recordLaunch({
+      hostId: HOST_ID,
+      paneKey: CLAIMANT,
+      agentType: 'claude',
+      sessionId: ROTATED,
+      launchGeneration: 'gen-0',
+      executionHostId: HOST_ID,
+      evidence: 'host_launch'
+    })
+    const d = deps({ confirmClaudeForegroundOnPane: vi.fn(async () => true) })
+
+    const error = await admit(
+      db,
+      d,
+      [],
+      CALLER,
+      `claude --resume ${X} --effort high '${DAEMON_DEATH_REANCHOR_PROMPT}'`
+    ).catch((e: unknown) => e)
+
+    expect(error).toMatchObject({
+      code: 'resume_target_owned_by_another_pane',
+      data: { sessionId: X, holderPaneKey: HOLDER, via: 'claude_foreground' }
+    })
+    expect(db.newestLaunchForPane(HOST_ID, HOLDER)?.session_id).toBe(X)
+    expect(db.paneHoldingSession(HOST_ID, X)).toBe(HOLDER)
+    expect(db.newestLaunchForPane(HOST_ID, CLAIMANT)?.session_id).toBe(ROTATED)
+    expect(db.paneHoldingSession(HOST_ID, ROTATED)).toBe(CLAIMANT)
+    expect(lastAudit(db)).toMatchObject({
+      verb: 'launch_refused',
+      reason_code: `resume_target_owned_by_another_pane holder=${HOLDER} via=claude_foreground`
+    })
+  })
 
   it('a claude-foreground holder refuses with the exact message, audit row naming the holder, nothing recorded, no notice', async () => {
     const db = freshDb()

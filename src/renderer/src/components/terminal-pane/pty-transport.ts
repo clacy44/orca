@@ -25,6 +25,7 @@ import {
   getEagerPtyBufferHandle,
   isPtyDataHandlerShutdownPending
 } from './pty-dispatcher'
+import { ptyDaemonSessionLostHandlers } from './pty-daemon-session-loss-registry'
 import {
   clearConsumedPreHandlerPtyExit,
   drainPreHandlerPtyData,
@@ -619,6 +620,7 @@ export function createIpcPtyTransport(opts: IpcPtyTransportOptions = {}): PtyTra
       data: (data: string, meta?: PtyDataMeta) => void
       replay: (data: string) => void
       writeUnavailable: () => void
+      daemonSessionLost: (info: { reanchor: boolean; paneKeys: string[] }) => void
     }
   >()
   const ownedExitHandlers = new Map<string, (code: number) => void>()
@@ -649,6 +651,9 @@ export function createIpcPtyTransport(opts: IpcPtyTransportOptions = {}): PtyTra
       }
       if (ptyWriteUnavailableHandlers.get(id) === owned.writeUnavailable) {
         ptyWriteUnavailableHandlers.delete(id)
+      }
+      if (ptyDaemonSessionLostHandlers.get(id) === owned.daemonSessionLost) {
+        ptyDaemonSessionLostHandlers.delete(id)
       }
     }
     ownedDataAndReplayHandlers.delete(id)
@@ -690,10 +695,17 @@ export function createIpcPtyTransport(opts: IpcPtyTransportOptions = {}): PtyTra
       }
     }
     ptyWriteUnavailableHandlers.set(id, writeUnavailable)
+    const daemonSessionLost = (info: { reanchor: boolean; paneKeys: string[] }): void => {
+      if (ptyId === id) {
+        storedCallbacks.onDaemonSessionLost?.(info)
+      }
+    }
+    ptyDaemonSessionLostHandlers.set(id, daemonSessionLost)
     ownedDataAndReplayHandlers.set(id, {
       data: dataHandler,
       replay: replayHandler,
-      writeUnavailable
+      writeUnavailable,
+      daemonSessionLost
     })
     if (!isPtyDataHandlerShutdownPending(id)) {
       drainPreHandlerPtyData(id, dataHandler)

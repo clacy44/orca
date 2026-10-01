@@ -152,6 +152,8 @@ export type HookListenerState = {
   claudeRunningNonAgentTaskPaneKeys: Set<string>
   /** Panes whose latest authoritative Claude cron inventory still has a scheduled job. */
   claudeActiveSessionCronPaneKeys: Set<string>
+  /** R316: panes whose LAST lead turn boundary carried a `background_tasks` inventory. A pane absent here has not told us what is running behind it, so agent-sleep must not read `done` as idle. */
+  claudeBackgroundInventoryObservedPaneKeys: Set<string>
   /** Live thread-spawn children per Codex pane. */
   codexSubagentRosterByPaneKey: Map<string, CodexSubagentRoster>
   /** Incremental parent/child rollout cursors for Codex collaboration v2. */
@@ -190,6 +192,7 @@ export function createHookListenerState(): HookListenerState {
     claudeUnconfirmedRestoredStatusPaneKeys: new Set(),
     claudeRunningNonAgentTaskPaneKeys: new Set(),
     claudeActiveSessionCronPaneKeys: new Set(),
+    claudeBackgroundInventoryObservedPaneKeys: new Set(),
     codexSubagentRosterByPaneKey: new Map(),
     codexSubagentTranscriptByPaneKey: new Map(),
     codexLeadStateByPaneKey: new Map()
@@ -207,6 +210,7 @@ export function clearPaneCacheState(state: HookListenerState, paneKey: string): 
   state.claudeUnconfirmedRestoredStatusPaneKeys.delete(paneKey)
   state.claudeRunningNonAgentTaskPaneKeys.delete(paneKey)
   state.claudeActiveSessionCronPaneKeys.delete(paneKey)
+  state.claudeBackgroundInventoryObservedPaneKeys.delete(paneKey)
   state.codexSubagentRosterByPaneKey.delete(paneKey)
   state.codexSubagentTranscriptByPaneKey.delete(paneKey)
   state.codexLeadStateByPaneKey.delete(paneKey)
@@ -254,6 +258,7 @@ export function movePaneCacheState(
   movePaneScopedSetEntries(state.claudeUnconfirmedRestoredStatusPaneKeys, fromPaneKey, toPaneKey)
   movePaneScopedSetEntries(state.claudeRunningNonAgentTaskPaneKeys, fromPaneKey, toPaneKey)
   movePaneScopedSetEntries(state.claudeActiveSessionCronPaneKeys, fromPaneKey, toPaneKey)
+  movePaneScopedSetEntries(state.claudeBackgroundInventoryObservedPaneKeys, fromPaneKey, toPaneKey)
   movePaneScopedMapEntries(state.codexSubagentRosterByPaneKey, fromPaneKey, toPaneKey)
   movePaneScopedMapEntries(state.codexSubagentTranscriptByPaneKey, fromPaneKey, toPaneKey)
   movePaneScopedMapEntries(state.codexLeadStateByPaneKey, fromPaneKey, toPaneKey)
@@ -299,6 +304,7 @@ export function clearAllListenerCaches(state: HookListenerState): void {
   state.claudeUnconfirmedRestoredStatusPaneKeys.clear()
   state.claudeRunningNonAgentTaskPaneKeys.clear()
   state.claudeActiveSessionCronPaneKeys.clear()
+  state.claudeBackgroundInventoryObservedPaneKeys.clear()
   state.codexSubagentRosterByPaneKey.clear()
   state.codexSubagentTranscriptByPaneKey.clear()
   state.codexLeadStateByPaneKey.clear()
@@ -2704,6 +2710,7 @@ export function markClaudeLeadTurnInterrupted(state: HookListenerState, paneKey:
   state.claudeLeadStateByPaneKey.set(paneKey, { state: 'done', interrupted: true })
   state.claudeRunningNonAgentTaskPaneKeys.delete(paneKey)
   state.claudeActiveSessionCronPaneKeys.delete(paneKey)
+  state.claudeBackgroundInventoryObservedPaneKeys.delete(paneKey)
 }
 
 /** Rebuild a pane's working roster from a persisted snapshot; live activity confirms a seed, a complete task inventory may reap an unconfirmed one whose finish hook arrived while Orca was offline. */
@@ -2865,6 +2872,7 @@ function normalizeClaudeEvent(
     state.claudeSubagentRosterByPaneKey.delete(paneKey)
     state.claudeRunningNonAgentTaskPaneKeys.delete(paneKey)
     state.claudeActiveSessionCronPaneKeys.delete(paneKey)
+    state.claudeBackgroundInventoryObservedPaneKeys.delete(paneKey)
     state.claudeLeadStateByPaneKey.set(paneKey, { state: 'done' })
     return buildClaudeStatusPayload(state, eventName, promptText, paneKey, hookPayload, {
       stateName: 'done',
@@ -2923,6 +2931,10 @@ function normalizeClaudeEvent(
       backgroundTasks.hasRunningNonAgentTask,
       interrupted === true
     )
+    state.claudeBackgroundInventoryObservedPaneKeys.add(paneKey)
+  } else if (eventAgentId === undefined && isTurnBoundary) {
+    // Why: R316 — a lead turn boundary with no inventory leaves the pane's background work unknown.
+    state.claudeBackgroundInventoryObservedPaneKeys.delete(paneKey)
   }
   if (sessionCronInventoryPresent && eventAgentId === undefined) {
     if (hasActiveSessionCron && interrupted !== true) {
@@ -3038,6 +3050,7 @@ function normalizeClaudeEvent(
   if (interrupted && eventAgentId === undefined) {
     state.claudeRunningNonAgentTaskPaneKeys.delete(paneKey)
     state.claudeActiveSessionCronPaneKeys.delete(paneKey)
+    state.claudeBackgroundInventoryObservedPaneKeys.delete(paneKey)
   }
 
   const effectiveState = resolveClaudePaneState(state, paneKey, {

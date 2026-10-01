@@ -11,6 +11,7 @@ export type {
   PtyProcessInfo,
   PtyProviderBufferSnapshot,
   PtySpawnOptions,
+  PtySessionsLostToDaemonDeathEvent,
   PtySpawnResult,
   PtyTransientFact
 } from './pty-provider-contract'

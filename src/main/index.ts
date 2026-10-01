@@ -32,7 +32,7 @@ import {
   getPaneKeyForPtyId,
   type CodexHomeLaunchContext
 } from './ipc/pty'
-import { shouldSkipDaemonDiedAudit } from './runtime/orchestration/daemon-died-audit-skip'
+import { writeDaemonDiedAuditRows } from './runtime/orchestration/daemon-died-audit'
 import {
   initDaemonPtyProvider,
   disconnectDaemon,
@@ -2846,34 +2846,12 @@ void app.whenReady().then(async () => {
   // Best-effort: a throw here must never take the daemon-restart/death path down with it.
   setDaemonDiedFanoutHandler((ptyIds) => {
     try {
-      const db = runtimeService.getOrchestrationDb()
-      const hostId = runtimeService.getOrchestrationCompatibilityHostId()
-      for (const ptyId of ptyIds) {
-        const paneKey = getPaneKeyForPtyId(ptyId)
-        if (!paneKey) {
-          continue
-        }
-        const row = db.newestLaunchForPane(hostId, paneKey)
-        // [S10-21a C7f, D-R114 fix 3] A plain shell with no launch row and no registered agent
-        // row on this pane has nothing for the audit to be "about" — skip it rather than write
-        // a `daemon_died` fact attributed to an agent that was never here.
-        if (
-          shouldSkipDaemonDiedAudit(
-            row !== undefined,
-            row === undefined ? db.getAgentByPaneKey(hostId, paneKey) : undefined
-          )
-        ) {
-          continue
-        }
-        db.writeAgentAudit({
-          agentId: row?.agent_id ?? null,
-          actorPaneKey: paneKey,
-          actorHostId: hostId,
-          verb: 'daemon_died',
-          outcome: 'observed',
-          reasonCode: `session=${row?.session_id ?? 'unknown'} ptyId=${ptyId}`
-        })
-      }
+      writeDaemonDiedAuditRows({
+        db: runtimeService.getOrchestrationDb(),
+        hostId: runtimeService.getOrchestrationCompatibilityHostId(),
+        ptyIds,
+        paneKeyOf: getPaneKeyForPtyId
+      })
     } catch (error) {
       console.error('[daemon] HARNESS: daemon_died audit fanout failed:', error)
     }
@@ -2892,6 +2870,10 @@ void app.whenReady().then(async () => {
   // live-report-liveness module needs the reporter pane, not a collapsed boolean.
   runtimeService.setLiveReportPanesForSessionCheck((sessionId, opts) =>
     agentHookServer.liveReportPanesForSession(sessionId, opts)
+  )
+  // [R316] Same wiring, background-work verdict — the agent-sleep guard reads it through the runtime.
+  runtimeService.setBackgroundWorkVerdictCheck((paneKey) =>
+    agentHookServer.backgroundWorkVerdict(paneKey)
   )
   // Why here and not beside the other rate-limit resolvers: the pane→lane join needs the runtime,
   // which is constructed after them. A post arriving before this lands falls back to the

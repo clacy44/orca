@@ -9,6 +9,7 @@ import {
   planAgentHibernationCandidates,
   type AgentHibernationPlannerSnapshot
 } from './agent-hibernation-planner'
+import type { HibernationGuardSnapshot } from '../../../shared/hibernation-guard-types'
 
 const NOW = 2_000_000
 const OLD = NOW - DEFAULT_AGENT_HIBERNATION_IDLE_MS - 1
@@ -54,11 +55,22 @@ function entry(overrides: Partial<AgentStatusEntry> = {}): AgentStatusEntry {
   }
 }
 
+// Why: R316 — every pre-existing planner case runs with a host guard that reports each pane idle
+// and unprotected, so those cases keep exercising their own condition and nothing else.
+function idleGuardFor(
+  agentStatusByPaneKey: AgentHibernationPlannerSnapshot['agentStatusByPaneKey']
+): HibernationGuardSnapshot {
+  return {
+    protectedPaneKeys: [],
+    backgroundWork: Object.fromEntries(Object.keys(agentStatusByPaneKey).map((k) => [k, 'idle']))
+  }
+}
+
 function snapshot(
   overrides: Partial<AgentHibernationPlannerSnapshot> = {}
 ): AgentHibernationPlannerSnapshot {
   const agentEntry = entry()
-  return {
+  const base = {
     settings: {
       experimentalAgentHibernation: true,
       agentHibernationIdleMs: DEFAULT_AGENT_HIBERNATION_IDLE_MS
@@ -76,6 +88,9 @@ function snapshot(
     now: NOW,
     ...overrides
   }
+  return Object.hasOwn(overrides, 'hibernationGuard')
+    ? ({ hibernationGuard: null, ...base } as AgentHibernationPlannerSnapshot)
+    : { ...base, hibernationGuard: idleGuardFor(base.agentStatusByPaneKey) }
 }
 
 function plannedWorktrees(input: AgentHibernationPlannerSnapshot): string[] {
@@ -665,5 +680,70 @@ describe('agent sleep planner', () => {
     expect(getEffectiveAgentHibernationIdleMs(DEFAULT_AGENT_HIBERNATION_IDLE_MS + 1)).toBe(
       DEFAULT_AGENT_HIBERNATION_IDLE_MS + 1
     )
+  })
+})
+
+describe('R316 agent-sleep guard', () => {
+  const PANE = `tab-1:${LEAF}`
+  const guard = (patch: Partial<HibernationGuardSnapshot> = {}): HibernationGuardSnapshot => ({
+    protectedPaneKeys: [],
+    backgroundWork: { [PANE]: 'idle' },
+    ...patch
+  })
+
+  it('fails closed with no guard at all', () => {
+    expect(plannedPaneKeys(snapshot({ hibernationGuard: null }))).toEqual([])
+  })
+
+  it('selects an idle, unprotected pane that meets every other condition (positive control)', () => {
+    expect(plannedPaneKeys(snapshot({ hibernationGuard: guard() }))).toEqual([PANE])
+  })
+
+  it('never selects a protected (registered or chair) pane, even when idle and done', () => {
+    expect(
+      plannedPaneKeys(snapshot({ hibernationGuard: guard({ protectedPaneKeys: [PANE] }) }))
+    ).toEqual([])
+  })
+
+  it('never selects a pane whose background-work verdict is busy, unknown or absent', () => {
+    for (const verdict of ['busy', 'unknown'] as const) {
+      expect(
+        plannedPaneKeys(
+          snapshot({ hibernationGuard: guard({ backgroundWork: { [PANE]: verdict } }) })
+        )
+      ).toEqual([])
+    }
+    expect(plannedPaneKeys(snapshot({ hibernationGuard: guard({ backgroundWork: {} }) }))).toEqual(
+      []
+    )
+  })
+
+  it('applies the guard per pane: a protected sibling does not block an idle pane', () => {
+    const other = entry({ paneKey: `tab-1:${OTHER_LEAF}` })
+    const first = entry()
+    const keys = plannedPaneKeys(
+      snapshot({
+        agentStatusByPaneKey: { [first.paneKey]: first, [other.paneKey]: other },
+        terminalLayoutsByTabId: {
+          'tab-1': {
+            root: {
+              type: 'split',
+              direction: 'horizontal',
+              first: { type: 'leaf', leafId: LEAF },
+              second: { type: 'leaf', leafId: OTHER_LEAF }
+            },
+            activeLeafId: LEAF,
+            expandedLeafId: null,
+            ptyIdsByLeafId: { [LEAF]: 'pty-1', [OTHER_LEAF]: 'pty-2' }
+          }
+        },
+        ptyIdsByTabId: { 'tab-1': ['pty-1', 'pty-2'] },
+        hibernationGuard: {
+          protectedPaneKeys: [other.paneKey],
+          backgroundWork: { [first.paneKey]: 'idle', [other.paneKey]: 'idle' }
+        }
+      })
+    )
+    expect(keys).toEqual([first.paneKey])
   })
 })

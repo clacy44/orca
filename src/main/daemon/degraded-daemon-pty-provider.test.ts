@@ -2,7 +2,12 @@ import { describe, expect, it, vi } from 'vitest'
 import { DegradedDaemonPtyProvider } from './degraded-daemon-pty-provider'
 import { DEGRADED_DAEMON_RECOVERY_RETRY_MS } from './degraded-daemon-fresh-spawn-routing'
 import type { DaemonPtyAdapter } from './daemon-pty-adapter'
-import type { IPtyProvider, PtySpawnOptions, PtySpawnResult } from '../providers/types'
+import type {
+  IPtyProvider,
+  PtySessionsLostToDaemonDeathEvent,
+  PtySpawnOptions,
+  PtySpawnResult
+} from '../providers/types'
 import type { PtyProcessInspection } from '../providers/pty-process-inspection'
 import { SessionNotFoundError, TerminalSessionOwnerUnverifiedError } from './daemon-errors'
 
@@ -14,6 +19,10 @@ type ProviderMock = IPtyProvider & {
   emitExit: (id: string, code: number) => void
   triggerWriteUnavailable: (id: string) => void
   onWriteUnavailable: (callback: (payload: { id: string }) => void) => () => void
+  triggerSessionsLost: (event: PtySessionsLostToDaemonDeathEvent) => void
+  onSessionsLostToDaemonDeath: (
+    callback: (event: PtySessionsLostToDaemonDeathEvent) => void
+  ) => () => void
 }
 
 function createProvider(
@@ -26,6 +35,7 @@ function createProvider(
   const replayListeners: ((payload: { id: string; data: string }) => void)[] = []
   const exitListeners: ((payload: { id: string; code: number }) => void)[] = []
   const writeUnavailableListeners: ((payload: { id: string }) => void)[] = []
+  const sessionsLostListeners: ((event: PtySessionsLostToDaemonDeathEvent) => void)[] = []
   return {
     spawn: vi.fn(async (opts: PtySpawnOptions): Promise<PtySpawnResult> => {
       const id = opts.sessionId ?? `${label}-new`
@@ -115,6 +125,22 @@ function createProvider(
       for (const listener of writeUnavailableListeners) {
         listener({ id })
       }
+    },
+    onSessionsLostToDaemonDeath: vi.fn(
+      (callback: (event: PtySessionsLostToDaemonDeathEvent) => void) => {
+        sessionsLostListeners.push(callback)
+        return () => {
+          const idx = sessionsLostListeners.indexOf(callback)
+          if (idx !== -1) {
+            sessionsLostListeners.splice(idx, 1)
+          }
+        }
+      }
+    ),
+    triggerSessionsLost: (event: PtySessionsLostToDaemonDeathEvent) => {
+      for (const listener of sessionsLostListeners) {
+        listener(event)
+      }
     }
   }
 }
@@ -157,6 +183,27 @@ it('forwards dead-endpoint write-unavailable signals from the daemon adapters', 
   unsubscribe()
   current.triggerWriteUnavailable('after-unsubscribe')
   expect(recovered).toEqual(['daemon-pane', 'legacy-pane'])
+})
+
+it('forwards R315 sessions-lost-to-daemon-death announcements from the daemon adapters only', () => {
+  // Why revert-sensitive: this provider is the live localProvider in degraded launch mode and
+  // main subscribes on it; without forwarding, proactive daemon-death recovery has no listener.
+  // The local fallback has no daemon to lose, so it must NOT be subscribed.
+  const current = createDaemonAdapter('daemon')
+  const legacy = createDaemonAdapter('legacy')
+  const fallback = createProvider('fallback')
+  const provider = new DegradedDaemonPtyProvider({ current, legacy: [legacy], fallback })
+  const received: PtySessionsLostToDaemonDeathEvent[] = []
+
+  const unsubscribe = provider.onSessionsLostToDaemonDeath((event) => received.push(event))
+  current.triggerSessionsLost({ epoch: 1, sessions: [{ id: 'daemon-pane' }] })
+  legacy.triggerSessionsLost({ epoch: 1, sessions: [{ id: 'legacy-pane' }] })
+  fallback.triggerSessionsLost({ epoch: 1, sessions: [{ id: 'fallback-pane' }] })
+  expect(received.map((event) => event.sessions[0]?.id)).toEqual(['daemon-pane', 'legacy-pane'])
+
+  unsubscribe()
+  current.triggerSessionsLost({ epoch: 2, sessions: [{ id: 'after-unsubscribe' }] })
+  expect(received).toHaveLength(2)
 })
 
 it('routes attach-only to a legacy session created after startup inventory', async () => {

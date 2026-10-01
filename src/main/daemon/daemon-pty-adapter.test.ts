@@ -801,7 +801,16 @@ describe('DaemonPtyAdapter (IPtyProvider)', () => {
         restartServerOnRespawn()
         await server.start()
       })
-      const healingAdapter = new DaemonPtyAdapter({ socketPath, tokenPath, respawn })
+      // Why recovery suppressed: this test pins the WRITE-driven re-arm latch (STA-2373), which is
+      // still the lazy backstop. R315's proactive recovery would respawn the in-process daemon
+      // before the test can observe the disconnect, so it is turned off here and covered by
+      // daemon-pty-adapter-daemon-loss-recovery.test.ts.
+      const healingAdapter = new DaemonPtyAdapter({
+        socketPath,
+        tokenPath,
+        respawn,
+        isRecoverySuppressed: () => true
+      })
       const recovered: string[] = []
       healingAdapter.onWriteUnavailable(({ id }) => recovered.push(id))
       try {

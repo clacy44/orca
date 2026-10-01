@@ -6,9 +6,15 @@ import {
   requestTerminalPaneRecovery
 } from './terminal-pane-recovery'
 import { isTerminalInputQuarantined } from './terminal-input-quarantine'
+import {
+  _resetDaemonSessionLostRelaunchForTests,
+  isDaemonSessionLostRelaunch
+} from './pty-daemon-session-loss-registry'
 
 const mocks = vi.hoisted(() => ({
   remountTerminalTabForRecovery: vi.fn<(tabId: string) => boolean>(() => true),
+  captureSleepingAgentSessionForDaemonDeath:
+    vi.fn<(paneKey: string, opts?: { reanchor?: boolean }) => void>(),
   recordRendererCrashBreadcrumb: vi.fn(),
   hasPty: vi.fn<(id: string) => Promise<boolean | null>>(async () => true)
 }))
@@ -16,7 +22,8 @@ const mocks = vi.hoisted(() => ({
 vi.mock('@/store', () => ({
   useAppStore: {
     getState: () => ({
-      remountTerminalTabForRecovery: mocks.remountTerminalTabForRecovery
+      remountTerminalTabForRecovery: mocks.remountTerminalTabForRecovery,
+      captureSleepingAgentSessionForDaemonDeath: mocks.captureSleepingAgentSessionForDaemonDeath
     })
   }
 }))
@@ -27,8 +34,10 @@ vi.mock('@/lib/crash-breadcrumb-recorder', () => ({
 
 beforeEach(() => {
   _resetTerminalPaneRecoveryForTests()
+  _resetDaemonSessionLostRelaunchForTests()
   mocks.remountTerminalTabForRecovery.mockClear()
   mocks.remountTerminalTabForRecovery.mockReturnValue(true)
+  mocks.captureSleepingAgentSessionForDaemonDeath.mockClear()
   mocks.recordRendererCrashBreadcrumb.mockClear()
   mocks.hasPty.mockClear()
   mocks.hasPty.mockResolvedValue(true)
@@ -578,6 +587,151 @@ describe('requestTerminalPaneRecovery', () => {
 
       expect(result).toBe(false)
       expect(isTerminalInputQuarantined('tab-gone')).toBe(false)
+    })
+  })
+
+  // R315: main's authoritative "this pty died with the daemon" — evidence from the host on a
+  // healthy replacement daemon, so the local liveness probe (which reads a stale cache) is skipped.
+  describe('daemon-session-lost', () => {
+    it('remounts even when hasPty answers false, without probing', async () => {
+      mocks.hasPty.mockResolvedValue(false)
+
+      const result = await requestTerminalPaneRecovery({
+        tabId: 'tab-1',
+        ptyId: 'pty-1',
+        reason: 'daemon-session-lost'
+      })
+
+      expect(result).toBe(true)
+      expect(mocks.hasPty).not.toHaveBeenCalled()
+      expect(mocks.remountTerminalTabForRecovery).toHaveBeenCalledWith('tab-1')
+    })
+
+    it('captures the pane with the re-anchor verdict before the remount', async () => {
+      const order: string[] = []
+      mocks.captureSleepingAgentSessionForDaemonDeath.mockImplementation(() => {
+        order.push('capture')
+      })
+      mocks.remountTerminalTabForRecovery.mockImplementation(() => {
+        order.push('remount')
+        return true
+      })
+
+      await requestTerminalPaneRecovery({
+        tabId: 'tab-1',
+        ptyId: 'pty-1',
+        reason: 'daemon-session-lost',
+        paneKey: 'tab-1:leaf-1',
+        reanchor: true
+      })
+
+      expect(mocks.captureSleepingAgentSessionForDaemonDeath).toHaveBeenCalledWith('tab-1:leaf-1', {
+        reanchor: true
+      })
+      expect(order).toEqual(['capture', 'remount'])
+    })
+
+    it('captures without the flag when the pane is not a chair', async () => {
+      await requestTerminalPaneRecovery({
+        tabId: 'tab-1',
+        ptyId: 'pty-1',
+        reason: 'daemon-session-lost',
+        paneKey: 'tab-1:leaf-1',
+        reanchor: false
+      })
+
+      expect(mocks.captureSleepingAgentSessionForDaemonDeath).toHaveBeenCalledWith('tab-1:leaf-1', {
+        reanchor: false
+      })
+    })
+
+    it('leaves the input-undeliverable capture unchanged (no options)', async () => {
+      await requestTerminalPaneRecovery({
+        tabId: 'tab-1',
+        ptyId: 'pty-1',
+        reason: 'input-undeliverable',
+        paneKey: 'tab-1:leaf-1'
+      })
+
+      expect(mocks.captureSleepingAgentSessionForDaemonDeath).toHaveBeenCalledWith('tab-1:leaf-1')
+    })
+
+    it('invalidates a later input-undeliverable request from the pre-remount instance', async () => {
+      const instance = registerTerminalPaneRecoveryInstance('tab-1')
+      const generation = captureTerminalPaneRecoveryGeneration('tab-1')
+
+      expect(
+        await requestTerminalPaneRecovery({
+          tabId: 'tab-1',
+          ptyId: 'pty-1',
+          reason: 'daemon-session-lost',
+          terminalRecoveryGeneration: generation,
+          terminalRecoveryInstanceId: instance.id
+        })
+      ).toBe(true)
+
+      expect(
+        await requestTerminalPaneRecovery({
+          tabId: 'tab-1',
+          ptyId: 'pty-1',
+          reason: 'input-undeliverable',
+          terminalRecoveryGeneration: generation,
+          terminalRecoveryInstanceId: instance.id
+        })
+      ).toBe(false)
+      expect(mocks.remountTerminalTabForRecovery).toHaveBeenCalledTimes(1)
+    })
+
+    it('marks the lost panes as a recovery relaunch only once the remount happened', async () => {
+      expect(
+        await requestTerminalPaneRecovery({
+          tabId: 'tab-1',
+          ptyId: 'pty-1',
+          reason: 'daemon-session-lost',
+          paneKey: 'tab-1:leaf-a',
+          relaunchPaneKeys: ['tab-1:leaf-a', 'tab-1:leaf-b']
+        })
+      ).toBe(true)
+      expect(isDaemonSessionLostRelaunch('tab-1:leaf-a')).toBe(true)
+      expect(isDaemonSessionLostRelaunch('tab-1:leaf-b')).toBe(true)
+
+      mocks.remountTerminalTabForRecovery.mockReturnValue(false)
+      await requestTerminalPaneRecovery({
+        tabId: 'tab-2',
+        ptyId: 'pty-2',
+        reason: 'daemon-session-lost',
+        paneKey: 'tab-2:leaf-a',
+        relaunchPaneKeys: ['tab-2:leaf-a']
+      })
+      expect(isDaemonSessionLostRelaunch('tab-2:leaf-a')).toBe(false)
+    })
+
+    it('never marks a relaunch for any other recovery reason', async () => {
+      await requestTerminalPaneRecovery({
+        tabId: 'tab-1',
+        ptyId: 'pty-1',
+        reason: 'input-undeliverable',
+        paneKey: 'tab-1:leaf-a'
+      })
+      expect(isDaemonSessionLostRelaunch('tab-1:leaf-a')).toBe(false)
+    })
+
+    it('remounts nothing for a duplicate request inside the cooldown', async () => {
+      expect(
+        await requestTerminalPaneRecovery({
+          tabId: 'tab-1',
+          ptyId: 'pty-1',
+          reason: 'daemon-session-lost'
+        })
+      ).toBe(true)
+      expect(
+        await requestTerminalPaneRecovery({
+          tabId: 'tab-1',
+          ptyId: 'pty-2',
+          reason: 'daemon-session-lost'
+        })
+      ).toBe(false)
+      expect(mocks.remountTerminalTabForRecovery).toHaveBeenCalledTimes(1)
     })
   })
 })

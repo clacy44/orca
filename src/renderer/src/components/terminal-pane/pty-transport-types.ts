@@ -114,6 +114,8 @@ type PtyCallbacks = {
   onError?: (message: string, errors?: string[]) => void
   onExit?: (code: number) => void
   onWriteUnavailable?: () => void
+  /** R315: main announced this pty died with the daemon; `reanchor` is main's chair verdict. */
+  onDaemonSessionLost?: (info: { reanchor: boolean; paneKeys: string[] }) => void
   onRecoveryStateChange?: (state: PtyTransportRecoveryState) => void
   onOutputPauseChanged?: (paused: boolean, supported: boolean) => void
 }

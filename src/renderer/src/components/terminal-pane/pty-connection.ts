@@ -338,6 +338,14 @@ import {
 } from './renderer-owned-agent-status-registry'
 import type { DirectSshPaneRetryAttempt } from '@/store/slices/direct-ssh-terminal-recovery'
 import { directSshAuthoritiesEqual } from '@/store/slices/direct-ssh-terminal-authority-ledger'
+import { installDaemonSessionLossHandling } from './pty-daemon-session-loss'
+import { reanchorResumePrompt } from './daemon-death-reanchor'
+import {
+  consumeDaemonSessionLostRelaunch,
+  isDaemonSessionLostRelaunch
+} from './pty-daemon-session-loss-registry'
+
+installDaemonSessionLossHandling()
 
 const pendingSpawnByPaneKey = new Map<string, Promise<string | null>>()
 const SSH_SESSION_EXPIRED_ERROR = 'SSH_SESSION_EXPIRED'
@@ -4067,6 +4075,31 @@ export function connectPanePty(
       endpointReplaced: providerRejected
     })
   }
+  // R315: main reports this pane's pty died with the daemon (authoritative, post-inventory).
+  const requestRecoveryForDaemonSessionLost = ({
+    reanchor,
+    paneKeys
+  }: {
+    reanchor: boolean
+    paneKeys: string[]
+  }): void => {
+    if (disposed) {
+      return
+    }
+    void requestTerminalPaneRecovery({
+      tabId: deps.tabId,
+      ptyId:
+        transport.getPtyId() ?? useAppStore.getState().ptyIdsByTabId?.[deps.tabId]?.[0] ?? null,
+      reason: 'daemon-session-lost',
+      paneKey: cacheKey,
+      reanchor,
+      relaunchPaneKeys: paneKeys,
+      terminalRecoveryGeneration,
+      terminalRecoveryInstanceId: terminalRecoveryInstance.id,
+      // Why: the recovered pane lands on a fresh shell, so an in-flight line must not be submitted.
+      endpointReplaced: true
+    })
+  }
   // Why: the write-pipeline health watch (scheduler stall probe, replay-guard
   // wedge certification) detects a dead xterm pipeline; route its verdict to
   // the same tab remount. Registered per xterm instance — recovery replaces
@@ -5037,9 +5070,15 @@ export function connectPanePty(
         terminalWindowsShell: state.settings?.terminalWindowsShell,
         tabShellOverride: shellOverride
       })
+      const resumePrompt = reanchorResumePrompt(
+        agent,
+        sleepingRecord,
+        isDaemonSessionLostRelaunch(cacheKey)
+      )
       const startupPlan = buildAgentResumeStartupPlan({
         agent,
         providerSession,
+        ...(resumePrompt ? { resumePrompt } : {}),
         cmdOverrides: state.settings?.agentCmdOverrides ?? {},
         agentArgs:
           launchConfig !== undefined
@@ -5095,8 +5134,20 @@ export function connectPanePty(
     const clearSleepingRecordAfterColdRestoreSpawn = (
       startup: ColdRestoreAgentResumeStartup | null
     ): void => {
-      if (startup && !startup.useLiveEntry && startup.sleepingRecordEntry) {
-        clearSleepingRecordProviderDuplicates(useAppStore.getState(), startup.sleepingRecordEntry)
+      if (!startup) {
+        return
+      }
+      // Why: any cold-restore spawn consumes the recovery mark and the flag, so a stale flag never fires later.
+      consumeDaemonSessionLostRelaunch(cacheKey)
+      const consumed = startup.sleepingRecordEntry
+      if (!consumed) {
+        return
+      }
+      const state = useAppStore.getState()
+      if (!startup.useLiveEntry) {
+        clearSleepingRecordProviderDuplicates(state, consumed)
+      } else if (consumed.record.reanchorAfterDaemonDeath === true) {
+        state.clearSleepingAgentReanchorFlag(consumed.paneKey)
       }
     }
     const mergeStartupEnvWithPaneIdentity = (
@@ -5850,6 +5901,11 @@ export function connectPanePty(
           onWriteUnavailable: (): void => {
             if (isCurrent()) {
               requestRecoveryForUndeliverableInput(true)
+            }
+          },
+          onDaemonSessionLost: (info: { reanchor: boolean; paneKeys: string[] }): void => {
+            if (isCurrent()) {
+              requestRecoveryForDaemonSessionLost(info)
             }
           },
           onRecoveryStateChange: (state: PtyTransportRecoveryState): void => {

@@ -20,8 +20,22 @@ export function defaultChairsManifestPath(): string {
 }
 
 /** An entry applies on this machine iff `host` is unset or equals `os.hostname()`. */
-function chairAppliesOnThisHost(chair: ChairsManifestEntry): boolean {
+export function chairAppliesOnThisHost(chair: ChairsManifestEntry): boolean {
   return chair.host === undefined || chair.host === hostname()
+}
+
+/** Every manifest chair that applies on this host, read once. Null (never a throw) on a missing,
+ * unreadable or invalid manifest — callers treat "cannot tell" as "not a chair" or as
+ * "protected" depending on which side is the safe failure for them. */
+export async function readHostScopedManifestChairs(): Promise<ChairsManifestEntry[] | null> {
+  try {
+    const parsed = parseChairsManifest(
+      JSON.parse(await readFile(defaultChairsManifestPath(), 'utf8'))
+    )
+    return parsed.ok ? parsed.manifest.chairs.filter(chairAppliesOnThisHost) : null
+  } catch {
+    return null
+  }
 }
 
 /** The host-scoped manifest chair whose resumable session (`lastSessionId ?? conversationId`) is

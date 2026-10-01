@@ -1042,6 +1042,22 @@ const api = {
       ipcRenderer.on('pty:writeUnavailable', handler)
       return () => ipcRenderer.removeListener('pty:writeUnavailable', handler)
     },
+    onSessionsLostToDaemonDeath: (
+      callback: (payload: {
+        epoch: number
+        sessions: { id: string; paneKey: string | null; reanchor: boolean }[]
+      }) => void
+    ): (() => void) => {
+      const handler = (
+        _event: Electron.IpcRendererEvent,
+        payload: {
+          epoch: number
+          sessions: { id: string; paneKey: string | null; reanchor: boolean }[]
+        }
+      ): void => callback(payload)
+      ipcRenderer.on('pty:sessionsLostToDaemonDeath', handler)
+      return () => ipcRenderer.removeListener('pty:sessionsLostToDaemonDeath', handler)
+    },
 
     resize: (id: string, cols: number, rows: number): void => {
       ipcRenderer.send('pty:resize', { id, cols, rows })
