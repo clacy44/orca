@@ -559,12 +559,25 @@ describe('R315: daemon crash arms the post-spawn respawn gate', () => {
     expect(db.getAgentByIdIncludingTombstoned(agentId)?.terminal_handle).toBe('term_dead_old')
 
     expect(getPaneKeyForPtyId('pty-before-crash')).toBe(paneKey)
+    const clearsBefore = clearAgentHookPaneStateMock.mock.calls.length
     // The daemon crashes; the adapter announces the casualty after its authoritative inventory.
     provider.announceLost({
       epoch: 1,
       sessions: [{ id: 'pty-before-crash', incarnationId: FIRST_INCARNATION }]
     })
     await untilLossHandled()
+    // F1: the renderer hears of the loss BEFORE main clears the pane's hook state (which would
+    // otherwise drop the live status the capture annotates).
+    const sendOrder = mainWindow.webContents.send.mock.calls.findIndex(
+      ([channel]) => channel === 'pty:sessionsLostToDaemonDeath'
+    )
+    const clearIndex = clearAgentHookPaneStateMock.mock.calls.findIndex(
+      ([key], index) => index >= clearsBefore && key === paneKey
+    )
+    expect(clearIndex).toBeGreaterThanOrEqual(0)
+    expect(mainWindow.webContents.send.mock.invocationCallOrder[sendOrder]).toBeLessThan(
+      clearAgentHookPaneStateMock.mock.invocationCallOrder[clearIndex]!
+    )
     expect(db.newestDaemonDeathOrRebindVerbForPane(paneKey, HOST_ID)).toBe('daemon_died')
     expect(mainWindow.webContents.send).toHaveBeenCalledWith(
       'pty:sessionsLostToDaemonDeath',

@@ -72,7 +72,7 @@ afterEach(() => {
 
 describe('handleDaemonSessionsLost (R315)', () => {
   it('calls a bound pane handler with the chair verdict and mounts nothing in the background', () => {
-    const handler = vi.fn()
+    const handler = vi.fn(() => true)
     ptyDaemonSessionLostHandlers.set('pty-a', handler)
 
     handleDaemonSessionsLost({
@@ -130,8 +130,8 @@ describe('handleDaemonSessionsLost (R315)', () => {
   })
 
   it('calls only one bound handler when two bound panes of one tab are lost', () => {
-    const handlerA = vi.fn()
-    const handlerB = vi.fn()
+    const handlerA = vi.fn(() => true)
+    const handlerB = vi.fn(() => true)
     ptyDaemonSessionLostHandlers.set('pty-a', handlerA)
     ptyDaemonSessionLostHandlers.set('pty-b', handlerB)
 
@@ -144,6 +144,27 @@ describe('handleDaemonSessionsLost (R315)', () => {
     })
 
     expect(handlerA.mock.calls.length + handlerB.mock.calls.length).toBe(1)
+  })
+
+  it('falls back to a plain recovery and background mount when the bound handler declines (stale or disposed)', () => {
+    ptyDaemonSessionLostHandlers.set(
+      'pty-a',
+      vi.fn(() => false)
+    )
+
+    handleDaemonSessionsLost({
+      epoch: 1,
+      sessions: [{ id: 'pty-a', paneKey: PANE_A, reanchor: true }]
+    })
+
+    expect(h.recover).toHaveBeenCalledTimes(1)
+    expect(h.recover).toHaveBeenCalledWith({
+      tabId: 'tab-1',
+      ptyId: 'pty-a',
+      reason: 'daemon-session-lost',
+      relaunchPaneKeys: [PANE_A]
+    })
+    expect(h.mount).toHaveBeenCalledTimes(1)
   })
 
   it('treats a repeated epoch:id as a no-op', () => {

@@ -620,7 +620,7 @@ export function createIpcPtyTransport(opts: IpcPtyTransportOptions = {}): PtyTra
       data: (data: string, meta?: PtyDataMeta) => void
       replay: (data: string) => void
       writeUnavailable: () => void
-      daemonSessionLost: (info: { reanchor: boolean; paneKeys: string[] }) => void
+      daemonSessionLost: (info: { reanchor: boolean; paneKeys: string[] }) => boolean
     }
   >()
   const ownedExitHandlers = new Map<string, (code: number) => void>()
@@ -695,11 +695,8 @@ export function createIpcPtyTransport(opts: IpcPtyTransportOptions = {}): PtyTra
       }
     }
     ptyWriteUnavailableHandlers.set(id, writeUnavailable)
-    const daemonSessionLost = (info: { reanchor: boolean; paneKeys: string[] }): void => {
-      if (ptyId === id) {
-        storedCallbacks.onDaemonSessionLost?.(info)
-      }
-    }
+    const daemonSessionLost = (info: { reanchor: boolean; paneKeys: string[] }): boolean =>
+      ptyId === id && storedCallbacks.onDaemonSessionLost?.(info) === true
     ptyDaemonSessionLostHandlers.set(id, daemonSessionLost)
     ownedDataAndReplayHandlers.set(id, {
       data: dataHandler,

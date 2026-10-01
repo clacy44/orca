@@ -32,7 +32,6 @@ import {
   ptyReplayHandlers
 } from './pty-shutdown-data-suspension'
 import { markCommittedPtyShutdowns } from './pty-shutdown-exit-deferral'
-import { subscribeDaemonSessionsLost } from './pty-daemon-session-loss-registry'
 
 export {
   ptyDataHandlers,
@@ -174,10 +173,6 @@ function attachPtySecondaryPushListeners(unsubscribes: (() => void)[]): void {
   })
   if (unsubscribeWriteUnavailable) {
     unsubscribes.push(unsubscribeWriteUnavailable)
-  }
-  const unsubscribeSessionsLost = subscribeDaemonSessionsLost()
-  if (unsubscribeSessionsLost) {
-    unsubscribes.push(unsubscribeSessionsLost)
   }
   unsubscribes.push(
     window.api.pty.onReplay((payload) => {

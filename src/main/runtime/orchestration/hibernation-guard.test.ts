@@ -148,12 +148,14 @@ describe('computeHibernationGuard (R316)', () => {
     expect(await protectedOf([PANE_C])).toEqual([])
   })
 
-  it('protects nothing by session when the manifest is absent or invalid, and does not throw', async () => {
+  it('F11: an absent manifest declares no chairs, but an unreadable or invalid one fails the guard closed', async () => {
     launchRow(PANE_C, SEED)
     expect(await protectedOf([PANE_C])).toEqual([])
     await mkdir(join(home, '.orca'), { recursive: true })
     await writeFile(join(home, '.orca', 'chairs.json'), '{not json')
-    expect(await protectedOf([PANE_C])).toEqual([])
+    await expect(protectedOf([PANE_C])).rejects.toThrow()
+    await writeManifest([{}])
+    await expect(protectedOf([PANE_C])).rejects.toThrow()
   })
 
   it('reports the verdict for every requested pane, including unprotected ones', async () => {

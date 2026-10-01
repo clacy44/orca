@@ -60,6 +60,25 @@ export async function findHostScopedManifestChairForSession(
   }
 }
 
+/** Like the lenient reader, but a missing manifest is `[]` and any other failure THROWS, so a caller
+ * that must fail closed (the agent-sleep guard) cannot mistake "unreadable" for "no chairs". */
+export async function readHostScopedManifestChairsStrict(): Promise<ChairsManifestEntry[]> {
+  let raw: string
+  try {
+    raw = await readFile(defaultChairsManifestPath(), 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return []
+    }
+    throw error
+  }
+  const parsed = parseChairsManifest(JSON.parse(raw))
+  if (!parsed.ok) {
+    throw new Error(`chairs manifest invalid: ${parsed.reason}`)
+  }
+  return parsed.manifest.chairs.filter(chairAppliesOnThisHost)
+}
+
 export async function readManifestEntry(
   manifestPath: string | undefined,
   chairName: string

@@ -13,6 +13,7 @@ import type { DaemonSessionsLostRendererPayload } from './pty-daemon-session-los
 
 const SEED = '11111111-1111-4111-8111-111111111111'
 const OTHER_SESSION = '33333333-3333-4333-8333-333333333333'
+const FRESH_SESSION = '44444444-4444-4444-8444-444444444444'
 const leaf = (n: number) =>
   `${String(n).repeat(8)}-${String(n).repeat(4)}-4${String(n).repeat(3)}-8${String(n).repeat(3)}-${String(n).repeat(12)}`
 const PANE_CHAIR_BY_NAME = `tab-1:${leaf(1)}`
@@ -29,7 +30,8 @@ vi.mock('node:os', async (importOriginal) => {
 
 const { OrchestrationDb } = await import('../runtime/orchestration/db')
 const { upsertAgentByPaneSuffix } = await import('../runtime/orchestration/agent-directory')
-const { recordLaunch } = await import('../runtime/orchestration/agent-launch-sessions')
+const { recordLaunch, recordSelfReportRotation } =
+  await import('../runtime/orchestration/agent-launch-sessions')
 const { planDaemonLossRecovery } =
   await import('../runtime/orchestration/daemon-loss-chair-verdict')
 const { readHostScopedManifestChairs } =
@@ -121,7 +123,12 @@ function buildHarness(
   planRecovery: (
     s: readonly { id: string; incarnationId?: string }[]
   ) => Promise<DaemonLossRecoveryPlanEntry[]>,
-  extra: { windowAvailable?: boolean; current?: (id: string) => boolean } = {}
+  extra: {
+    windowAvailable?: boolean
+    current?: (id: string) => boolean
+    sendThrows?: boolean
+    inFlight?: (id: string) => boolean
+  } = {}
 ) {
   const order: string[] = []
   const sent: DaemonSessionsLostRendererPayload[] = []
@@ -129,6 +136,7 @@ function buildHarness(
   const breadcrumbs: { name: string; data: Record<string, unknown> }[] = []
   const handle = createDaemonSessionLossHandler({
     isCurrentPtyExit: ({ id }) => extra.current?.(id) ?? true,
+    isSpawnInFlight: (id) => extra.inFlight?.(id) ?? false,
     notifyDaemonDiedFanout: (ids) => order.push(`audit:${ids.join(',')}`),
     planRecovery: async (sessions) => {
       order.push('plan')
@@ -140,6 +148,9 @@ function buildHarness(
     },
     sendToRenderer: (payload) => {
       order.push('send')
+      if (extra.sendThrows) {
+        throw new Error('window gone')
+      }
       if (extra.windowAvailable === false) {
         return false
       }
@@ -173,13 +184,13 @@ afterEach(async () => {
 })
 
 describe('daemon-session-loss handler: ordering and exit semantics', () => {
-  it('writes the daemon_died audit rows before it reads the plan, applies exits, and sends to the window', async () => {
+  it('writes the daemon_died audit rows, reads the plan, sends to the window, and only then applies exits', async () => {
     const h: Harness = buildHarness(async (sessions) =>
       sessions.map(({ id }) => ({ id, paneKey: `t:${id}`, peerOwned: false, reanchor: false }))
     )
     await h.handle({ epoch: 1, sessions: [{ id: 'a' }, { id: 'b' }] })
 
-    expect(h.order).toEqual(['audit:a,b', 'plan', 'exit:a', 'exit:b', 'send'])
+    expect(h.order).toEqual(['audit:a,b', 'plan', 'send', 'exit:a', 'exit:b'])
   })
 
   it('applies the main-side exit helper per id with the daemon-death exit code and its incarnation', async () => {
@@ -216,7 +227,7 @@ describe('daemon-session-loss handler: ordering and exit semantics', () => {
     await h.handle({ epoch: 1, sessions: [{ id: 'a' }] })
 
     expect(h.sent).toEqual([])
-    expect(h.order).toEqual(['audit:a', 'plan', 'exit:a', 'send'])
+    expect(h.order).toEqual(['audit:a', 'plan', 'send', 'exit:a'])
     expect(h.breadcrumbs).toEqual([
       { name: 'daemon_sessions_lost', data: { count: 1, applied: 1, notified: false } }
     ])
@@ -230,16 +241,34 @@ describe('daemon-session-loss handler: ordering and exit semantics', () => {
     )
     await h.handle({ epoch: 1, sessions: [{ id: 'respawned' }, { id: 'lost' }] })
 
-    expect(h.order).toEqual(['audit:lost', 'plan', 'exit:lost', 'send'])
+    expect(h.order).toEqual(['audit:lost', 'plan', 'send', 'exit:lost'])
     expect(h.sent[0]?.sessions.map((s) => s.id)).toEqual(['lost'])
   })
 
-  it('does nothing at all when every lost id is already stale', async () => {
+  it('skips an id whose same-id relaunch spawn is already in flight', async () => {
+    const h = buildHarness(
+      async (sessions) =>
+        sessions.map(({ id }) => ({ id, paneKey: `t:${id}`, peerOwned: false, reanchor: false })),
+      { inFlight: (id) => id === 'b' }
+    )
+    await h.handle({ epoch: 1, sessions: [{ id: 'a' }, { id: 'b' }] })
+
+    expect(h.applied.map((p) => p.id)).toEqual(['a'])
+    expect(h.sent[0]?.sessions.map((session) => session.id)).toEqual(['a'])
+    expect(h.order).toEqual(['audit:a', 'plan', 'send', 'exit:a'])
+    expect(h.breadcrumbs).toEqual([
+      { name: 'daemon_sessions_lost', data: { count: 1, applied: 1, notified: true, stale: 1 } }
+    ])
+  })
+
+  it('changes nothing but records a stale-only breadcrumb when every lost id is already stale', async () => {
     const h = buildHarness(async () => [], { current: () => false })
     await h.handle({ epoch: 1, sessions: [{ id: 'x' }] })
 
     expect(h.order).toEqual([])
-    expect(h.breadcrumbs).toEqual([])
+    expect(h.breadcrumbs).toEqual([
+      { name: 'daemon_sessions_lost', data: { count: 0, applied: 0, notified: false, stale: 1 } }
+    ])
   })
 
   it('still applies exit semantics but notifies nobody when planning fails', async () => {
@@ -251,6 +280,20 @@ describe('daemon-session-loss handler: ordering and exit semantics', () => {
 
     expect(h.order).toEqual(['audit:a', 'plan', 'exit:a'])
     expect(h.sent).toEqual([])
+  })
+
+  it('still applies every exit, with notified:false, when the window send throws', async () => {
+    const h = buildHarness(
+      async (sessions) =>
+        sessions.map(({ id }) => ({ id, paneKey: `t:${id}`, peerOwned: false, reanchor: false })),
+      { sendThrows: true }
+    )
+    await h.handle({ epoch: 1, sessions: [{ id: 'a' }, { id: 'b' }] })
+
+    expect(h.order).toEqual(['audit:a,b', 'plan', 'send', 'exit:a', 'exit:b'])
+    expect(h.breadcrumbs).toEqual([
+      { name: 'daemon_sessions_lost', data: { count: 2, applied: 2, notified: false } }
+    ])
   })
 
   it('records a daemon_sessions_lost breadcrumb with the count and the time since disconnect', async () => {
@@ -279,16 +322,45 @@ describe('daemon-session-loss handler: chair verdict from real host facts', () =
     )
   }
 
-  it('is true for a manifest chair matched by name or by its resumable session', async () => {
-    register(PANE_CHAIR_BY_NAME, 'alpha')
+  it('is true for a manifest chair matched by its resumable session, whatever the pane is named', async () => {
     register(PANE_CHAIR_BY_SESSION, 'someone-else')
     launchRow(PANE_CHAIR_BY_SESSION, SEED)
     await writeManifest([chair('alpha', { conversationId: OTHER_SESSION }), chair('beta')])
 
-    const reanchor = await reanchorByPty()
+    expect((await reanchorByPty())['pty-session']).toBe(true)
+  })
 
-    expect(reanchor['pty-name']).toBe(true)
-    expect(reanchor['pty-session']).toBe(true)
+  it("DN: a pane that merely holds a chair's free name is not a chair (no lineage launch row)", async () => {
+    register(PANE_CHAIR_BY_NAME, 'alpha')
+    launchRow(PANE_CHAIR_BY_NAME, FRESH_SESSION)
+    await writeManifest([chair('alpha')])
+
+    expect((await reanchorByPty())['pty-name']).toBe(false)
+  })
+
+  it("DN: a pane with no launch row at all is not a chair, even under the chair's name", async () => {
+    register(PANE_CHAIR_BY_NAME, 'alpha')
+    await writeManifest([chair('alpha')])
+
+    expect((await reanchorByPty())['pty-name']).toBe(false)
+  })
+
+  it('DN: one in-place session rotation keeps the chair lineage (previous_session_id)', async () => {
+    register(PANE_CHAIR_BY_NAME, 'someone-else')
+    launchRow(PANE_CHAIR_BY_NAME, SEED)
+    const rotated = recordSelfReportRotation(rawDb(), {
+      hostId: 'local',
+      paneKey: PANE_CHAIR_BY_NAME,
+      previousSessionId: SEED,
+      sessionId: FRESH_SESSION,
+      launchGeneration: 'gen-rot',
+      executionHostId: 'local',
+      evidence: 'self_report_rotation'
+    })
+    expect(rotated.ok).toBe(true)
+    await writeManifest([chair('alpha')])
+
+    expect((await reanchorByPty())['pty-name']).toBe(true)
   })
 
   it('is false for a registered non-chair, a derived row and a pane with no row', async () => {
@@ -305,6 +377,7 @@ describe('daemon-session-loss handler: chair verdict from real host facts', () =
 
   it('is false when the matching manifest entry belongs to another host', async () => {
     register(PANE_CHAIR_BY_NAME, 'alpha')
+    launchRow(PANE_CHAIR_BY_NAME, SEED)
     await writeManifest([chair('alpha', { host: `${hostname()}-elsewhere` })])
 
     expect((await reanchorByPty())['pty-name']).toBe(false)
@@ -312,6 +385,7 @@ describe('daemon-session-loss handler: chair verdict from real host facts', () =
 
   it('is true when the manifest entry names this host', async () => {
     register(PANE_CHAIR_BY_NAME, 'alpha')
+    launchRow(PANE_CHAIR_BY_NAME, SEED)
     await writeManifest([chair('alpha', { host: hostname() })])
 
     expect((await reanchorByPty())['pty-name']).toBe(true)
@@ -319,6 +393,7 @@ describe('daemon-session-loss handler: chair verdict from real host facts', () =
 
   it('is false for everything when the manifest is unreadable or invalid', async () => {
     register(PANE_CHAIR_BY_NAME, 'alpha')
+    launchRow(PANE_CHAIR_BY_NAME, SEED)
     expect((await reanchorByPty())['pty-name']).toBe(false)
     await mkdir(join(home, '.orca'), { recursive: true })
     await writeFile(join(home, '.orca', 'chairs.json'), '{broken')
@@ -336,6 +411,7 @@ describe('daemon-session-loss handler: chair verdict from real host facts', () =
 
   it('treats a tombstoned registered row as not a chair', async () => {
     register(PANE_CHAIR_BY_NAME, 'alpha')
+    launchRow(PANE_CHAIR_BY_NAME, SEED)
     rawDb()
       .prepare(`UPDATE agents SET tombstoned_at = '2026-01-01T00:00:00Z' WHERE pane_key = ?`)
       .run(PANE_CHAIR_BY_NAME)

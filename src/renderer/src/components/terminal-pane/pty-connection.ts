@@ -338,14 +338,11 @@ import {
 } from './renderer-owned-agent-status-registry'
 import type { DirectSshPaneRetryAttempt } from '@/store/slices/direct-ssh-terminal-recovery'
 import { directSshAuthoritiesEqual } from '@/store/slices/direct-ssh-terminal-authority-ledger'
-import { installDaemonSessionLossHandling } from './pty-daemon-session-loss'
 import { reanchorResumePrompt } from './daemon-death-reanchor'
 import {
   consumeDaemonSessionLostRelaunch,
   isDaemonSessionLostRelaunch
 } from './pty-daemon-session-loss-registry'
-
-installDaemonSessionLossHandling()
 
 const pendingSpawnByPaneKey = new Map<string, Promise<string | null>>()
 const SSH_SESSION_EXPIRED_ERROR = 'SSH_SESSION_EXPIRED'
@@ -4082,9 +4079,13 @@ export function connectPanePty(
   }: {
     reanchor: boolean
     paneKeys: string[]
-  }): void => {
-    if (disposed) {
-      return
+  }): boolean => {
+    // Why: a stale generation or disposed pane cannot recover the tab; let the dispatcher fall back.
+    if (
+      disposed ||
+      terminalRecoveryGeneration !== captureTerminalPaneRecoveryGeneration(deps.tabId)
+    ) {
+      return false
     }
     void requestTerminalPaneRecovery({
       tabId: deps.tabId,
@@ -4099,6 +4100,7 @@ export function connectPanePty(
       // Why: the recovered pane lands on a fresh shell, so an in-flight line must not be submitted.
       endpointReplaced: true
     })
+    return true
   }
   // Why: the write-pipeline health watch (scheduler stall probe, replay-guard
   // wedge certification) detects a dead xterm pipeline; route its verdict to
@@ -5075,6 +5077,13 @@ export function connectPanePty(
         sleepingRecord,
         isDaemonSessionLostRelaunch(cacheKey)
       )
+      if (resumePrompt) {
+        // Why: consumed when the plan is built, so a refused or failed relaunch can never leave a stale prompt armed.
+        consumeDaemonSessionLostRelaunch(cacheKey)
+        if (sleepingRecordEntry) {
+          state.clearSleepingAgentReanchorFlag(sleepingRecordEntry.paneKey)
+        }
+      }
       const startupPlan = buildAgentResumeStartupPlan({
         agent,
         providerSession,
@@ -5903,11 +5912,8 @@ export function connectPanePty(
               requestRecoveryForUndeliverableInput(true)
             }
           },
-          onDaemonSessionLost: (info: { reanchor: boolean; paneKeys: string[] }): void => {
-            if (isCurrent()) {
-              requestRecoveryForDaemonSessionLost(info)
-            }
-          },
+          onDaemonSessionLost: (info: { reanchor: boolean; paneKeys: string[] }): boolean =>
+            isCurrent() ? requestRecoveryForDaemonSessionLost(info) : false,
           onRecoveryStateChange: (state: PtyTransportRecoveryState): void => {
             if (isCurrent()) {
               // Why: cached pixels remain visible while detached; expose transport truth for diagnostics and recovery UI.

@@ -3,7 +3,6 @@ import { requestBackgroundTerminalWorktreeMount } from '@/components/terminal/ba
 import { parsePaneKey } from '../../../../shared/stable-pane-id'
 import {
   ptyDaemonSessionLostHandlers,
-  setDaemonSessionsLostSink,
   type DaemonSessionsLostPayload
 } from './pty-daemon-session-loss-registry'
 import { requestTerminalPaneRecovery } from './terminal-pane-recovery'
@@ -83,8 +82,10 @@ export function handleDaemonSessionsLost(payload: DaemonSessionsLostPayload): vo
   for (const [tabId, sessions] of lostByTab) {
     const paneKeys = sessions.flatMap(({ paneKey }) => (paneKey ? [paneKey] : []))
     const bound = sessions.find(({ id }) => ptyDaemonSessionLostHandlers.has(id))
-    if (bound) {
-      ptyDaemonSessionLostHandlers.get(bound.id)?.({ reanchor: bound.reanchor, paneKeys })
+    if (
+      bound &&
+      ptyDaemonSessionLostHandlers.get(bound.id)?.({ reanchor: bound.reanchor, paneKeys }) === true
+    ) {
       continue
     }
     void requestTerminalPaneRecovery({
@@ -103,11 +104,6 @@ export function handleDaemonSessionsLost(payload: DaemonSessionsLostPayload): vo
       }
     }
   }
-}
-
-/** Idempotent; called once from pty-connection so pane code owns the handling. */
-export function installDaemonSessionLossHandling(): void {
-  setDaemonSessionsLostSink(handleDaemonSessionsLost)
 }
 
 export function _resetDaemonSessionLossForTests(): void {

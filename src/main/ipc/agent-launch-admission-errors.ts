@@ -39,7 +39,7 @@ export type ResumeTargetLiveRefusalData = {
   sessionId: string
   holderPaneKey: string
   holderTerminal: string | null
-  via: 'claude_foreground' | 'hook_report'
+  via: 'claude_foreground' | 'hook_report' | 'session_holder'
   chair: string | null
   nextSteps: string[]
 }

@@ -87,13 +87,14 @@ describe('10z.5 R287: caller-resume liveness refusal', () => {
     callerResume: CallerResumeLivenessDeps | null,
     notices: string[] = [],
     admission: LaunchAdmission = CALLER,
-    command = `claude --resume ${X}`
+    command = `claude --resume ${X}`,
+    claimant = CLAIMANT
   ) {
     const spawn: PtySpawnOptions = {
       cols: 80,
       rows: 24,
       launchAgent: 'claude',
-      paneKey: CLAIMANT,
+      paneKey: claimant,
       command
     }
     return admitAgentLaunch(() => db, spawn, admission, {
@@ -355,25 +356,135 @@ describe('10z.5 R287: caller-resume liveness refusal', () => {
     expect(lastAudit(db).reason_code).toBe('resume_target_owned_by_pane_without_live_agent')
   })
 
-  it('SELF_RESUME never calls the deps (HOST_RESUME is pinned in agent-launch-admission-host-resume-adoption.test.ts, the fence-exempt file)', async () => {
-    const db = freshDb()
-    const d = deps({
-      confirmClaudeForegroundOnPane: vi.fn(async () => true),
-      liveReportPanesForSession: vi.fn(() => [{ paneKey: OTHER, executionHostId: HOST_ID }])
+  // F3 / Ruling 34 Addendum 23 (retires the old "SELF_RESUME never calls the deps" pin): INV-P-022
+  // AMENDMENT #1 outranks "never a hard refusal for its own restore". A SELF_RESUME consults the
+  // holders of X, the recovering pane itself is never one, and a refusal is loud (error + audit).
+  describe('F3: SELF_RESUME and the holders of X', () => {
+    const OWN = '55555555-5555-4555-8555-555555555555'
+    const LEAF = '88888888-8888-4888-8888-888888888888'
+    const SELF_PANE = `tab1:${LEAF}`
+    const seedOwn = (db: OrchestrationDb, paneKey = CLAIMANT) =>
+      db.recordLaunch({
+        hostId: HOST_ID,
+        paneKey,
+        agentType: 'claude',
+        sessionId: OWN,
+        launchGeneration: 'gen-1',
+        executionHostId: HOST_ID,
+        evidence: 'host_launch'
+      })
+    const resume = `claude --resume ${OWN}`
+
+    it('(i) recovery relaunch: admitted when the pane is the only holder; its own report is ignored', async () => {
+      const db = freshDb(false)
+      seedOwn(db)
+      const d = deps({
+        confirmClaudeForegroundOnPane: vi.fn(async () => true),
+        liveReportPanesForSession: vi.fn(() => [{ paneKey: CLAIMANT, executionHostId: HOST_ID }])
+      })
+
+      const admitted = await admit(db, d, [], CALLER, resume)
+
+      expect(admitted.classification).toBe('self_resume_caller')
+      expect(d.confirmClaudeForegroundOnPane).not.toHaveBeenCalled()
+      expect(db.paneHoldingSession(HOST_ID, OWN)).toBe(CLAIMANT)
     })
-    const own = '55555555-5555-4555-8555-555555555555'
-    db.recordLaunch({
-      hostId: HOST_ID,
-      paneKey: CLAIMANT,
-      agentType: 'claude',
-      sessionId: own,
-      launchGeneration: 'gen-1',
-      executionHostId: HOST_ID,
-      evidence: 'host_launch'
+
+    it('(iv) recovery relaunch: a holder recorded under a moved-tab alias of the same leaf is self', async () => {
+      const db = freshDb(false)
+      seedOwn(db, SELF_PANE)
+      const aliasPane = `tab-old:${LEAF}`
+      db.recordLaunch({
+        hostId: HOST_ID,
+        paneKey: aliasPane,
+        agentType: 'claude',
+        sessionId: OWN,
+        launchGeneration: 'gen-2',
+        executionHostId: HOST_ID,
+        evidence: 'host_restore',
+        supersedePaneKey: SELF_PANE
+      })
+      expect(db.paneHoldingSession(HOST_ID, OWN)).toBe(aliasPane)
+
+      const admitted = await admit(db, deps(), [], CALLER, resume, SELF_PANE)
+
+      expect(admitted.classification).toBe('self_resume_caller')
     })
-    await admit(db, d, [], CALLER, `claude --resume ${own}`)
-    for (const fn of Object.values(d)) {
-      expect(fn).not.toHaveBeenCalled()
-    }
+
+    it('(ii) refused loudly when another pane runs X by hook report: error sentence and launch_refused audit', async () => {
+      const db = freshDb(false)
+      seedOwn(db)
+      const d = deps({
+        liveReportPanesForSession: vi.fn(() => [{ paneKey: OTHER, executionHostId: HOST_ID }]),
+        findConnectedPtyForPane: vi.fn((p: string) =>
+          p === OTHER ? { ptyId: 'pty-o' } : undefined
+        )
+      })
+
+      const error = await admit(db, d, [], CALLER, resume).catch((e: unknown) => e)
+
+      expect(error).toMatchObject({
+        code: 'resume_target_owned_by_another_pane',
+        message: `Claude session ${OWN} is still reported live by pane ${OTHER}; ${TAIL}`,
+        data: { via: 'hook_report', holderPaneKey: OTHER }
+      })
+      expect(lastAudit(db)).toMatchObject({
+        verb: 'launch_refused',
+        outcome: 'refused',
+        reason_code: `resume_target_owned_by_another_pane holder=${OTHER} via=hook_report`
+      })
+      expect(db.newestLaunchForPane(HOST_ID, CLAIMANT)?.session_id).toBe(OWN)
+      expect(db.paneHoldingSession(HOST_ID, OWN)).toBe(CLAIMANT)
+    })
+
+    describe('(b) the books holder was moved by chairs restore', () => {
+      function moveHolderToQ(db: OrchestrationDb): void {
+        seedOwn(db)
+        const moved = db.recordLaunch({
+          hostId: HOST_ID,
+          paneKey: HOLDER,
+          agentType: 'claude',
+          sessionId: OWN,
+          launchGeneration: 'gen-2',
+          executionHostId: HOST_ID,
+          evidence: 'host_restore',
+          supersedePaneKey: CLAIMANT
+        })
+        expect(moved.ok).toBe(true)
+      }
+
+      it('(iii) refused loudly via session_holder, even before the holder connects; nothing superseded', async () => {
+        const db = freshDb(false)
+        moveHolderToQ(db)
+
+        const error = await admit(db, deps(), [], CALLER, resume).catch((e: unknown) => e)
+
+        expect(error).toMatchObject({
+          code: 'resume_target_owned_by_another_pane',
+          message: `Claude session ${OWN} is recorded as held by pane ${HOLDER}; ${TAIL}`,
+          data: { via: 'session_holder', holderPaneKey: HOLDER }
+        })
+        expect(lastAudit(db)).toMatchObject({
+          verb: 'launch_refused',
+          outcome: 'refused',
+          reason_code: `resume_target_owned_by_another_pane holder=${HOLDER} via=session_holder`
+        })
+        expect(db.paneHoldingSession(HOST_ID, OWN)).toBe(HOLDER)
+        expect(db.newestLaunchForPane(HOST_ID, HOLDER)?.session_id).toBe(OWN)
+      })
+
+      it('(v) with the liveness deps unwired it is still refused, loudly', async () => {
+        const db = freshDb(false)
+        moveHolderToQ(db)
+
+        await expect(admit(db, null, [], CALLER, resume)).rejects.toMatchObject({
+          code: 'resume_target_owned_by_another_pane'
+        })
+        expect(lastAudit(db)).toMatchObject({
+          verb: 'launch_refused',
+          reason_code: `resume_target_owned_by_another_pane holder=${HOLDER} via=session_holder`
+        })
+      })
+    })
   })
 })

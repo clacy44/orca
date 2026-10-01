@@ -36,6 +36,12 @@ const h = vi.hoisted(() => {
       return this.ensureConnected()
     }
     async request(method: string): Promise<unknown> {
+      if (method === 'getSize') {
+        return { size: { cols: 80, rows: 24 } }
+      }
+      if (method === 'createOrAttach') {
+        return { isNew: false, incarnationId: 'inc-att' }
+      }
       if (method !== 'listSessions') {
         return undefined
       }
@@ -76,7 +82,11 @@ const h = vi.hoisted(() => {
 
 vi.mock('./client', () => ({ DaemonClient: h.FakeDaemonClient }))
 
-import { DaemonPtyAdapter, type DaemonPtyAdapterOptions } from './daemon-pty-adapter'
+import {
+  DaemonPtyAdapter,
+  _resetDaemonLossEpochSequenceForTests,
+  type DaemonPtyAdapterOptions
+} from './daemon-pty-adapter'
 import { PtyWriteUnavailableError } from '../providers/pty-write-unavailable-error'
 
 type Lost = { epoch: number; sessions: { id: string; incarnationId?: string }[] }
@@ -138,6 +148,7 @@ async function flush(): Promise<void> {
 }
 
 beforeEach(() => {
+  _resetDaemonLossEpochSequenceForTests()
   order = []
   lost = []
   breadcrumbs = []
@@ -367,5 +378,102 @@ describe('DaemonPtyAdapter proactive daemon-loss recovery (R315)', () => {
     await vi.advanceTimersByTimeAsync(1)
 
     expect(lost.map((event) => event.epoch)).toEqual([1, 2, 3, 4])
+  })
+
+  describe('F2: a casualty is decided by explicit teardown, not by activeSessionIds', () => {
+    function failFirstInventory(): void {
+      let calls = 0
+      fake.listSessionsImpl = async () => {
+        calls += 1
+        if (calls === 1) {
+          throw new Error('not ready yet')
+        }
+        return { sessions: [] }
+      }
+    }
+
+    it('still announces a casualty whose id a concurrent listProcesses pruned from activeSessionIds', async () => {
+      vi.useFakeTimers()
+      const a = makeAdapter()
+      seedActive(a, ['s1'])
+      failFirstInventory()
+
+      fake.crash()
+      await vi.advanceTimersByTimeAsync(0)
+      await a.listProcesses()
+      expect(a.getActiveSessionIds()).toEqual([])
+      await vi.advanceTimersByTimeAsync(2_000)
+
+      expect(lost).toHaveLength(1)
+      expect(lost[0]?.sessions).toEqual([{ id: 's1', incarnationId: 'inc-s1' }])
+      expect(breadcrumbs).toEqual([])
+    })
+
+    it('does not announce a session explicitly shut down meanwhile, and records the breadcrumb', async () => {
+      vi.useFakeTimers()
+      const a = makeAdapter()
+      seedActive(a, ['s1'])
+      failFirstInventory()
+
+      fake.crash()
+      await vi.advanceTimersByTimeAsync(0)
+      await a.shutdown('s1', { immediate: true })
+      await vi.advanceTimersByTimeAsync(2_000)
+
+      expect(lost).toEqual([])
+      expect(breadcrumbs).toEqual([
+        { name: 'daemon_loss_candidates_torn_down', data: { count: 1 } }
+      ])
+    })
+  })
+
+  it('F4: an attached session is announced with the incarnation attach recorded', async () => {
+    const a = makeAdapter()
+    await a.attach('s1')
+    fake.aliveSessionIds = []
+
+    fake.crash()
+    await flush()
+
+    expect(lost[0]?.sessions).toEqual([{ id: 's1', incarnationId: 'inc-att' }])
+  })
+
+  it('F6: an announced session is not re-announced by later drops, and does not consume breaker slots', async () => {
+    const a = makeAdapter()
+    seedActive(a, ['s1'])
+    fake.aliveSessionIds = []
+    fake.crash()
+    await flush()
+    for (let drop = 0; drop < 3; drop += 1) {
+      fake.drop()
+      await flush()
+    }
+
+    seedActive(a, ['s2'])
+    fake.crash()
+    await flush()
+
+    expect(lost.map((event) => event.sessions.map((session) => session.id))).toEqual([
+      ['s1'],
+      ['s2']
+    ])
+    expect(breadcrumbs.map((b) => b.name)).not.toContain('daemon_loss_recovery_suppressed')
+  })
+
+  it('F8: epochs are one monotonic sequence across adapters, so a replacement adapter never repeats one', async () => {
+    const first = makeAdapter()
+    seedActive(first, ['s1'])
+    fake.aliveSessionIds = []
+    fake.crash()
+    await flush()
+    first.dispose()
+
+    const second = makeAdapter()
+    seedActive(second, ['s1'])
+    fake.aliveSessionIds = []
+    fake.crash()
+    await flush()
+
+    expect(lost.map((event) => event.epoch)).toEqual([1, 2])
   })
 })

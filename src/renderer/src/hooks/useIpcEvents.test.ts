@@ -8212,6 +8212,121 @@ describe('useIpcEvents agent status snapshot integration', () => {
     expect(removeAgentStatus).toHaveBeenCalledWith(FUTURE_PANE_KEY)
   })
 
+  // F9: the daemon-loss notice is subscribed at renderer bootstrap (not on the first transport), and
+  // main sends it BEFORE its agentStatus:clear so the capture still sees the live status.
+  describe('daemon-session-lost subscription (R315 F9)', () => {
+    const LOST_LEAF = '77777777-7777-4777-8777-777777777777'
+    const LOST_PANE = makePaneKey('tab-lost', LOST_LEAF)
+
+    async function mountWithRealCapture(opts: { subscribe?: boolean } = {}) {
+      const { createTestStore, makeTab } = await import('../store/slices/store-test-helpers')
+      const real = createTestStore()
+      real.setState({
+        tabsByWorktree: { 'wt-1': [makeTab({ id: 'tab-lost', worktreeId: 'wt-1' })] }
+      } as Partial<AppState>)
+      real
+        .getState()
+        .setAgentStatus(
+          LOST_PANE,
+          { state: 'working', prompt: 'coordinate', agentType: 'claude' },
+          'Claude',
+          { updatedAt: 10, stateStartedAt: 10 },
+          { tabId: 'tab-lost', worktreeId: 'wt-1' },
+          { providerSession: { key: 'session_id', id: 'claude-session-1' } }
+        )
+      const storeState: StoreLike = buildStoreState({
+        workspaceSessionReady: true,
+        settings: { terminalFontSize: 13, notifications: { enabled: false } },
+        repos: [{ id: 'repo-1', connectionId: null }],
+        worktreesByRepo: { 'repo-1': [{ id: 'wt-1', repoId: 'repo-1' }] },
+        tabsByWorktree: { 'wt-1': [{ id: 'tab-lost', worktreeId: 'wt-1', ptyId: 'pty-lost' }] },
+        ptyIdsByTabId: { 'tab-lost': ['pty-lost'] },
+        remountTerminalTabForRecovery: vi.fn(() => true),
+        captureSleepingAgentSessionForDaemonDeath: (paneKey: string, o?: { reanchor?: boolean }) =>
+          real.getState().captureSleepingAgentSessionForDaemonDeath(paneKey, o),
+        removeAgentStatus: (paneKey: string) => real.getState().removeAgentStatus(paneKey),
+        get agentStatusByPaneKey() {
+          return real.getState().agentStatusByPaneKey
+        },
+        get sleepingAgentSessionsByPaneKey() {
+          return real.getState().sleepingAgentSessionsByPaneKey
+        }
+      })
+      const lostRef: { current: ((payload: unknown) => void) | null } = { current: null }
+      const clearRef: { current: ((data: AgentStatusClearIpcPayload) => void) | null } = {
+        current: null
+      }
+      const onSessionsLostToDaemonDeath = vi.fn((cb: (payload: unknown) => void) => {
+        lostRef.current = cb
+        return () => {}
+      })
+      stubReactSyncEffect()
+      vi.doMock('../store', () => ({
+        useAppStore: { subscribe: vi.fn(() => () => {}), getState: () => storeState }
+      }))
+      stubAuxiliaryModules()
+      const windowApi = buildWindowApi({
+        onSet: () => () => {},
+        onClear: (cb) => {
+          clearRef.current = cb
+          return () => {}
+        }
+      }) as { api: Record<string, unknown> }
+      vi.stubGlobal('window', {
+        ...windowApi,
+        api: {
+          ...windowApi.api,
+          pty: opts.subscribe === false ? {} : { onSessionsLostToDaemonDeath }
+        },
+        dispatchEvent: vi.fn()
+      })
+      const { useIpcEvents } = await import('./useIpcEvents')
+      return { real, lostRef, clearRef, onSessionsLostToDaemonDeath, useIpcEvents }
+    }
+
+    it('subscribes once at bootstrap, with no terminal transport created', async () => {
+      const { onSessionsLostToDaemonDeath, useIpcEvents } = await mountWithRealCapture()
+      useIpcEvents()
+      await Promise.resolve()
+
+      expect(onSessionsLostToDaemonDeath).toHaveBeenCalledTimes(1)
+    })
+
+    it('captures the chair flag when the notice arrives BEFORE the status clear (main order)', async () => {
+      const { real, lostRef, clearRef, useIpcEvents } = await mountWithRealCapture()
+      useIpcEvents()
+      await Promise.resolve()
+      expect(real.getState().sleepingAgentSessionsByPaneKey[LOST_PANE]?.origin).toBe('live')
+
+      lostRef.current?.({
+        epoch: 1,
+        sessions: [{ id: 'pty-lost', paneKey: LOST_PANE, reanchor: true }]
+      })
+      clearRef.current?.({ paneKey: LOST_PANE })
+
+      expect(real.getState().sleepingAgentSessionsByPaneKey[LOST_PANE]).toMatchObject({
+        origin: 'live',
+        reanchorAfterDaemonDeath: true
+      })
+    })
+
+    it('documents why main orders it so: the clear first leaves nothing to annotate', async () => {
+      const { real, lostRef, clearRef, useIpcEvents } = await mountWithRealCapture()
+      useIpcEvents()
+      await Promise.resolve()
+
+      clearRef.current?.({ paneKey: LOST_PANE })
+      lostRef.current?.({
+        epoch: 1,
+        sessions: [{ id: 'pty-lost', paneKey: LOST_PANE, reanchor: true }]
+      })
+
+      expect(
+        real.getState().sleepingAgentSessionsByPaneKey[LOST_PANE]?.reanchorAfterDaemonDeath
+      ).toBeUndefined()
+    })
+  })
+
   it('blocks cleared snapshots across remount and accepts newer reconnect replay', async () => {
     let resolveOldSnapshot!: (entries: AgentStatusSetData[]) => void
     let resolveCurrentSnapshot!: (entries: AgentStatusSetData[]) => void

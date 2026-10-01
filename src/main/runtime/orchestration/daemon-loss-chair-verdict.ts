@@ -1,7 +1,7 @@
 // R315: which lost panes are chairs, decided in main from host facts and sent to the renderer as a
-// boolean only. A chair has a non-derived, non-tombstoned registered row AND a host-scoped manifest
-// entry matching by `name === display_name` or `chairTargetSessionId === newest launch session`.
-// Any failure reads as "not a chair" (resume without a prompt).
+// boolean only. A chair has a non-derived, non-tombstoned registered row AND a newest launch row
+// whose session (or previous session) is a host-scoped manifest chair's conversation. The display
+// name is never sufficient. Any failure reads as "not a chair" (resume without a prompt).
 import type { AgentLaunchSessionRow } from './agent-launch-sessions'
 import type { ChairsManifestEntry } from './chairs-manifest'
 import { chairTargetSessionId } from './chairs-restore-plan'
@@ -26,13 +26,19 @@ export function chairForPane(
     if (!row || row.derived !== 0 || row.tombstoned_at !== null) {
       return null
     }
-    const sessionId = db.newestLaunchForPane(hostId, paneKey)?.session_id
+    const newest = db.newestLaunchForPane(hostId, paneKey)
+    if (!newest) {
+      return null
+    }
+    // Why lineage, not name: a name is free to register, a launch row carrying the chair's conversation is host-authored.
+    const lineage = [newest.session_id, newest.previous_session_id].filter((id): id is string =>
+      Boolean(id)
+    )
     return (
-      hostScopedChairs.find(
-        (chair) =>
-          chair.name === row.display_name ||
-          (sessionId !== undefined && chairTargetSessionId(chair) === sessionId)
-      ) ?? null
+      hostScopedChairs.find((chair) => {
+        const targets = new Set([chairTargetSessionId(chair), chair.conversationId])
+        return lineage.some((id) => targets.has(id))
+      }) ?? null
     )
   } catch {
     return null

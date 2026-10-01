@@ -11049,6 +11049,8 @@ describe('connectPanePty', () => {
       record?: Record<string, unknown>
       liveEntry?: boolean
       recoveryRelaunch?: boolean
+      // F12: make every connect attempt fail, as a refused relaunch does.
+      connectRejects?: boolean
     }) {
       const { connectPanePty } = await import('./pty-connection')
       // Why dynamic: the suite resets modules, so the registry must be the one pty-connection imported.
@@ -11060,6 +11062,9 @@ describe('connectPanePty', () => {
         }
         return 'fresh-pty'
       })
+      if (args.connectRejects) {
+        transport.connect.mockRejectedValue(new Error('launch admission refused'))
+      }
       transportFactoryQueue.push(transport)
       const paneKey = makePaneKey('tab-1', LEAF_1)
       registry._resetDaemonSessionLostRelaunchForTests()
@@ -11174,6 +11179,25 @@ describe('connectPanePty', () => {
 
       expect(command).toBe(CLAUDE_RESUME)
       expect(mockStoreState.sleepingAgentSessionsByPaneKey[paneKey]).toBeUndefined()
+    })
+
+    it('F12: a refused relaunch still consumes the mark and the flag, so a later resume carries no prompt', async () => {
+      const { transport, paneKey, registry } = await coldRestoreClaudePane({
+        record: FLAGGED,
+        recoveryRelaunch: true,
+        connectRejects: true
+      })
+
+      // Why: the built plan carries the prompt into its own immediate fallback attempt; the first connect is the positive control.
+      const first = transport.connect.mock.calls.find(
+        ([options]) => (options as { command?: string }).command !== undefined
+      )?.[0] as { command?: string }
+      expect(first.command).toBe(withPrompt)
+      expect(first.command?.split(DAEMON_DEATH_REANCHOR_PROMPT)).toHaveLength(2)
+      expect(registry.isDaemonSessionLostRelaunch(paneKey)).toBe(false)
+      expect(mockStoreState.sleepingAgentSessionsByPaneKey[paneKey]).not.toHaveProperty(
+        'reanchorAfterDaemonDeath'
+      )
     })
 
     it('adds no prompt for a non-chair (unflagged) record, even on the recovery relaunch', async () => {

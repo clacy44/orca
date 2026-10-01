@@ -4,9 +4,12 @@ export type DaemonSessionsLostPayload = {
   sessions: { id: string; paneKey: string | null; reanchor: boolean }[]
 }
 
-// Why a registry: a bound pane owns the generation/instance fencing for its own recovery request.
+// Why a registry: a bound pane owns the generation/instance fencing for its recovery request; false means it declined (stale or disposed).
 export type DaemonSessionLostInfo = { reanchor: boolean; paneKeys: string[] }
-export const ptyDaemonSessionLostHandlers = new Map<string, (info: DaemonSessionLostInfo) => void>()
+export const ptyDaemonSessionLostHandlers = new Map<
+  string,
+  (info: DaemonSessionLostInfo) => boolean
+>()
 
 // Why a mark: the re-anchor prompt may fire only on the daemon-session-lost recovery relaunch, never on a reveal or wake.
 const RELAUNCH_MARK_TTL_MS = 2 * 60_000
@@ -29,16 +32,4 @@ export function consumeDaemonSessionLostRelaunch(paneKey: string): void {
 
 export function _resetDaemonSessionLostRelaunchForTests(): void {
   relaunchMarks.clear()
-}
-
-let sink: ((payload: DaemonSessionsLostPayload) => void) | null = null
-
-export function setDaemonSessionsLostSink(
-  next: ((payload: DaemonSessionsLostPayload) => void) | null
-): void {
-  sink = next
-}
-
-export function subscribeDaemonSessionsLost(): (() => void) | null {
-  return window.api.pty.onSessionsLostToDaemonDeath?.((payload) => sink?.(payload)) ?? null
 }

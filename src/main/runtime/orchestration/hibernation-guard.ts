@@ -2,7 +2,7 @@
 // only in main; a pane may sleep only when unprotected AND its verdict is explicitly 'idle'.
 import type { AgentLaunchSessionRow } from './agent-launch-sessions'
 import { chairTargetSessionId } from './chairs-restore-plan'
-import { readHostScopedManifestChairs } from './chair-succession-manifest-entry'
+import { readHostScopedManifestChairsStrict } from './chair-succession-manifest-entry'
 import type { AgentRow } from './types'
 import type {
   BackgroundWorkVerdict,
@@ -18,7 +18,7 @@ export type HibernationGuardDb = {
 /**
  * Protected: panes held by a non-derived registered row (quarantined included, matched by pane
  * suffix so a tab move cannot unprotect), and panes whose newest launch row holds a host-scoped
- * manifest chair's session. A db read that throws propagates so the caller fails closed.
+ * manifest chair's session. A db read or an unreadable manifest throws, so the caller fails closed.
  */
 export async function computeHibernationGuard(
   db: HibernationGuardDb,
@@ -26,7 +26,7 @@ export async function computeHibernationGuard(
   paneKeys: readonly string[],
   verdictOf: (paneKey: string) => BackgroundWorkVerdict
 ): Promise<HibernationGuardSnapshot> {
-  const chairs = (await readHostScopedManifestChairs()) ?? []
+  const chairs = await readHostScopedManifestChairsStrict()
   const chairSessions = new Set(chairs.map(chairTargetSessionId))
   const protectedPaneKeys: string[] = []
   const backgroundWork: Record<string, BackgroundWorkVerdict> = {}

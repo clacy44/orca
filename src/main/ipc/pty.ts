@@ -297,6 +297,8 @@ const PRODUCER_FLOW_CONTROL_ENABLED = true
 // Why: post-spawn write/resize/kill calls carry only the PTY ID; map it to its connectionId so ops route to the right provider.
 const ptyOwnership = new Map<string, string | null>()
 const ptyIncarnationById = new Map<string, string>()
+// Why: a same-id relaunch mid-spawn must not have its owners and hook state torn down by a late daemon-loss exit.
+const callerSessionSpawnsInFlight = new Map<string, number>()
 
 export function isCurrentPtyExit(payload: { id: string; incarnationId?: string }): boolean {
   const current = ptyIncarnationById.get(payload.id)
@@ -4204,6 +4206,7 @@ export function registerPtyHandlers(
 
   const handleDaemonSessionsLost = createDaemonSessionLossHandler({
     isCurrentPtyExit,
+    isSpawnInFlight: (ptyId) => (callerSessionSpawnsInFlight.get(ptyId) ?? 0) > 0,
     notifyDaemonDiedFanout,
     planRecovery: async (sessions) =>
       (runtime
@@ -6438,6 +6441,13 @@ export function registerPtyHandlers(
       let snapshotKittyFlagsCoverReconciledSeq = true
       let preparedProvisionalExecutionContext = false
       let releaseWorktreeSpawn: (() => void) | undefined
+      const inFlightId = args.sessionId ? getAppPtyId(args.connectionId, args.sessionId) : null
+      if (inFlightId) {
+        callerSessionSpawnsInFlight.set(
+          inFlightId,
+          (callerSessionSpawnsInFlight.get(inFlightId) ?? 0) + 1
+        )
+      }
       try {
         if (!earlyStablePaneOwner) {
           await assertFolderWorkspacePtyPathUsable(args.worktreeId)
@@ -7647,6 +7657,14 @@ export function registerPtyHandlers(
       } finally {
         releaseWorktreeSpawn?.()
         finishTerminalInstall()
+        if (inFlightId) {
+          const remaining = (callerSessionSpawnsInFlight.get(inFlightId) ?? 1) - 1
+          if (remaining > 0) {
+            callerSessionSpawnsInFlight.set(inFlightId, remaining)
+          } else {
+            callerSessionSpawnsInFlight.delete(inFlightId)
+          }
+        }
       }
     }
   )

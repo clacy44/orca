@@ -1,8 +1,9 @@
 // R315: handler for ptys that died WITH the daemon (announced after an authoritative inventory):
 //   1. write the `daemon_died` audit rows the post-spawn respawn gate consumes;
 //   2. plan recovery (pane key, peer-owned, chair verdict) while the runtime still knows the ptys;
-//   3. apply main-side exit semantics WITHOUT a renderer `pty:exit` (that would close tabs);
-//   4. tell the window which panes to recover, if there is one.
+//   3. tell the window which panes to recover (it captures records while their live status exists);
+//   4. apply main-side exit semantics WITHOUT a renderer `pty:exit` (that would close tabs).
+// Steps 3 and 4 run in one synchronous block so the relaunch can never see an unretired anchor.
 import type { PtySessionsLostToDaemonDeathEvent } from '../providers/types'
 import type { DaemonLossRecoveryPlanEntry } from '../runtime/orchestration/daemon-loss-chair-verdict'
 
@@ -13,6 +14,8 @@ export type DaemonSessionsLostRendererPayload = {
 
 export type DaemonSessionLossDeps = {
   isCurrentPtyExit: (payload: { id: string; incarnationId?: string }) => boolean
+  /** A same-id `pty:spawn` (the recovery relaunch) is mid-flight: its state must not be torn down. */
+  isSpawnInFlight: (ptyId: string) => boolean
   /** Writes one `daemon_died` audit row per agent pane (daemon-init's fanout handler). */
   notifyDaemonDiedFanout: (ptyIds: readonly string[]) => void
   planRecovery: (
@@ -31,15 +34,27 @@ const DAEMON_LOSS_EXIT_CODE = -1
 export function createDaemonSessionLossHandler(
   deps: DaemonSessionLossDeps
 ): (event: PtySessionsLostToDaemonDeathEvent) => Promise<void> {
+  const isCurrent = ({ id, incarnationId }: { id: string; incarnationId?: string }): boolean =>
+    deps.isCurrentPtyExit({ id, ...(incarnationId ? { incarnationId } : {}) }) &&
+    !deps.isSpawnInFlight(id)
   return async (event) => {
     // Why: a pty id the runtime already moved to a newer incarnation was respawned by some other
     // trigger before this announcement landed; it is not a casualty any more.
-    const lost = event.sessions.filter(({ id, incarnationId }) =>
-      deps.isCurrentPtyExit({ id, ...(incarnationId ? { incarnationId } : {}) })
-    )
+    const lost = event.sessions.filter(isCurrent)
     if (lost.length === 0) {
+      // Why: a loss announcement that finds only stale ids must not vanish without a trace.
+      deps.recordBreadcrumb('daemon_sessions_lost', {
+        count: 0,
+        applied: 0,
+        notified: false,
+        stale: event.sessions.length,
+        ...(event.sinceDisconnectMs === undefined
+          ? {}
+          : { sinceDisconnectMs: event.sinceDisconnectMs })
+      })
       return
     }
+    // Audit and plan read state that onPtyExit / clearProviderPtyState tear down, so both come first.
     try {
       deps.notifyDaemonDiedFanout(lost.map(({ id }) => id))
     } catch (error) {
@@ -51,33 +66,38 @@ export function createDaemonSessionLossHandler(
     } catch (error) {
       console.error('[daemon] daemon-loss recovery plan failed:', error)
     }
-    const applied: string[] = []
-    for (const { id, incarnationId } of lost) {
-      // Re-check after the plan's await: a concurrent respawn of the same pane id wins.
-      if (!deps.isCurrentPtyExit({ id, ...(incarnationId ? { incarnationId } : {}) })) {
-        continue
+    // Re-check after the plan's await: a concurrent respawn of the same pane id wins.
+    const toApply = lost.filter(isCurrent)
+    // No await from here on: main cannot service the renderer's relaunch before every exit is applied.
+    let notified = false
+    if (plan) {
+      const applyIds = new Set(toApply.map(({ id }) => id))
+      const sessions = plan
+        .filter((entry) => applyIds.has(entry.id) && !entry.peerOwned)
+        .map(({ id, paneKey, reanchor }) => ({ id, paneKey, reanchor }))
+      if (sessions.length > 0) {
+        try {
+          // Why before the exits: the renderer must capture while the pane's live status still exists.
+          notified = deps.sendToRenderer({ epoch: event.epoch, sessions })
+        } catch (error) {
+          console.error('[daemon] sessions-lost notice to the window failed:', error)
+        }
       }
+    }
+    for (const { id, incarnationId } of toApply) {
       deps.applyProviderPtyExitState({
         id,
         code: DAEMON_LOSS_EXIT_CODE,
         ...(incarnationId ? { incarnationId } : {})
       })
-      applied.push(id)
-    }
-    let notified = false
-    if (plan) {
-      const appliedIds = new Set(applied)
-      const sessions = plan
-        .filter((entry) => appliedIds.has(entry.id) && !entry.peerOwned)
-        .map(({ id, paneKey, reanchor }) => ({ id, paneKey, reanchor }))
-      if (sessions.length > 0) {
-        notified = deps.sendToRenderer({ epoch: event.epoch, sessions })
-      }
     }
     deps.recordBreadcrumb('daemon_sessions_lost', {
       count: lost.length,
-      applied: applied.length,
+      applied: toApply.length,
       notified,
+      ...(event.sessions.length > lost.length
+        ? { stale: event.sessions.length - lost.length }
+        : {}),
       ...(event.sinceDisconnectMs === undefined
         ? {}
         : { sinceDisconnectMs: event.sinceDisconnectMs })
