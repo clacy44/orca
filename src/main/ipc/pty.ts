@@ -140,6 +140,9 @@ import {
   resolveClaudeAuthEnvDeletions
 } from '../claude-accounts/environment'
 import { markClaudePtyExited, markClaudePtySpawned } from '../claude-accounts/live-pty-gate'
+import { notifyDaemonDiedFanout } from '../daemon/daemon-died-fanout-registry'
+import { createDaemonSessionLossHandler } from './pty-daemon-session-loss'
+import { recordDurableCrashBreadcrumb } from '../crash-reporting/durable-crash-breadcrumb'
 import { ensureLinuxTerminalOrcaCliShimDir } from '../cli/linux-terminal-orca-cli-shim'
 import {
   isLegacyTerminalShimPathEntry,
@@ -294,6 +297,8 @@ const PRODUCER_FLOW_CONTROL_ENABLED = true
 // Why: post-spawn write/resize/kill calls carry only the PTY ID; map it to its connectionId so ops route to the right provider.
 const ptyOwnership = new Map<string, string | null>()
 const ptyIncarnationById = new Map<string, string>()
+// Why: a same-id relaunch mid-spawn must not have its owners and hook state torn down by a late daemon-loss exit.
+const callerSessionSpawnsInFlight = new Map<string, number>()
 
 export function isCurrentPtyExit(payload: { id: string; incarnationId?: string }): boolean {
   const current = ptyIncarnationById.get(payload.id)
@@ -2340,6 +2345,7 @@ let localExitUnsub: (() => void) | null = null
 let localBackgroundStreamUnsub: (() => void) | null = null
 let localWriteUnavailableUnsub: (() => void) | null = null
 let localTransportDisconnectedUnsub: (() => void) | null = null
+let localSessionsLostUnsub: (() => void) | null = null
 let didFinishLoadHandler: (() => void) | null = null
 let didFinishLoadWebContents: WebContents | null = null
 let rendererLifecycleResetWebContents: WebContents | null = null
@@ -2551,11 +2557,13 @@ export function unbindLocalProviderListeners(): void {
   localBackgroundStreamUnsub?.()
   localWriteUnavailableUnsub?.()
   localTransportDisconnectedUnsub?.()
+  localSessionsLostUnsub?.()
   localDataUnsub = null
   localExitUnsub = null
   localBackgroundStreamUnsub = null
   localWriteUnavailableUnsub = null
   localTransportDisconnectedUnsub = null
+  localSessionsLostUnsub = null
 }
 
 // ─── IPC Registration ───────────────────────────────────────────────
@@ -4183,6 +4191,46 @@ export function registerPtyHandlers(
     return providerExitObserved
   }
 
+  // Why shared: the provider-exit listener and R315's daemon-loss handler apply the SAME main-side
+  // exit semantics (anchor retirement, peer-owned pane close); only the exit listener also tells the renderer.
+  const applyProviderPtyExitState = (payload: {
+    id: string
+    code: number
+    incarnationId?: string
+  }): void => {
+    clearProviderPtyState(payload.id)
+    ptyOwnership.delete(payload.id)
+    markClaudePtyExited(payload.id)
+    runtime?.onPtyExit(payload.id, payload.code, payload.incarnationId)
+  }
+
+  const handleDaemonSessionsLost = createDaemonSessionLossHandler({
+    isCurrentPtyExit,
+    isSpawnInFlight: (ptyId) => (callerSessionSpawnsInFlight.get(ptyId) ?? 0) > 0,
+    notifyDaemonDiedFanout,
+    planRecovery: async (sessions) =>
+      (runtime
+        ? await runtime.planDaemonLossRecovery(sessions)
+        : sessions.map(({ id }) => ({ id, paneKey: null, peerOwned: false, reanchor: false }))
+      ).map((entry) => ({
+        ...entry,
+        paneKey: entry.paneKey ?? getPaneKeyForPtyId(entry.id) ?? null
+      })),
+    applyProviderPtyExitState,
+    sendToRenderer: (payload) => {
+      if (
+        mainWindow.isDestroyed() ||
+        (typeof mainWindow.webContents.isDestroyed === 'function' &&
+          mainWindow.webContents.isDestroyed())
+      ) {
+        return false
+      }
+      mainWindow.webContents.send('pty:sessionsLostToDaemonDeath', payload)
+      return true
+    },
+    recordBreadcrumb: (name, data) => recordDurableCrashBreadcrumb(name, data)
+  })
+
   // Why extracted: the "Restart daemon" flow rebinds against the fresh adapter after replaceDaemonProvider, sharing this code path with startup registration.
   const bindProviderListeners = (): void => {
     localDataUnsub?.()
@@ -4190,6 +4238,7 @@ export function registerPtyHandlers(
     localBackgroundStreamUnsub?.()
     localWriteUnavailableUnsub?.()
     localTransportDisconnectedUnsub?.()
+    localSessionsLostUnsub?.()
 
     // S10-12 R2: the provider's authenticated transport itself closed — mark every pty it
     // owns disconnected now, not on the next poll-driven liveness sweep (STA-2373's sibling
@@ -4213,6 +4262,13 @@ export function registerPtyHandlers(
         }
         mainWindow.webContents.send('pty:writeUnavailable', { id: payload.id })
       }) ?? null
+
+    // R315: ptys that died with the daemon, announced after the replacement daemon answered an
+    // authoritative inventory. Immediate, admission-safe recovery — see pty-daemon-session-loss.ts.
+    localSessionsLostUnsub =
+      localProvider.onSessionsLostToDaemonDeath?.(
+        (event) => void handleDaemonSessionsLost(event)
+      ) ?? null
 
     // Daemon keep-tail thinning facts, in byte order with onData: markers flip transient-fact scan authority; a gap forces renderer restore from the snapshot.
     localBackgroundStreamUnsub =
@@ -4257,10 +4313,7 @@ export function registerPtyHandlers(
         return
       }
       if (!isLocalProvider) {
-        clearProviderPtyState(payload.id)
-        ptyOwnership.delete(payload.id)
-        markClaudePtyExited(payload.id)
-        runtime?.onPtyExit(payload.id, payload.code, payload.incarnationId)
+        applyProviderPtyExitState(payload)
       }
       sendPtyExitToRenderer(payload)
     })
@@ -6388,6 +6441,13 @@ export function registerPtyHandlers(
       let snapshotKittyFlagsCoverReconciledSeq = true
       let preparedProvisionalExecutionContext = false
       let releaseWorktreeSpawn: (() => void) | undefined
+      const inFlightId = args.sessionId ? getAppPtyId(args.connectionId, args.sessionId) : null
+      if (inFlightId) {
+        callerSessionSpawnsInFlight.set(
+          inFlightId,
+          (callerSessionSpawnsInFlight.get(inFlightId) ?? 0) + 1
+        )
+      }
       try {
         if (!earlyStablePaneOwner) {
           await assertFolderWorkspacePtyPathUsable(args.worktreeId)
@@ -7597,6 +7657,14 @@ export function registerPtyHandlers(
       } finally {
         releaseWorktreeSpawn?.()
         finishTerminalInstall()
+        if (inFlightId) {
+          const remaining = (callerSessionSpawnsInFlight.get(inFlightId) ?? 1) - 1
+          if (remaining > 0) {
+            callerSessionSpawnsInFlight.set(inFlightId, remaining)
+          } else {
+            callerSessionSpawnsInFlight.delete(inFlightId)
+          }
+        }
       }
     }
   )

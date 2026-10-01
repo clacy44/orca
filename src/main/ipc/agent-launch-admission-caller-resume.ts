@@ -13,6 +13,7 @@ import {
   type LiveReportRuntimeDeps
 } from '../runtime/orchestration/live-report-liveness'
 import { resolveResumeTranscript } from '../startup/resolve-resume-transcript'
+import { parsePaneKey } from '../../shared/stable-pane-id'
 import { ResumeTargetLiveRefusedError } from './agent-launch-admission-errors'
 import {
   audit,
@@ -33,12 +34,12 @@ export type CallerResumeLivenessDeps = LiveReportRuntimeDeps & {
   manifestChairForSession: (sessionId: string) => Promise<{ name: string } | null>
 }
 
-type Via = 'claude_foreground' | 'hook_report'
+type Via = 'claude_foreground' | 'hook_report' | 'session_holder'
 
 async function refuseLive(
   db: OrchestrationDb,
   ctx: AgentLaunchAdmissionContext,
-  deps: CallerResumeLivenessDeps,
+  deps: CallerResumeLivenessDeps | null,
   paneKey: string,
   x: string,
   panes: string[],
@@ -47,10 +48,15 @@ async function refuseLive(
   const reason = `resume_target_owned_by_another_pane holder=${panes.join(',')} via=${via}`
   audit(db, paneKey, ctx.hostId, 'launch_refused', 'refused', reason.slice(0, 200))
   const holder = panes[0] ?? 'unknown'
-  const handle = deps.terminalHandleForPane(holder)
-  const chair = await deps.manifestChairForSession(x).catch(() => null)
+  const handle = deps?.terminalHandleForPane(holder) ?? null
+  const chair = deps ? await deps.manifestChairForSession(x).catch(() => null) : null
   const named = handle ? `${holder} (${handle})` : holder
-  const what = via === 'claude_foreground' ? 'is already running in' : 'is still reported live by'
+  const what =
+    via === 'claude_foreground'
+      ? 'is already running in'
+      : via === 'hook_report'
+        ? 'is still reported live by'
+        : 'is recorded as held by'
   throw new ResumeTargetLiveRefusedError(
     `Claude session ${x} ${what} pane ${named}; Orca refused to start a second process on the same conversation.`,
     {
@@ -59,16 +65,37 @@ async function refuseLive(
       holderTerminal: handle,
       via,
       chair: chair?.name ?? null,
-      nextSteps: [
-        handle
-          ? `Use that pane, or close it first: orca terminal close --terminal ${handle}`
-          : `Use pane ${holder}, or close it first.`,
-        chair
-          ? `After that pane is closed, recover the chair with \`orca chairs restore --only ${chair.name}\` — run it twice at least 10 s apart.`
-          : 'After that pane is closed, run this resume again.'
-      ]
+      nextSteps:
+        via === 'session_holder'
+          ? sessionHolderNextSteps(db, ctx, holder, chair?.name ?? null)
+          : [
+              handle
+                ? `Use that pane, or close it first: orca terminal close --terminal ${handle}`
+                : `Use pane ${holder}, or close it first.`,
+              chair
+                ? `After that pane is closed, recover the chair with \`orca chairs restore --only ${chair.name}\` — run it twice at least 10 s apart.`
+                : 'After that pane is closed, run this resume again.'
+            ]
     }
   )
+}
+
+// Why not "close the pane": the books holder keeps `current_sessions` until its agent is retired.
+function sessionHolderNextSteps(
+  db: OrchestrationDb,
+  ctx: AgentLaunchAdmissionContext,
+  holder: string,
+  chairName: string | null
+): string[] {
+  const agent = db.getAgentByPaneKey(ctx.hostId, holder)
+  return [
+    agent
+      ? `Release the session by retiring the agent that holds it: orca agents retire ${agent.display_name}`
+      : `Release the session by retiring the agent bound to pane ${holder}: orca agents retire <name|id>`,
+    chairName
+      ? `Or recover the chair with \`orca chairs restore --only ${chairName}\` — run it twice at least 10 s apart.`
+      : 'After the session is released, run this resume again.'
+  ]
 }
 
 /** Rules 1-2: refuse when X's holder runs claude in its foreground, or a hook report of X stands
@@ -112,6 +139,51 @@ export async function refuseIfResumeTargetLive(
     paneKey,
     x,
     standing.length > 0 ? standing : [holder ?? 'unknown'],
+    'hook_report'
+  )
+}
+
+// Why by leaf: a pane that moved tabs keeps its leaf, and the recovering pane is never its own contender.
+const leafOf = (key: string): string => parsePaneKey(key)?.leafId ?? key
+const isSelf = (key: string, paneKey: string): boolean =>
+  key === paneKey || leafOf(key) === leafOf(paneKey)
+
+/** SELF_RESUME(caller): refuse while ANOTHER pane holds X by the books (a restore moved it) or by a
+ * standing hook report. The recovering pane itself never counts. Audits, then throws. */
+export async function refuseIfSelfResumeContested(
+  db: OrchestrationDb,
+  ctx: AgentLaunchAdmissionContext,
+  paneKey: string,
+  x: string
+): Promise<void> {
+  const deps = ctx.callerResume
+  // Why no liveness test: only a host-authored move puts X elsewhere while this pane's row still says X.
+  const holder = db.paneHoldingSession(ctx.hostId, x)
+  if (holder !== undefined && !isSelf(holder, paneKey)) {
+    await refuseLive(db, ctx, deps, paneKey, x, [holder], 'session_holder')
+  }
+  const listed = deps?.liveReportPanesForSession(x, { excludePaneKey: paneKey })
+  if (!deps || !listed) {
+    return
+  }
+  const reporters = listed.filter((r) => !isSelf(r.paneKey, paneKey))
+  if (reporters.length === 0) {
+    return
+  }
+  const inventory = await deps.takeControllerInventoryForSweep().catch(() => null)
+  if (!liveReportStandsElsewhere(reporters, inventory, ctx.hostId, deps)) {
+    return
+  }
+  const standing = reporters
+    .filter((r) => liveReportStandsElsewhere([r], inventory, ctx.hostId, deps))
+    .map((r) => r.paneKey)
+  await refuseLive(
+    db,
+    ctx,
+    deps,
+    paneKey,
+    x,
+    standing.length ? standing : [reporters[0].paneKey],
     'hook_report'
   )
 }

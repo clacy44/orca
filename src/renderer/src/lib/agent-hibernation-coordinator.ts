@@ -14,6 +14,8 @@ import {
   getForegroundTerminalTabIds,
   getForegroundTerminalTabLastSeenAtById
 } from './foreground-terminal-tabs'
+import { collectHibernationGuard } from './agent-hibernation-guard-fetch'
+import type { HibernationGuardSnapshot } from '../../../shared/hibernation-guard-types'
 import { getAgentHibernationOutputSignature } from './agent-hibernation-output-activity'
 import { mergePendingTerminalInputActivity } from './terminal-input-activity-coalescing'
 import { getRuntimeEnvironmentIdForWorktree } from './worktree-runtime-owner'
@@ -57,7 +59,8 @@ type RuntimePtyLivenessSample = {
 function snapshotFromState(
   state: AppState,
   now: number,
-  runtimeLiveness: RuntimePtyLivenessSample
+  runtimeLiveness: RuntimePtyLivenessSample,
+  hibernationGuard: HibernationGuardSnapshot
 ): AgentHibernationPlannerSnapshot {
   return {
     settings: state.settings,
@@ -78,6 +81,7 @@ function snapshotFromState(
       state.lastTerminalInputAtByPaneKey
     ),
     foregroundTerminalLastSeenAtByTabId: getForegroundTerminalTabLastSeenAtById(),
+    hibernationGuard,
     now
   }
 }
@@ -145,9 +149,17 @@ async function collectRuntimePtyLiveness(state: AppState): Promise<RuntimePtyLiv
 }
 
 async function currentCandidates(now: number) {
-  const runtimeLiveness = await collectRuntimePtyLiveness(useAppStore.getState())
+  const sampledState = useAppStore.getState()
+  // Why: R316 — the host guard is fetched in the same round as runtime liveness, and again on
+  // every re-plan, so the kill-time check sees the verdict as of immediately before the kill.
+  const [runtimeLiveness, hibernationGuard] = await Promise.all([
+    collectRuntimePtyLiveness(sampledState),
+    collectHibernationGuard(sampledState)
+  ])
   const freshState = useAppStore.getState()
-  return planAgentHibernationCandidates(snapshotFromState(freshState, now, runtimeLiveness))
+  return planAgentHibernationCandidates(
+    snapshotFromState(freshState, now, runtimeLiveness, hibernationGuard)
+  )
     .filter((candidate) => {
       const runtimeEnvironmentId = getRuntimeEnvironmentIdForWorktree(
         freshState,

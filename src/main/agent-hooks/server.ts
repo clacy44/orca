@@ -92,6 +92,7 @@ import {
   type AgentProviderSessionMetadata
 } from '../../shared/agent-session-resume'
 import { isCommandCodeNewTurnWhileWorking } from '../../shared/command-code-turn-boundary'
+import type { BackgroundWorkVerdict } from '../../shared/hibernation-guard-types'
 
 export type { AgentHookSource }
 
@@ -2006,25 +2007,65 @@ export class AgentHookServer {
     }
     const previousRunningTask = this.state.claudeRunningNonAgentTaskPaneKeys.has(paneKey)
     const previousActiveCron = this.state.claudeActiveSessionCronPaneKeys.has(paneKey)
+    const previousInventory = this.state.claudeBackgroundInventoryObservedPaneKeys.has(paneKey)
     const event = normalizeHookPayload(this.state, source, body, this.env)
     const nextRunningTask = this.state.claudeRunningNonAgentTaskPaneKeys.has(paneKey)
     const nextActiveCron = this.state.claudeActiveSessionCronPaneKeys.has(paneKey)
-    this.setClaudeBackgroundEvidence(paneKey, previousRunningTask, previousActiveCron)
+    const nextInventory = this.state.claudeBackgroundInventoryObservedPaneKeys.has(paneKey)
+    this.setClaudeBackgroundEvidence(
+      paneKey,
+      previousRunningTask,
+      previousActiveCron,
+      previousInventory
+    )
     if (!event || event.paneKey !== paneKey) {
       return { event }
     }
     // Why: nested CLIs may inherit the pane key; only accepted statuses may mutate its background-work gate.
     return {
       event,
-      onAccepted: () => this.setClaudeBackgroundEvidence(paneKey, nextRunningTask, nextActiveCron)
+      onAccepted: () =>
+        this.setClaudeBackgroundEvidence(paneKey, nextRunningTask, nextActiveCron, nextInventory)
     }
+  }
+
+  /**
+   * R316: the host's explicit background-work verdict for agent-sleep. `done` alone is never
+   * 'idle': the pane must ALSO have a live (not merely restored) status and, for Claude, a last
+   * lead turn boundary that carried a `background_tasks` inventory proving nothing runs behind it.
+   */
+  backgroundWorkVerdict(paneKey: string): BackgroundWorkVerdict {
+    if (
+      claudeRosterHasWorkingSubagent(this.state.claudeSubagentRosterByPaneKey.get(paneKey)) ||
+      this.state.claudeRunningNonAgentTaskPaneKeys.has(paneKey) ||
+      this.state.claudeActiveSessionCronPaneKeys.has(paneKey)
+    ) {
+      return 'busy'
+    }
+    const entry = this.state.lastStatusByPaneKey.get(paneKey) as
+      | EnrichedAgentHookEventPayload
+      | undefined
+    if (!entry || entry.restoredUnconfirmed || entry.payload.state !== 'done') {
+      return 'unknown'
+    }
+    const isClaude = entry.source === 'claude' || entry.payload.agentType === 'claude'
+    if (isClaude && !this.state.claudeBackgroundInventoryObservedPaneKeys.has(paneKey)) {
+      return 'unknown'
+    }
+    return 'idle'
   }
 
   private setClaudeBackgroundEvidence(
     paneKey: string,
     hasRunningTask: boolean,
-    hasActiveCron: boolean
+    hasActiveCron: boolean,
+    hasInventory: boolean
   ): void {
+    if (hasInventory) {
+      this.state.claudeBackgroundInventoryObservedPaneKeys.add(paneKey)
+    } else {
+      this.state.claudeBackgroundInventoryObservedPaneKeys.delete(paneKey)
+    }
     if (hasRunningTask) {
       this.state.claudeRunningNonAgentTaskPaneKeys.add(paneKey)
     } else {

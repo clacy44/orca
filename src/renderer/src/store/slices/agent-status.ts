@@ -298,10 +298,15 @@ export type AgentStatusSlice = {
    * pty — so the remount is a RESTORE (a notice, `--resume`), never a fresh session. Never
    * overwrites an existing record (idempotent against a retried remount); a no-op if the pane
    * has no resumable live status to capture from. */
-  captureSleepingAgentSessionForDaemonDeath: (paneKey: string) => void
+  captureSleepingAgentSessionForDaemonDeath: (
+    paneKey: string,
+    opts?: { reanchor?: boolean }
+  ) => void
   /** Capture resumable agent sessions across every worktree for crash recovery or quit; mode sets live/quit precedence. */
   captureAllSleepingAgentSessions: (mode: AllAgentSessionCaptureMode) => void
   clearSleepingAgentSession: (paneKey: string) => void
+  /** R315: drops only `reanchorAfterDaemonDeath`, leaving the record otherwise intact. */
+  clearSleepingAgentReanchorFlag: (paneKey: string) => void
   clearSleepingAgentSessionsByPaneKey: (paneKeys: readonly string[]) => void
   setSleepingAgentAutomaticResumeBlocked: (paneKey: string, blocked: boolean) => void
   clearSleepingAgentSessionsByWorktree: (worktreeId: string) => void
@@ -3084,11 +3089,32 @@ export const createAgentStatusSlice: StateCreator<AppState, [], [], AgentStatusS
     // `captureSleepingAgentSessionsByWorktree`'s worktree-sleep-shaped path, which tags a
     // different origin with its own ownership-preservation special cases that do not apply to a
     // daemon-death remount.
-    captureSleepingAgentSessionForDaemonDeath: (paneKey) => {
+    captureSleepingAgentSessionForDaemonDeath: (paneKey, opts) => {
       set((s) => {
-        if (s.sleepingAgentSessionsByPaneKey[paneKey]) {
-          // Never overwrite — idempotent against a retried/duplicate remount call.
-          return s
+        const existing = s.sleepingAgentSessionsByPaneKey[paneKey]
+        if (existing) {
+          // Never overwrite; a chair verdict only annotates the live checkpoint of the SAME provider session.
+          const live = s.agentStatusByPaneKey[paneKey]
+          if (
+            opts?.reanchor !== true ||
+            existing.origin !== 'live' ||
+            existing.reanchorAfterDaemonDeath === true ||
+            !live?.providerSession ||
+            live.agentType !== existing.agent ||
+            !agentProviderSessionsEqual(
+              existing.agent,
+              existing.providerSession,
+              live.providerSession
+            )
+          ) {
+            return s
+          }
+          return {
+            sleepingAgentSessionsByPaneKey: {
+              ...s.sleepingAgentSessionsByPaneKey,
+              [paneKey]: { ...existing, reanchorAfterDaemonDeath: true }
+            }
+          }
         }
         const entry = s.agentStatusByPaneKey[paneKey]
         if (!entry) {
@@ -3111,7 +3137,13 @@ export const createAgentStatusSlice: StateCreator<AppState, [], [], AgentStatusS
           return s
         }
         return {
-          sleepingAgentSessionsByPaneKey: { ...s.sleepingAgentSessionsByPaneKey, [paneKey]: record }
+          sleepingAgentSessionsByPaneKey: {
+            ...s.sleepingAgentSessionsByPaneKey,
+            // R315: main's chair verdict for a daemon-loss capture. Memory-only (the hydration
+            // schema strips it), so it can never outlive the app session or leak into a later resume.
+            [paneKey]:
+              opts?.reanchor === true ? { ...record, reanchorAfterDaemonDeath: true } : record
+          }
         }
       })
     },
@@ -3176,6 +3208,18 @@ export const createAgentStatusSlice: StateCreator<AppState, [], [], AgentStatusS
     },
 
     clearSleepingAgentSession: (paneKey) => clearSleepingAgentSessionsByPaneKey([paneKey]),
+    clearSleepingAgentReanchorFlag: (paneKey) => {
+      set((s) => {
+        const current = s.sleepingAgentSessionsByPaneKey[paneKey]
+        if (current?.reanchorAfterDaemonDeath === undefined) {
+          return s
+        }
+        const { reanchorAfterDaemonDeath: _flag, ...rest } = current
+        return {
+          sleepingAgentSessionsByPaneKey: { ...s.sleepingAgentSessionsByPaneKey, [paneKey]: rest }
+        }
+      })
+    },
     clearSleepingAgentSessionsByPaneKey,
     setSleepingAgentAutomaticResumeBlocked: (paneKey, blocked) => {
       set((s) => {

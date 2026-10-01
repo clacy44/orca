@@ -5,6 +5,7 @@ import type {
   PtyBackgroundStreamEvent,
   PtyProviderBufferSnapshot,
   PtyProcessInfo,
+  PtySessionsLostToDaemonDeathEvent,
   PtySpawnOptions,
   PtySpawnResult
 } from '../providers/types'
@@ -216,6 +217,12 @@ export class DaemonPtyRouter implements IPtyProvider {
 
   onWriteUnavailable(callback: (payload: { id: string }) => void): () => void {
     return this.subscriptions.onWriteUnavailable(callback)
+  }
+
+  onSessionsLostToDaemonDeath(
+    callback: (event: PtySessionsLostToDaemonDeathEvent) => void
+  ): () => void {
+    return this.subscriptions.onSessionsLostToDaemonDeath(callback)
   }
 
   onTransportDisconnected(callback: () => void): () => void {

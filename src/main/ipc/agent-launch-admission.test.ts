@@ -15,6 +15,7 @@ import {
 import type { PtySpawnOptions } from '../providers/pty-provider-contract'
 import type { PtySpawnResult } from '../providers/pty-spawn-result'
 import type * as NodeCrypto from 'node:crypto'
+import { DAEMON_DEATH_REANCHOR_PROMPT } from '../../shared/daemon-death-reanchor-prompt'
 
 const MINTED_A = '11111111-1111-4111-8111-111111111111'
 const MINTED_B = '22222222-2222-4222-8222-222222222222'
@@ -413,6 +414,35 @@ describe('S10-21a C3-v2, errata 5(p) v2.1: admitAgentLaunch', () => {
     expect(contested).toEqual([]) // never contestedLineage for a pane's own registered agent
     // [S10-21a C7g, Ruling 34 Addendum 25] classification threads through for the C7f/C7g gate.
     expect(admitted.classification).toBe('self_resume_caller')
+  })
+
+  // R315 (T10): the chair re-anchor prompt rides argv after `--resume X` and must not change what
+  // admission sees — one quoted, dash-free token after the selector is neither a selector nor a refusal.
+  it('R315 T10: `claude --resume X --effort high <prompt>` with the pane newest row X is SELF_RESUME — no row written, nothing refused', async () => {
+    const db = freshDb()
+    db.recordLaunch({
+      hostId: HOST_ID,
+      paneKey: 'tab1:leaf-a',
+      agentType: 'claude',
+      sessionId: 'self-sess',
+      launchGeneration: 'gen-1',
+      executionHostId: HOST_ID,
+      evidence: 'host_launch'
+    })
+    const command = `claude --resume self-sess --effort high '${DAEMON_DEATH_REANCHOR_PROMPT}'`
+
+    const admitted = await admitAgentLaunch(() => db, opts({ command }), CALLER, ctx())
+
+    expect(admitted.classification).toBe('self_resume_caller')
+    expect(admitted.spawnOptions.command).toBe(command)
+    const rows = rawDb(db)
+      .prepare('SELECT session_id FROM agent_launch_sessions WHERE host_id = ? ORDER BY seq')
+      .all(HOST_ID) as { session_id: string }[]
+    expect(rows).toEqual([{ session_id: 'self-sess' }])
+    const refusals = rawDb(db)
+      .prepare(`SELECT COUNT(*) as n FROM agent_audit WHERE verb = 'launch_refused'`)
+      .get() as { n: number }
+    expect(refusals.n).toBe(0)
   })
 
   it("S10-21a C7g: SELF_RESUME(host) — a host-resume admission whose target mismatches the pane's own newest row classifies self_resume_host", async () => {

@@ -15,6 +15,7 @@ import { createBackgroundSleepingAgentWakeDispatcher } from '@/lib/wake-sleeping
 import { TOGGLE_WORKSPACE_BOARD_EVENT } from '@/components/sidebar/useWorkspaceBoardPanel'
 import { SPLIT_TERMINAL_PANE_EVENT, CLOSE_TERMINAL_PANE_EVENT } from '@/constants/terminal'
 import { requestBackgroundTerminalWorktreeMount } from '@/components/terminal/background-terminal-worktree-mount'
+import { handleDaemonSessionsLost } from '@/components/terminal-pane/pty-daemon-session-loss'
 import { planMobileTerminalTabMount } from '@/lib/mobile-terminal-tab-mount'
 import { resolveTerminalTabPtyOwnership } from '@/lib/terminal-tab-for-pty-id'
 import {
@@ -3717,6 +3718,13 @@ export function useIpcEvents(): void {
     )
     if (unsubscribeLaunchAdmissionNotice) {
       unsubs.push(unsubscribeLaunchAdmissionNotice)
+    }
+
+    // R315: subscribe here, not on the first terminal transport, so a loss with no pane mounted is still recovered.
+    const unsubscribeSessionsLost =
+      window.api.pty?.onSessionsLostToDaemonDeath?.(handleDaemonSessionsLost)
+    if (unsubscribeSessionsLost) {
+      unsubs.push(unsubscribeSessionsLost)
     }
 
     // Why: main hook server is the durable source of truth; pull the snapshot only after tabs are ready so early startup pushes can be ignored, not buffered.

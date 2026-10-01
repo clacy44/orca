@@ -25,6 +25,7 @@ import type * as UseNotificationDispatchModule from './use-notification-dispatch
 import { getEagerPtyBufferHandle } from './pty-dispatcher'
 import type { AgentType } from '../../../../shared/agent-status-types'
 import { makePaneKey } from '../../../../shared/stable-pane-id'
+import { DAEMON_DEATH_REANCHOR_PROMPT } from '../../../../shared/daemon-death-reanchor-prompt'
 import { toAppSshPtyId } from '../../../../shared/ssh-pty-id'
 import type { SshConnectionState } from '../../../../shared/ssh-types'
 import type { TerminalLayoutSnapshot } from '../../../../shared/terminal-tab-types'
@@ -243,6 +244,7 @@ type StoreState = {
   getAgentLaunchConfigForStatusEntry: ReturnType<typeof vi.fn>
   getAgentLaunchConfigForStatusMetadata: ReturnType<typeof vi.fn>
   clearSleepingAgentSession: ReturnType<typeof vi.fn>
+  clearSleepingAgentReanchorFlag: ReturnType<typeof vi.fn>
   registerAgentLaunchConfig: ReturnType<typeof vi.fn>
   clearAgentLaunchConfig: ReturnType<typeof vi.fn>
   markWorktreeUnread: ReturnType<typeof vi.fn>
@@ -971,6 +973,14 @@ describe('connectPanePty', () => {
       ),
       clearSleepingAgentSession: vi.fn((paneKey: string) => {
         delete mockStoreState.sleepingAgentSessionsByPaneKey[paneKey]
+      }),
+      clearSleepingAgentReanchorFlag: vi.fn((paneKey: string) => {
+        const record = mockStoreState.sleepingAgentSessionsByPaneKey[paneKey] as
+          | Record<string, unknown>
+          | undefined
+        if (record) {
+          delete record.reanchorAfterDaemonDeath
+        }
       }),
       registerAgentLaunchConfig: vi.fn(),
       clearAgentLaunchConfig: vi.fn(),
@@ -11026,6 +11036,214 @@ describe('connectPanePty', () => {
       launchToken: expect.stringMatching(new RegExp(`^${UUID_RE}$`)),
       tabId: 'tab-1',
       leafId: LEAF_1
+    })
+  })
+
+  // R315 S2/R8: a flagged chair gets the re-anchor prompt in its `--resume` command ONLY on the
+  // daemon-session-lost recovery relaunch; every cold-restore spawn consumes the flag.
+  describe('daemon-death chair re-anchor on cold restore (R315)', () => {
+    // Why: the harness settings carry the default Claude permission arg.
+    const CLAUDE_RESUME = "claude '--dangerously-skip-permissions' '--resume' 'claude-session-1'"
+
+    async function coldRestoreClaudePane(args: {
+      record?: Record<string, unknown>
+      liveEntry?: boolean
+      recoveryRelaunch?: boolean
+      // F12: make every connect attempt fail, as a refused relaunch does.
+      connectRejects?: boolean
+    }) {
+      const { connectPanePty } = await import('./pty-connection')
+      // Why dynamic: the suite resets modules, so the registry must be the one pty-connection imported.
+      const registry = await import('./pty-daemon-session-loss-registry')
+      const transport = createMockTransport('fresh-pty')
+      transport.connect.mockImplementation(async ({ sessionId }: { sessionId?: string }) => {
+        if (sessionId) {
+          return { id: 'fresh-pty', coldRestore: { scrollback: 'cold-payload', cwd: '/tmp/wt-1' } }
+        }
+        return 'fresh-pty'
+      })
+      if (args.connectRejects) {
+        transport.connect.mockRejectedValue(new Error('launch admission refused'))
+      }
+      transportFactoryQueue.push(transport)
+      const paneKey = makePaneKey('tab-1', LEAF_1)
+      registry._resetDaemonSessionLostRelaunchForTests()
+      if (args.recoveryRelaunch) {
+        registry.markDaemonSessionLostRelaunch([paneKey])
+      }
+      const providerSession = { key: 'session_id', id: 'claude-session-1' }
+      mockStoreState = {
+        ...mockStoreState,
+        tabsByWorktree: { 'wt-1': [{ id: 'tab-1', ptyId: 'lost-pty' }] },
+        settings: { ...mockStoreState.settings, agentCmdOverrides: {}, agentDefaultArgs: {} },
+        agentStatusByPaneKey: args.liveEntry
+          ? {
+              [paneKey]: {
+                paneKey,
+                state: 'working',
+                prompt: 'coordinate the fleet',
+                agentType: 'claude',
+                providerSession
+              }
+            }
+          : {},
+        sleepingAgentSessionsByPaneKey: args.record
+          ? {
+              [paneKey]: {
+                paneKey,
+                tabId: 'tab-1',
+                worktreeId: 'wt-1',
+                agent: 'claude',
+                providerSession,
+                prompt: 'coordinate the fleet',
+                state: 'working',
+                capturedAt: 1,
+                updatedAt: 1,
+                ...args.record
+              }
+            }
+          : {}
+      } as StoreState
+      const binding = connectPanePty(
+        createPane(1) as never,
+        createManager(1) as never,
+        createDeps({
+          restoredLeafId: LEAF_1,
+          restoredPtyIdByLeafId: { [LEAF_1]: 'lost-pty' }
+        }) as never
+      )
+      await flushAsyncTicks(20)
+      await new Promise((resolve) => setTimeout(resolve, 70))
+      binding.dispose()
+      const connectCall = transport.connect.mock.calls.find(
+        ([options]) => (options as { sessionId?: string }).sessionId === 'lost-pty'
+      )
+      return {
+        transport,
+        paneKey,
+        registry,
+        command: (connectCall?.[0] as { command?: string })?.command
+      }
+    }
+
+    const FLAGGED = { origin: 'live', reanchorAfterDaemonDeath: true }
+    const withPrompt = `${CLAUDE_RESUME} '${DAEMON_DEATH_REANCHOR_PROMPT}'`
+
+    it('adds the prompt exactly once on the recovery relaunch, and clears the flag at spawn', async () => {
+      const { command, paneKey, registry } = await coldRestoreClaudePane({
+        record: FLAGGED,
+        recoveryRelaunch: true
+      })
+
+      expect(command).toBe(withPrompt)
+      expect(command?.split(DAEMON_DEATH_REANCHOR_PROMPT)).toHaveLength(2)
+      // Record has no live entry behind it, so the consumed record (flag included) is cleared.
+      expect(mockStoreState.sleepingAgentSessionsByPaneKey[paneKey]).toBeUndefined()
+      expect(registry.isDaemonSessionLostRelaunch(paneKey)).toBe(false)
+    })
+
+    it('with a live entry behind a live-origin record, the relaunch clears only the flag', async () => {
+      const { command, paneKey, registry } = await coldRestoreClaudePane({
+        liveEntry: true,
+        record: FLAGGED,
+        recoveryRelaunch: true
+      })
+
+      expect(command).toBe(withPrompt)
+      expect(mockStoreState.clearSleepingAgentReanchorFlag).toHaveBeenCalledWith(paneKey)
+      expect(mockStoreState.clearSleepingAgentSession).not.toHaveBeenCalled()
+      expect(mockStoreState.sleepingAgentSessionsByPaneKey[paneKey]).toMatchObject({
+        origin: 'live'
+      })
+      expect(mockStoreState.sleepingAgentSessionsByPaneKey[paneKey]).not.toHaveProperty(
+        'reanchorAfterDaemonDeath'
+      )
+      expect(registry.isDaemonSessionLostRelaunch(paneKey)).toBe(false)
+    })
+
+    it('an ordinary resume with a stale flag adds no prompt and clears the flag', async () => {
+      const { command, paneKey } = await coldRestoreClaudePane({
+        liveEntry: true,
+        record: FLAGGED
+      })
+
+      expect(command).toBe(CLAUDE_RESUME)
+      expect(mockStoreState.clearSleepingAgentReanchorFlag).toHaveBeenCalledWith(paneKey)
+      expect(mockStoreState.sleepingAgentSessionsByPaneKey[paneKey]).not.toHaveProperty(
+        'reanchorAfterDaemonDeath'
+      )
+    })
+
+    it('an ordinary resume of a stale-flag record with no live entry adds no prompt and clears the record', async () => {
+      const { command, paneKey } = await coldRestoreClaudePane({ record: FLAGGED })
+
+      expect(command).toBe(CLAUDE_RESUME)
+      expect(mockStoreState.sleepingAgentSessionsByPaneKey[paneKey]).toBeUndefined()
+    })
+
+    it('F12: a refused relaunch still consumes the mark and the flag, so a later resume carries no prompt', async () => {
+      const { transport, paneKey, registry } = await coldRestoreClaudePane({
+        record: FLAGGED,
+        recoveryRelaunch: true,
+        connectRejects: true
+      })
+
+      // N3: the first connect carries the prompt (positive control); the fallback plan never does.
+      const commands = transport.connect.mock.calls.map(
+        ([options]) => (options as { command?: string }).command
+      )
+      expect(commands.length).toBeGreaterThanOrEqual(2)
+      expect(commands[0]).toBe(withPrompt)
+      expect(commands[0]?.split(DAEMON_DEATH_REANCHOR_PROMPT)).toHaveLength(2)
+      expect(commands.slice(1).filter((command) => command?.includes('re-anchor'))).toEqual([])
+      expect(commands.slice(1)).toContain(CLAUDE_RESUME)
+      expect(registry.isDaemonSessionLostRelaunch(paneKey)).toBe(false)
+      expect(mockStoreState.sleepingAgentSessionsByPaneKey[paneKey]).not.toHaveProperty(
+        'reanchorAfterDaemonDeath'
+      )
+    })
+
+    it('adds no prompt for a non-chair (unflagged) record, even on the recovery relaunch', async () => {
+      const { command } = await coldRestoreClaudePane({
+        record: { origin: 'live' },
+        recoveryRelaunch: true
+      })
+
+      expect(command).toBe(CLAUDE_RESUME)
+    })
+
+    it('adds no prompt for quit, worktree-sleep or origin-less records, even if flagged', async () => {
+      for (const origin of ['quit', 'worktree-sleep', undefined]) {
+        const { command } = await coldRestoreClaudePane({
+          record: { origin, reanchorAfterDaemonDeath: true },
+          recoveryRelaunch: true
+        })
+        expect(command).toBe(CLAUDE_RESUME)
+      }
+    })
+
+    it('adds no prompt when there is no record at all (a live-entry-only resume)', async () => {
+      const { command } = await coldRestoreClaudePane({ liveEntry: true, recoveryRelaunch: true })
+
+      expect(command).toBe(CLAUDE_RESUME)
+    })
+
+    it('keeps an unflagged record when a live entry drove the resume (unchanged)', async () => {
+      await coldRestoreClaudePane({ liveEntry: true, record: { origin: 'daemon-death' } })
+
+      expect(mockStoreState.clearSleepingAgentSession).not.toHaveBeenCalled()
+      expect(mockStoreState.clearSleepingAgentReanchorFlag).not.toHaveBeenCalled()
+    })
+
+    it('spawns nothing more once the relaunch is consumed (a reveal is not a second relaunch)', async () => {
+      const { transport } = await coldRestoreClaudePane({
+        record: FLAGGED,
+        recoveryRelaunch: true
+      })
+      const spawnsAfterRelaunch = transport.connect.mock.calls.length
+
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(transport.connect.mock.calls).toHaveLength(spawnsAfterRelaunch)
     })
   })
 

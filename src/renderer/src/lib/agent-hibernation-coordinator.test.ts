@@ -1,6 +1,6 @@
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AgentStatusEntry } from '../../../shared/agent-status-types'
 import type { TerminalLayoutSnapshot, TerminalTab } from '../../../shared/terminal-tab-types'
 import { useAppStore } from '@/store'
@@ -29,14 +29,62 @@ const LEAF = '11111111-1111-4111-8111-111111111111'
 const PI_TRANSCRIPT_PATH = join(tmpdir(), 'pi-session-1.jsonl')
 
 const mockRuntimeEnvironmentCall = vi.fn()
+const mockLocalRuntimeCall = vi.fn()
 
 vi.stubGlobal('window', {
   api: {
+    runtime: {
+      call: mockLocalRuntimeCall
+    },
     runtimeEnvironments: {
       call: mockRuntimeEnvironmentCall
     }
   }
 })
+
+type GuardVerdict = 'idle' | 'busy' | 'unknown'
+
+// Why: R316 — the host guard RPC. Default answer reports every requested pane idle and
+// unprotected so the pre-existing cases keep exercising only their own condition.
+function guardResponse(
+  paneKeys: string[],
+  verdict: GuardVerdict = 'idle',
+  protectedPaneKeys: string[] = []
+) {
+  return {
+    id: 'guard',
+    ok: true,
+    result: {
+      protectedPaneKeys,
+      backgroundWork: Object.fromEntries(paneKeys.map((key) => [key, verdict]))
+    },
+    _meta: { runtimeId: 'runtime-1' }
+  }
+}
+
+function installLocalGuard(
+  respond: (paneKeys: string[], call: number) => unknown = (paneKeys) => guardResponse(paneKeys)
+): void {
+  let call = 0
+  mockLocalRuntimeCall.mockImplementation((args: { method: string; params: unknown }) => {
+    if (args.method !== 'terminal.hibernationGuard') {
+      return Promise.resolve({ id: 'other', ok: true, result: {}, _meta: { runtimeId: 'r' } })
+    }
+    call += 1
+    const { paneKeys } = args.params as { paneKeys: string[] }
+    try {
+      return Promise.resolve(respond(paneKeys, call))
+    } catch (error) {
+      return Promise.reject(error)
+    }
+  })
+}
+
+function guardCalls(): number {
+  return mockLocalRuntimeCall.mock.calls.filter(
+    ([args]) => (args as { method: string }).method === 'terminal.hibernationGuard'
+  ).length
+}
 
 function tab(): TerminalTab {
   return {
@@ -137,6 +185,10 @@ function installRuntimeListResponses(
     if (compatible) {
       return Promise.resolve(compatible)
     }
+    if (args.method === 'terminal.hibernationGuard') {
+      const { paneKeys } = (args as unknown as { params: { paneKeys: string[] } }).params
+      return Promise.resolve(guardResponse(paneKeys))
+    }
     if (args.method === 'terminal.list') {
       const response = queue.shift() ?? runtimeListResult(['pty-1'])
       if (response instanceof Error) {
@@ -172,7 +224,12 @@ function deferred<T>(): {
   return { promise, resolve, reject }
 }
 
+beforeEach(() => {
+  installLocalGuard()
+})
+
 afterEach(() => {
+  mockLocalRuntimeCall.mockReset()
   resetAgentHibernationCoordinatorForTests()
   clearRuntimeCompatibilityCacheForTests()
   resetForegroundTerminalTabIdsForTests()
@@ -317,8 +374,9 @@ describe('agent sleep coordinator', () => {
     expect(shutdown).not.toHaveBeenCalled()
 
     await runAgentHibernationTick()
-    await Promise.resolve()
-    await Promise.resolve()
+    // Why: the kill-time re-plan now also awaits the host guard RPC, so a fixed two-microtask
+    // flush no longer reaches the shutdown call; drain the queue instead (same assertion).
+    await vi.advanceTimersByTimeAsync(0)
     expect(shutdown).toHaveBeenCalledWith('wt-bg', {
       paneKey: `tab-1:${LEAF}`,
       tabId: 'tab-1',
@@ -406,8 +464,9 @@ describe('agent sleep coordinator', () => {
     expect(shutdown).not.toHaveBeenCalled()
 
     await runAgentHibernationTick()
-    await Promise.resolve()
-    await Promise.resolve()
+    // Why: the kill-time re-plan now also awaits the host guard RPC, so a fixed two-microtask
+    // flush no longer reaches the shutdown call; drain the queue instead (same assertion).
+    await vi.advanceTimersByTimeAsync(0)
     expect(shutdown).toHaveBeenCalledWith('wt-bg', {
       paneKey: `tab-1:${LEAF}`,
       tabId: 'tab-1',
@@ -539,6 +598,10 @@ describe('agent sleep coordinator', () => {
       if (compatible) {
         return Promise.resolve(compatible)
       }
+      if (args.method === 'terminal.hibernationGuard') {
+        const { paneKeys } = (args as unknown as { params: { paneKeys: string[] } }).params
+        return Promise.resolve(guardResponse(paneKeys))
+      }
       if (args.method === 'terminal.list') {
         return Promise.resolve(responses.shift() ?? runtimeListResult(['pty-1'])).then(
           (result) => ({
@@ -669,5 +732,104 @@ describe('agent sleep coordinator', () => {
     expect(
       mockRuntimeEnvironmentCall.mock.calls.filter(([args]) => args.method === 'terminal.list')
     ).toHaveLength(2)
+  })
+
+  describe('R316 host guard', () => {
+    const PANE = `tab-1:${LEAF}`
+
+    it('asks the host guard for the candidate pane and hibernates on an idle verdict (positive control)', async () => {
+      vi.useFakeTimers()
+      const shutdown = installEligibleState(vi.fn().mockResolvedValue(undefined))
+      startAgentHibernationCoordinator({ intervalMs: 1000, now: () => NOW })
+
+      await vi.advanceTimersByTimeAsync(2000)
+
+      expect(mockLocalRuntimeCall).toHaveBeenCalledWith({
+        method: 'terminal.hibernationGuard',
+        params: { paneKeys: [PANE] }
+      })
+      expect(shutdown).toHaveBeenCalledTimes(1)
+    })
+
+    it('hibernates nothing when the guard RPC fails', async () => {
+      vi.useFakeTimers()
+      installLocalGuard(() => {
+        throw new Error('method not found')
+      })
+      const shutdown = installEligibleState(vi.fn().mockResolvedValue(undefined))
+      startAgentHibernationCoordinator({ intervalMs: 1000, now: () => NOW })
+
+      await vi.advanceTimersByTimeAsync(4000)
+
+      expect(guardCalls()).toBeGreaterThanOrEqual(2)
+      expect(shutdown).not.toHaveBeenCalled()
+    })
+
+    it('hibernates nothing when the guard answer is malformed', async () => {
+      vi.useFakeTimers()
+      installLocalGuard(() => ({ id: 'guard', ok: true, result: {}, _meta: { runtimeId: 'r' } }))
+      const shutdown = installEligibleState(vi.fn().mockResolvedValue(undefined))
+      startAgentHibernationCoordinator({ intervalMs: 1000, now: () => NOW })
+
+      await vi.advanceTimersByTimeAsync(4000)
+
+      expect(shutdown).not.toHaveBeenCalled()
+    })
+
+    it('hibernates nothing for a protected pane or a busy/unknown verdict', async () => {
+      vi.useFakeTimers()
+      const shutdown = installEligibleState(vi.fn().mockResolvedValue(undefined))
+      startAgentHibernationCoordinator({ intervalMs: 1000, now: () => NOW })
+
+      installLocalGuard((paneKeys) => guardResponse(paneKeys, 'idle', [PANE]))
+      await vi.advanceTimersByTimeAsync(3000)
+      installLocalGuard((paneKeys) => guardResponse(paneKeys, 'busy'))
+      await vi.advanceTimersByTimeAsync(3000)
+      installLocalGuard((paneKeys) => guardResponse(paneKeys, 'unknown'))
+      await vi.advanceTimersByTimeAsync(3000)
+
+      expect(shutdown).not.toHaveBeenCalled()
+    })
+
+    it('re-fetches the guard at kill time and refuses when it flipped to busy', async () => {
+      vi.useFakeTimers()
+      // Calls 1 and 2 are the two confirmation ticks; call 3 is the kill-time re-plan.
+      installLocalGuard((paneKeys, call) => guardResponse(paneKeys, call >= 3 ? 'busy' : 'idle'))
+      const shutdown = installEligibleState(vi.fn().mockResolvedValue(undefined))
+      startAgentHibernationCoordinator({ intervalMs: 1000, now: () => NOW })
+
+      await vi.advanceTimersByTimeAsync(2000)
+
+      expect(guardCalls()).toBe(3)
+      expect(shutdown).not.toHaveBeenCalled()
+    })
+
+    it('fails closed when a remote environment guard RPC errors', async () => {
+      vi.useFakeTimers()
+      installRuntimeListResponses(
+        runtimeListResult(['pty-1']),
+        runtimeListResult(['pty-1']),
+        runtimeListResult(['pty-1'])
+      )
+      const baseImpl = mockRuntimeEnvironmentCall.getMockImplementation()!
+      mockRuntimeEnvironmentCall.mockImplementation((args: { method: string }) =>
+        args.method === 'terminal.hibernationGuard'
+          ? Promise.reject(new Error('old runtime: method not found'))
+          : baseImpl(args)
+      )
+      const shutdown = installEligibleState(vi.fn().mockResolvedValue(undefined), {
+        settings: {
+          experimentalAgentHibernation: true,
+          agentHibernationIdleMs: DEFAULT_AGENT_HIBERNATION_IDLE_MS,
+          activeRuntimeEnvironmentId: 'runtime-1'
+        } as never,
+        ptyIdsByTabId: { 'tab-1': [] }
+      })
+      startAgentHibernationCoordinator({ intervalMs: 1000, now: () => NOW })
+
+      await vi.advanceTimersByTimeAsync(3000)
+
+      expect(shutdown).not.toHaveBeenCalled()
+    })
   })
 })

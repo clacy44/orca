@@ -2,7 +2,12 @@ import { describe, expect, it, vi } from 'vitest'
 import { DaemonPtyRouter } from './daemon-pty-router'
 import { SessionNotFoundError, TerminalSessionOwnerUnverifiedError } from './daemon-errors'
 import type { DaemonPtyAdapter } from './daemon-pty-adapter'
-import type { PtyBackgroundStreamEvent, PtySpawnOptions, PtySpawnResult } from '../providers/types'
+import type {
+  PtyBackgroundStreamEvent,
+  PtySessionsLostToDaemonDeathEvent,
+  PtySpawnOptions,
+  PtySpawnResult
+} from '../providers/types'
 import {
   AGENT_SESSION_CLAIM_DAEMON_PROTOCOL_VERSION,
   AGENT_SESSION_CREATE_OPERATION_DAEMON_PROTOCOL_VERSION,
@@ -21,6 +26,7 @@ type AdapterMock = DaemonPtyAdapter & {
   emitExit: (id: string, code: number, incarnationId?: string) => void
   emitIdentityChange: () => void
   triggerWriteUnavailable: (id: string) => void
+  triggerSessionsLost: (event: PtySessionsLostToDaemonDeathEvent) => void
 }
 
 const LARGE_RECONCILE_SESSION_COUNT = 150_000
@@ -44,6 +50,7 @@ function createAdapter(
     []
   const backgroundListeners: ((payload: PtyBackgroundStreamEvent) => void)[] = []
   const writeUnavailableListeners: ((payload: { id: string }) => void)[] = []
+  const sessionsLostListeners: ((event: PtySessionsLostToDaemonDeathEvent) => void)[] = []
   const exitListeners: ((payload: { id: string; code: number; incarnationId?: string }) => void)[] =
     []
   const identityChangeListeners: (() => void)[] = []
@@ -128,6 +135,12 @@ function createAdapter(
         }
       }
     }),
+    onSessionsLostToDaemonDeath: vi.fn(
+      (callback: (event: PtySessionsLostToDaemonDeathEvent) => void) => {
+        sessionsLostListeners.push(callback)
+        return () => void sessionsLostListeners.splice(sessionsLostListeners.indexOf(callback), 1)
+      }
+    ),
     onExit: vi.fn(
       (callback: (payload: { id: string; code: number; incarnationId?: string }) => void) => {
         exitListeners.push(callback)
@@ -174,6 +187,8 @@ function createAdapter(
         listener({ id })
       }
     },
+    triggerSessionsLost: (event: PtySessionsLostToDaemonDeathEvent) =>
+      sessionsLostListeners.forEach((listener) => listener(event)),
     _writes: writes
   } as unknown as AdapterMock
 }
@@ -198,6 +213,29 @@ it('forwards dead-endpoint write-unavailable signals from every routed adapter',
   current.triggerWriteUnavailable('after-unsubscribe')
   legacy.triggerWriteUnavailable('after-unsubscribe')
   expect(recovered).toEqual(['current-pane', 'legacy-pane'])
+})
+
+it('forwards R315 sessions-lost-to-daemon-death announcements from every routed adapter', () => {
+  // Why revert-sensitive: main subscribes on the ROUTED provider, so without this forward the
+  // proactive daemon-death recovery never reaches main and panes wait for a keystroke again.
+  const current = createAdapter('current')
+  const legacy = createAdapter('legacy')
+  const router = new DaemonPtyRouter({ current, legacy: [legacy] })
+  const received: PtySessionsLostToDaemonDeathEvent[] = []
+
+  const unsubscribe = router.onSessionsLostToDaemonDeath((event) => received.push(event))
+  current.triggerSessionsLost({ epoch: 1, sessions: [{ id: 'current-pane' }] })
+  legacy.triggerSessionsLost({ epoch: 1, sessions: [{ id: 'legacy-pane', incarnationId: 'i1' }] })
+
+  expect(received).toEqual([
+    { epoch: 1, sessions: [{ id: 'current-pane' }] },
+    { epoch: 1, sessions: [{ id: 'legacy-pane', incarnationId: 'i1' }] }
+  ])
+
+  unsubscribe()
+  current.triggerSessionsLost({ epoch: 2, sessions: [{ id: 'after-unsubscribe' }] })
+  legacy.triggerSessionsLost({ epoch: 2, sessions: [{ id: 'after-unsubscribe' }] })
+  expect(received).toHaveLength(2)
 })
 
 it('rejects completion inspection when no daemon owns the session', async () => {

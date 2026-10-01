@@ -200,6 +200,8 @@ export function buildAgentResumeStartupPlan(args: {
   agentCommand?: string | null
   ompResumeFilePath?: string | null
   sessionOptions?: Record<string, SessionOptionValue>
+  /** R315: Claude-only prompt appended after `--resume <id>` (chair re-anchor after daemon death). */
+  resumePrompt?: string | null
   /** Why: see buildAgentStartupPlan — remote launches use the plain `orca` shim. */
   isRemote?: boolean
 }): AgentStartupPlan | null {

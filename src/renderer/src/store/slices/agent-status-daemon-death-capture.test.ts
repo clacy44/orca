@@ -93,4 +93,134 @@ describe('S10-21a C7g: captureSleepingAgentSessionForDaemonDeath / quit preceden
       providerSession: { key: 'session_id', id: 'codex-session-2' }
     })
   })
+
+  describe('R315: reanchorAfterDaemonDeath', () => {
+    function storeWithLiveOnlyPane() {
+      const store = createTestStore()
+      store.setState({
+        tabsByWorktree: { 'wt-1': [makeTab({ id: 'tab-1', worktreeId: 'wt-1' })] },
+        agentStatusByPaneKey: {
+          'tab-1:leaf-1': {
+            state: 'working',
+            prompt: 'first task',
+            updatedAt: 10,
+            stateStartedAt: 10,
+            stateHistory: [],
+            agentType: 'claude',
+            paneKey: 'tab-1:leaf-1',
+            worktreeId: 'wt-1',
+            providerSession: { key: 'session_id', id: 'claude-session-1' }
+          }
+        }
+      } as Partial<AppState>)
+      return store
+    }
+
+    it('sets the flag only when the capture asks for it', () => {
+      const plain = storeWithLiveOnlyPane()
+      plain.getState().captureSleepingAgentSessionForDaemonDeath('tab-1:leaf-1')
+      expect(plain.getState().sleepingAgentSessionsByPaneKey['tab-1:leaf-1']).not.toHaveProperty(
+        'reanchorAfterDaemonDeath'
+      )
+
+      const notAsked = storeWithLiveOnlyPane()
+      notAsked
+        .getState()
+        .captureSleepingAgentSessionForDaemonDeath('tab-1:leaf-1', { reanchor: false })
+      expect(notAsked.getState().sleepingAgentSessionsByPaneKey['tab-1:leaf-1']).not.toHaveProperty(
+        'reanchorAfterDaemonDeath'
+      )
+
+      const asked = storeWithLiveOnlyPane()
+      asked.getState().captureSleepingAgentSessionForDaemonDeath('tab-1:leaf-1', { reanchor: true })
+      expect(asked.getState().sleepingAgentSessionsByPaneKey['tab-1:leaf-1']).toMatchObject({
+        origin: 'daemon-death',
+        reanchorAfterDaemonDeath: true,
+        providerSession: { key: 'session_id', id: 'claude-session-1' }
+      })
+    })
+
+    it('never overwrites an existing record, with or without the flag', () => {
+      const store = storeWithLiveOnlyPane()
+      store.getState().captureSleepingAgentSessionForDaemonDeath('tab-1:leaf-1')
+      const first = store.getState().sleepingAgentSessionsByPaneKey['tab-1:leaf-1']
+
+      store.getState().captureSleepingAgentSessionForDaemonDeath('tab-1:leaf-1', { reanchor: true })
+
+      expect(store.getState().sleepingAgentSessionsByPaneKey['tab-1:leaf-1']).toBe(first)
+      expect(first).not.toHaveProperty('reanchorAfterDaemonDeath')
+    })
+  })
+
+  describe('R315 ruling: annotating an existing live record', () => {
+    function storeWithLiveRecord(sessionId = 'claude-session-1') {
+      const store = createTestStore()
+      store.setState({
+        tabsByWorktree: { 'wt-1': [makeTab({ id: 'tab-1', worktreeId: 'wt-1' })] }
+      } as Partial<AppState>)
+      store
+        .getState()
+        .setAgentStatus(
+          'tab-1:leaf-1',
+          { state: 'working', prompt: 'p', agentType: 'claude' },
+          'Claude',
+          { updatedAt: 10, stateStartedAt: 10 },
+          { tabId: 'tab-1', worktreeId: 'wt-1' },
+          { providerSession: { key: 'session_id', id: sessionId } }
+        )
+      return store
+    }
+
+    it('sets the flag on the live record for the same provider session and changes nothing else', () => {
+      const store = storeWithLiveRecord()
+      const before = store.getState().sleepingAgentSessionsByPaneKey['tab-1:leaf-1']!
+      expect(before.origin).toBe('live')
+
+      store.getState().captureSleepingAgentSessionForDaemonDeath('tab-1:leaf-1', { reanchor: true })
+
+      const after = store.getState().sleepingAgentSessionsByPaneKey['tab-1:leaf-1']!
+      expect(after).toEqual({ ...before, reanchorAfterDaemonDeath: true })
+      expect(after.origin).toBe('live')
+    })
+
+    it('never sets the flag for a non-chair capture', () => {
+      for (const opts of [undefined, { reanchor: false }]) {
+        const store = storeWithLiveRecord()
+        const before = store.getState().sleepingAgentSessionsByPaneKey['tab-1:leaf-1']
+        store.getState().captureSleepingAgentSessionForDaemonDeath('tab-1:leaf-1', opts)
+        expect(store.getState().sleepingAgentSessionsByPaneKey['tab-1:leaf-1']).toBe(before)
+      }
+    })
+
+    it('does not annotate a live record naming a different provider session than the live status', () => {
+      const store = storeWithLiveRecord()
+      const record = store.getState().sleepingAgentSessionsByPaneKey['tab-1:leaf-1']!
+      store.setState({
+        sleepingAgentSessionsByPaneKey: {
+          'tab-1:leaf-1': { ...record, providerSession: { key: 'session_id', id: 'older' } }
+        }
+      } as Partial<AppState>)
+      const before = store.getState().sleepingAgentSessionsByPaneKey['tab-1:leaf-1']
+
+      store.getState().captureSleepingAgentSessionForDaemonDeath('tab-1:leaf-1', { reanchor: true })
+
+      expect(store.getState().sleepingAgentSessionsByPaneKey['tab-1:leaf-1']).toBe(before)
+    })
+
+    it('is idempotent once flagged, and clearSleepingAgentReanchorFlag drops only the flag', () => {
+      const store = storeWithLiveRecord()
+      store.getState().captureSleepingAgentSessionForDaemonDeath('tab-1:leaf-1', { reanchor: true })
+      const flagged = store.getState().sleepingAgentSessionsByPaneKey['tab-1:leaf-1']
+      store.getState().captureSleepingAgentSessionForDaemonDeath('tab-1:leaf-1', { reanchor: true })
+      expect(store.getState().sleepingAgentSessionsByPaneKey['tab-1:leaf-1']).toBe(flagged)
+
+      store.getState().clearSleepingAgentReanchorFlag('tab-1:leaf-1')
+
+      const cleared = store.getState().sleepingAgentSessionsByPaneKey['tab-1:leaf-1']!
+      expect(cleared).not.toHaveProperty('reanchorAfterDaemonDeath')
+      expect(cleared).toMatchObject({ origin: 'live', providerSession: { id: 'claude-session-1' } })
+      store.getState().clearSleepingAgentReanchorFlag('tab-1:leaf-1')
+      expect(store.getState().sleepingAgentSessionsByPaneKey['tab-1:leaf-1']).toBe(cleared)
+    })
+  })
 })

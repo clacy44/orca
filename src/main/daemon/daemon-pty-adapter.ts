@@ -57,6 +57,7 @@ import type {
   PtyBackgroundStreamEvent,
   PtyProviderBufferSnapshot,
   PtyProcessInfo,
+  PtySessionsLostToDaemonDeathEvent,
   PtySpawnOptions,
   PtySpawnResult
 } from '../providers/types'
@@ -147,6 +148,10 @@ export type DaemonPtyAdapterOptions = {
   packagedAppVersion?: string | null
   /** Forks a fresh daemon after endpoint death or a confirmed health replacement. */
   respawn?: (reason: DaemonRespawnReason) => Promise<void | (() => void)>
+  /** R315: true while a deliberate teardown (manual restart) owns the daemon, so a socket loss is not a crash. */
+  isRecoverySuppressed?: () => boolean
+  /** R315: durable-breadcrumb sink for the adapter's own recovery verdicts; never throws into the adapter. */
+  recordBreadcrumb?: (name: string, data: Record<string, string | number | boolean>) => void
 }
 
 export type DaemonRespawnReason =
@@ -161,6 +166,16 @@ export type DaemonIdentityChangeEvent = {
 }
 
 const MAX_TOMBSTONES = 1000
+// Why module-wide: a replacement adapter must not repeat an epoch the renderer already deduped.
+let daemonLossEpochSequence = 0
+export function _resetDaemonLossEpochSequenceForTests(): void {
+  daemonLossEpochSequence = 0
+}
+// R315: waits before each retry of the post-respawn inventory (so at most 3 retries).
+const DAEMON_LOSS_INVENTORY_RETRY_DELAYS_MS = [2_000, 8_000, 30_000]
+// R315 circuit breaker: a crash-looping daemon must not become a relaunch loop.
+const DAEMON_LOSS_BREAKER_MAX_EPOCHS = 3
+const DAEMON_LOSS_BREAKER_WINDOW_MS = 15 * 60 * 1000
 const MAX_CONCURRENT_CHECKPOINTS = 4
 
 // Why a reattach deadline at all: a warm reattach is a user click, so it must never wait on a
@@ -268,6 +283,17 @@ export class DaemonPtyAdapter implements IPtyProvider {
   private backgroundStreamListeners: ((payload: PtyBackgroundStreamEvent) => void)[] = []
   // Why: lets main fan a dead-endpoint signal to every affected pane, not just the written one (STA-2373 sibling-freeze).
   private writeUnavailableListeners: ((payload: { id: string }) => void)[] = []
+  // R315: sessions that were live when the transport was lost unplanned, with the incarnation they had then.
+  private deathCandidates = new Map<string, string | undefined>()
+  private daemonLossRecoveryPromise: Promise<void> | null = null
+  private daemonLossDisconnects = 0
+  private daemonLossTornDown = 0
+  private announcedLostSessionIds = new Set<string>()
+  private daemonLossEmitTimes: number[] = []
+  private daemonLossDisconnectedAt = 0
+  private sessionsLostListeners: ((event: PtySessionsLostToDaemonDeathEvent) => void)[] = []
+  private isRecoverySuppressed: (() => boolean) | null
+  private recordBreadcrumb: DaemonPtyAdapterOptions['recordBreadcrumb'] | null
   private removeEventListener: (() => void) | null = null
   private initialCwds = new Map<string, string>()
   private wslDistrosBySessionId = new Map<string, string>()
@@ -367,6 +393,8 @@ export class DaemonPtyAdapter implements IPtyProvider {
     this.historyManager = opts.historyPath ? new HistoryManager(opts.historyPath) : null
     this.historyReader = opts.historyPath ? new HistoryReader(opts.historyPath) : null
     this.respawnFn = opts.respawn ?? null
+    this.isRecoverySuppressed = opts.isRecoverySuppressed ?? null
+    this.recordBreadcrumb = opts.recordBreadcrumb ?? null
     this.runtimeDir = opts.runtimeDir ?? opts.profileScope ?? null
     this.packagedAppVersion = opts.packagedAppVersion ?? null
     this.supportsCheckpoints = this.protocolVersion >= 4
@@ -385,6 +413,7 @@ export class DaemonPtyAdapter implements IPtyProvider {
         for (const id of this.activeSessionIds) {
           this.sessionsAwaitingDaemonRecovery.add(id)
         }
+        this.beginDaemonLossRecovery()
       }
       for (const id of this.pausedProducerSessionIds) {
         this.producerResumesOwedOnReconnect.add(id)
@@ -758,6 +787,7 @@ export class DaemonPtyAdapter implements IPtyProvider {
     if (cachedRestore) {
       // Why: wake-after-sleep lands here too; sleep dropped active tracking + the history writer, so re-register both or the next sleep/wake restores a blank terminal.
       this.activeSessionIds.add(sessionId)
+      this.noteSessionAttached(sessionId)
       if (this.historyManager && !historyRecovery.identityChanged) {
         const recoveryFreeze = takeRecoveryFreeze(historyRecovery, sessionId)
         if (historyRecovery.unreadableSessionId === sessionId) {
@@ -824,6 +854,7 @@ export class DaemonPtyAdapter implements IPtyProvider {
 
     const wasAlreadyManaged = this.activeSessionIds.has(sessionId)
     this.activeSessionIds.add(sessionId)
+    this.noteSessionAttached(sessionId)
     const providerSequence = providerSequenceFromCreateOrAttach(result)
 
     // Cold restore: daemon made a new session but disk history shows an unclean shutdown → return saved scrollback.
@@ -1037,7 +1068,11 @@ export class DaemonPtyAdapter implements IPtyProvider {
     // [S10-21e review C4] Mirrors doSpawn's :816 bookkeeping — markSessionDirty, the final
     // checkpoint, and the onDisconnected re-arm all key off `activeSessionIds` membership alone,
     // so a successful attach (isNew:false) must join it the same way a spawn does.
+    if (result.incarnationId) {
+      this.sessionIncarnations.set(id, result.incarnationId)
+    }
     this.activeSessionIds.add(id)
+    this.noteSessionAttached(id)
     this.clearSessionAwaitingDaemonRecovery(id)
     const providerSequence = providerSequenceFromCreateOrAttach(result)
     return providerSequence ? { providerSequence } : undefined
@@ -1232,6 +1267,7 @@ export class DaemonPtyAdapter implements IPtyProvider {
       remainingRequestTimeoutMs(opts.deadlineMs)
     )
     this.activeSessionIds.delete(id)
+    this.noteSessionTornDown(id)
     this.clearSessionAwaitingDaemonRecovery(id)
     this.dirtySessionVersions.delete(id)
     if (!opts.keepHistory) {
@@ -1624,6 +1660,7 @@ export class DaemonPtyAdapter implements IPtyProvider {
         alive.push(session.sessionId)
         // Why: track background sessions in the checkpoint set so disconnectOnly's final checkpoint doesn't leave stale recovery data.
         this.activeSessionIds.add(session.sessionId)
+        this.noteSessionAttached(session.sessionId)
         await this.reconcileLiveSessionHistory(session).catch((err) =>
           console.warn('[history] live-session reconciliation failed:', session.sessionId, err)
         )
@@ -1788,6 +1825,10 @@ export class DaemonPtyAdapter implements IPtyProvider {
   fanoutSyntheticExits(code: number): void {
     const ids = [...this.activeSessionIds]
     this.activeSessionIds.clear()
+    for (const id of ids) {
+      this.noteSessionTornDown(id)
+    }
+    this.announcedLostSessionIds.clear()
     this.sessionsAwaitingDaemonRecovery.clear()
     this.writeRecoveryAttempted = false
     this.dirtySessionVersions.clear()
@@ -1888,6 +1929,13 @@ export class DaemonPtyAdapter implements IPtyProvider {
         this.writeUnavailableListeners.splice(idx, 1)
       }
     }
+  }
+
+  onSessionsLostToDaemonDeath(
+    callback: (event: PtySessionsLostToDaemonDeathEvent) => void
+  ): () => void {
+    this.sessionsLostListeners.push(callback)
+    return () => removeListener(this.sessionsLostListeners, callback)
   }
 
   private emitWriteUnavailable(id: string): void {
@@ -2615,6 +2663,137 @@ export class DaemonPtyAdapter implements IPtyProvider {
     this.writeRecoveryPromise = recovery
   }
 
+  // R315: an unplanned loss with live sessions starts one proactive recovery. A restart empties
+  // activeSessionIds before it kills the daemon, so an empty set (or isRecoverySuppressed) means deliberate.
+  private beginDaemonLossRecovery(): void {
+    // Why: ids already announced lost stay active (the lazy backstop) but must not re-announce or take breaker slots.
+    const fresh = [...this.activeSessionIds].filter((id) => !this.announcedLostSessionIds.has(id))
+    if (!this.respawnFn || fresh.length === 0 || this.isRecoverySuppressed?.() === true) {
+      return
+    }
+    const now = Date.now()
+    this.daemonLossEmitTimes = this.daemonLossEmitTimes.filter(
+      (at) => now - at < DAEMON_LOSS_BREAKER_WINDOW_MS
+    )
+    if (this.daemonLossEmitTimes.length >= DAEMON_LOSS_BREAKER_MAX_EPOCHS) {
+      this.writeBreadcrumb('daemon_loss_recovery_suppressed', {
+        epochsInWindow: this.daemonLossEmitTimes.length,
+        sessionCount: this.activeSessionIds.size
+      })
+      return
+    }
+    if (this.daemonLossRecoveryPromise === null) {
+      this.daemonLossDisconnectedAt = now
+      this.daemonLossTornDown = 0
+    }
+    for (const id of fresh) {
+      this.deathCandidates.set(id, this.sessionIncarnations.get(id))
+    }
+    this.daemonLossDisconnects += 1
+    void this.recoverAfterDaemonLoss()
+  }
+
+  // Single-flight; a loss racing the inventory is caught by the generation check and re-inventoried.
+  private recoverAfterDaemonLoss(): Promise<void> {
+    if (!this.daemonLossRecoveryPromise) {
+      this.daemonLossRecoveryPromise = this.runDaemonLossRecovery()
+        .catch((error) => console.warn('[daemon] Proactive daemon-loss recovery failed:', error))
+        .finally(() => {
+          this.daemonLossRecoveryPromise = null
+        })
+    }
+    return this.daemonLossRecoveryPromise
+  }
+
+  private async runDaemonLossRecovery(): Promise<void> {
+    for (let attempt = 0; ; attempt += 1) {
+      if (this.respawnAdoptionClosed) {
+        this.deathCandidates.clear()
+        return
+      }
+      const generation = this.daemonLossDisconnects
+      try {
+        // Why: respawns iff the daemon is gone (coalesced via respawnPromise), else just reconnects.
+        const aliveSessionIds = await this.withDaemonRetry(() => this.fetchAliveSessionIds())
+        if (generation === this.daemonLossDisconnects) {
+          this.finishDaemonLossRecovery(aliveSessionIds)
+          return
+        }
+        // Another loss raced this inventory: its answer predates that death, so ask again.
+      } catch (error) {
+        if (this.respawnAdoptionClosed) {
+          this.deathCandidates.clear()
+          return
+        }
+        console.warn('[daemon] Post-loss inventory attempt failed:', error)
+      }
+      const delayMs = DAEMON_LOSS_INVENTORY_RETRY_DELAYS_MS[attempt]
+      if (delayMs === undefined) {
+        // Never declare a loss on an unknown inventory; the lazy write/reveal path stays the backstop.
+        this.deathCandidates.clear()
+        this.writeBreadcrumb('daemon_loss_recovery_unproven', { attempts: attempt + 1 })
+        return
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, delayMs))
+    }
+  }
+
+  private async fetchAliveSessionIds(): Promise<Set<string>> {
+    await this.ensureConnected()
+    const result = await this.client.request<ListSessionsResult>('listSessions', undefined)
+    return new Set(result.sessions.filter((s) => s.isAlive).map((s) => s.sessionId))
+  }
+
+  private finishDaemonLossRecovery(aliveSessionIds: Set<string>): void {
+    // Why: a casualty is decided by explicit teardown (noteSessionTornDown), not by activeSessionIds,
+    // which a concurrent listProcesses prune also empties.
+    const sessions = [...this.deathCandidates]
+      .filter(([id]) => !aliveSessionIds.has(id))
+      .map(([id, incarnationId]) => ({ id, ...(incarnationId ? { incarnationId } : {}) }))
+    this.deathCandidates.clear()
+    for (const { id } of sessions) {
+      this.announcedLostSessionIds.add(id)
+    }
+    if (this.daemonLossTornDown > 0) {
+      this.writeBreadcrumb('daemon_loss_candidates_torn_down', { count: this.daemonLossTornDown })
+    }
+    this.daemonLossTornDown = 0
+    if (sessions.length === 0 || this.respawnAdoptionClosed) {
+      return
+    }
+    this.daemonLossEmitTimes.push(Date.now())
+    const event = {
+      epoch: ++daemonLossEpochSequence,
+      sessions,
+      sinceDisconnectMs: Math.max(0, Date.now() - this.daemonLossDisconnectedAt)
+    }
+    // oxlint-disable-next-line unicorn/no-useless-spread -- copy-safe: listeners may unsubscribe during iteration
+    for (const listener of [...this.sessionsLostListeners]) {
+      listener(event)
+    }
+  }
+
+  // Why: an exit, kill or restart teardown removes the id from the casualty candidates.
+  private noteSessionTornDown(id: string): void {
+    if (this.deathCandidates.delete(id)) {
+      this.daemonLossTornDown += 1
+    }
+    this.announcedLostSessionIds.delete(id)
+  }
+
+  // Why: a re-attached id is a live session again and may be announced lost by a future death.
+  private noteSessionAttached(id: string): void {
+    this.announcedLostSessionIds.delete(id)
+  }
+
+  private writeBreadcrumb(name: string, data: Record<string, string | number | boolean>): void {
+    try {
+      this.recordBreadcrumb?.(name, data)
+    } catch {
+      // Why: a breadcrumb sink failure must never break daemon recovery.
+    }
+  }
+
   private notifyActiveSessionsWriteUnavailable(): void {
     // Snapshot first: a listener that kills a pane would mutate activeSessionIds
     // mid-iteration and silently skip the sibling this fan-out exists to reach.
@@ -2921,6 +3100,7 @@ export class DaemonPtyAdapter implements IPtyProvider {
           return
         }
         this.activeSessionIds.delete(event.sessionId)
+        this.noteSessionTornDown(event.sessionId)
         this.clearSessionAwaitingDaemonRecovery(event.sessionId)
         this.dirtySessionVersions.delete(event.sessionId)
         // Why: a reused sessionId must not inherit the dead session's owed resume (stray resumePty) or backgrounded/thinned state.

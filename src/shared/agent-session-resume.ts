@@ -78,6 +78,11 @@ export type SleepingAgentSessionRecord = {
    *  opened, so a mobile wake must not background-mount every such tab and
    *  respawn the whole workspace the user just slept (#11598). */
   restoreOnTabOpenOnly?: boolean
+  /** R315: set ONLY by a daemon-loss capture whose pane main classified as a host-scoped chair.
+   *  The pane's own cold restore then appends the fixed re-anchor prompt to its `--resume`
+   *  launch command and clears the record at spawn commit. Memory-only by design: the
+   *  workspace-session hydration schema has no such key, so it never survives an app restart. */
+  reanchorAfterDaemonDeath?: boolean
 }
 
 const RESUMABLE_TUI_AGENT_SET: ReadonlySet<string> = new Set(RESUMABLE_TUI_AGENTS)

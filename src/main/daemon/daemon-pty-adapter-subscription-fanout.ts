@@ -1,4 +1,7 @@
-import type { PtyBackgroundStreamEvent } from '../providers/types'
+import type {
+  PtyBackgroundStreamEvent,
+  PtySessionsLostToDaemonDeathEvent
+} from '../providers/types'
 import { combineUnsubscribes } from './combine-unsubscribes'
 import type { DaemonPtyAdapter } from './daemon-pty-adapter'
 import type { DaemonPtyRouterDataEvent, DaemonPtyRouterExitEvent } from './daemon-pty-router-events'
@@ -53,6 +56,15 @@ export class DaemonPtyAdapterSubscriptionFanout {
   // fan-out never reaches the renderer and only the written pane recovers (STA-2373).
   onWriteUnavailable(callback: (payload: { id: string }) => void): () => void {
     return combineUnsubscribes(this.adapters.map((adapter) => adapter.onWriteUnavailable(callback)))
+  }
+
+  // R315: fan the post-recovery "these sessions died with the daemon" signal out the same way.
+  onSessionsLostToDaemonDeath(
+    callback: (event: PtySessionsLostToDaemonDeathEvent) => void
+  ): () => void {
+    return combineUnsubscribes(
+      this.adapters.map((adapter) => adapter.onSessionsLostToDaemonDeath(callback))
+    )
   }
 
   // S10-12 R2: fan out the raw transport-close signal the same way as onWriteUnavailable.

@@ -138,6 +138,15 @@ import {
 } from './restore-ticket-registry'
 import { isRestoreSweepLockHeld } from './restore-sweep-lock'
 import { requestChairRestore as requestChairRestoreImpl } from './orchestration/chair-restore' // [S10-21d b3b, D-R163 M4]
+import { computeHibernationGuard } from './orchestration/hibernation-guard' // [R316]
+import {
+  planDaemonLossRecovery as planDaemonLossRecoveryImpl,
+  type DaemonLossRecoveryPlanEntry
+} from './orchestration/daemon-loss-chair-verdict' // [R315]
+import type {
+  BackgroundWorkVerdict,
+  HibernationGuardSnapshot
+} from '../../shared/hibernation-guard-types' // [R316]
 import { OrchestrationDb } from './orchestration/db'
 import type { LegacySweepAuditRow } from './device-registry-legacy-sweep'
 import type { RemoteDispatchAttachmentRow } from './orchestration/types'
@@ -600,6 +609,7 @@ import {
 } from '../../shared/tui-agent-selection'
 import {
   findHostScopedManifestChairForSession,
+  readHostScopedManifestChairs,
   type ChairsManifestEntry
 } from './orchestration/chair-succession-manifest-entry'
 import { resolveCallerResumeLaunchPreferences } from './orchestration/caller-resume-launch-preferences'
@@ -3353,6 +3363,7 @@ export class OrcaRuntimeService {
   private readonly restoreTickets = new RestoreTicketRegistry()
   private liveReportCheck: LiveReportCheckFn | null = null // [S10-21d b3, DEC-3 D]
   private liveReportPanesCheck: LiveReportPanesCheckFn | null = null // [S10-21f b2-10q R143]
+  private backgroundWorkVerdictCheck: ((paneKey: string) => BackgroundWorkVerdict) | null = null // [R316]
   // S10-16 C1 review F3: the device registry's R1.4 legacy-sweep audit rows have no sink until the
   // orchestration DB attaches (device-registry-load.ts runs before it exists) — RuntimeRpcServer
   // registers its DeviceRegistry here once pairing init succeeds, and this flushes it exactly once
@@ -14497,6 +14508,39 @@ export class OrcaRuntimeService {
     opts?: LiveReportOpts
   ): { paneKey: string; executionHostId: string }[] | null {
     return this.liveReportPanesCheck ? this.liveReportPanesCheck(sessionId, opts) : null
+  }
+  /** [R315] For ptys that died with the daemon: pane key, peer-owned verdict and chair verdict, read
+   * BEFORE the exit semantics run (onPtyExit drops the pty record and closes peer-owned panes). The
+   * chairs manifest is read once per call; a read or parse failure means "no chair" (safe side). */
+  async planDaemonLossRecovery(
+    sessions: readonly { id: string }[]
+  ): Promise<DaemonLossRecoveryPlanEntry[]> {
+    return planDaemonLossRecoveryImpl({
+      db: this._orchestrationDb,
+      hostId: this.getOrchestrationCompatibilityHostId(),
+      hostScopedChairs: await readHostScopedManifestChairs(),
+      sessions,
+      paneKeyOf: (ptyId) => this.ptysById.get(ptyId)?.paneKey ?? null,
+      isPeerOwned: (ptyId) => this.isPeerOwnedAttachmentPane(ptyId)
+    })
+  }
+  /** [R316] Same wiring pattern as `setLiveReportPanesForSessionCheck`: the hook server owns the
+   * background-work facts (subagents, non-agent tasks, session crons), the runtime owns the
+   * registered-agent directory; the sleep guard needs both. */
+  setBackgroundWorkVerdictCheck(check: (paneKey: string) => BackgroundWorkVerdict): void {
+    this.backgroundWorkVerdictCheck = check
+  }
+  /** [R316] Host-computed agent-sleep guard for the panes the caller is considering. Throws if the
+   * directory cannot be read: a guard that cannot be computed must hibernate nothing, and the
+   * caller treats an error as exactly that. A runtime with no wired hook server reports every
+   * pane 'unknown'. */
+  async hibernationGuardForPanes(paneKeys: readonly string[]): Promise<HibernationGuardSnapshot> {
+    return computeHibernationGuard(
+      this.getOrchestrationDb(),
+      this.getOrchestrationCompatibilityHostId(),
+      paneKeys,
+      (paneKey) => this.backgroundWorkVerdictCheck?.(paneKey) ?? 'unknown'
+    )
   }
   requestChairRestore(request: ChairRestoreRequest): ChairRestoreResult {
     return requestChairRestoreImpl({ runtime: this }, request)

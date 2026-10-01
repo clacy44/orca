@@ -271,6 +271,9 @@ export async function admitAgentLaunch(
         // Same-pane-vs-contested split and the passThrough's own confirm/compensate live in
         // agent-launch-self-resume-arm.ts (max-lines budget).
         const reasonCode = admission.kind === 'host-resume' ? 'host' : 'caller'
+        if (reasonCode === 'caller') {
+          await callerResume.refuseIfSelfResumeContested(db, ctx, paneKey, x)
+        }
         auditSelfResume(db, ctx, paneKey, reasonCode, registeredRow, newestRow.session_id, x)
         const classification = reasonCode === 'host' ? 'self_resume_host' : 'self_resume_caller'
         // [S10-21a C14b, D-R128 F6] Binds the renderer-funnel gate's refresh to this specific
