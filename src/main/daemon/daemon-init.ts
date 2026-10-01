@@ -61,7 +61,9 @@ import {
   unbindLocalProviderListeners,
   rebindLocalProviderListeners,
   beginRestartExitHold,
-  releaseRestartExitHold
+  releaseRestartExitHold,
+  closeRestartSpawnFence,
+  awaitRestartSpawnDrain
 } from '../ipc/pty'
 import { notifyDaemonDiedFanout } from './daemon-died-fanout-registry'
 
@@ -1434,22 +1436,36 @@ async function runRestartDaemon(): Promise<RestartDaemonResult> {
   const currentOnly = getCurrentDaemonAdapter(currentAdapter)
   const legacyAdapters = getLegacyDaemonAdapters(currentAdapter)
 
-  // Step 1: synthesize pty:exit for every active session BEFORE teardown — the daemon's shutdown path never fans onExit to clients (session.ts:246-252), so the renderer would otherwise never see exits.
-  const fallbackKilledCount =
-    currentAdapter instanceof DegradedDaemonPtyProvider
-      ? await currentAdapter.shutdownFallbackSessions()
-      : 0
-  const currentDaemonSessionIds =
-    currentAdapter instanceof DegradedDaemonPtyProvider
-      ? currentAdapter.getCurrentDaemonSessionIds()
-      : []
-  const killedPtyIds = new Set([...currentOnly.getActiveSessionIds(), ...currentDaemonSessionIds])
-  const killedCount = killedPtyIds.size + fallbackKilledCount
-  // R326: hold the exits of the ptys this restart kills; the announcement after step 7 recovers them
-  // like a daemon crash (R315) instead of closing every pane. Released in exit mode on any failure.
-  beginRestartExitHold(killedPtyIds)
+  // R326: close the local spawn fence now (synchronously, before the first await) so no spawn can
+  // resolve a provider from here until the window settles; the `finally` below always settles it.
+  closeRestartSpawnFence()
   let holdAnnounced = false
   try {
+    // Why: spawns already past the fence must finish BEFORE the snapshot, so the ids they registered
+    // are killed, held and announced. Bounded (10 s); a straggler is rejected by pty.ts's ticket guard.
+    await awaitRestartSpawnDrain()
+
+    // Step 1: synthesize pty:exit for every active session BEFORE teardown — the daemon's shutdown path never fans onExit to clients (session.ts:246-252), so the renderer would otherwise never see exits.
+    // Why after the drain: a drained degraded spawn could otherwise create a fallback session after this kill.
+    const fallbackKilledCount =
+      currentAdapter instanceof DegradedDaemonPtyProvider
+        ? await currentAdapter.shutdownFallbackSessions()
+        : 0
+
+    // Why no await from here to unbind: the snapshot, retirement, hold, audit and fanout must be one
+    // synchronous block, or a spawn/shutdown could land between the snapshot and the hold.
+    const currentDaemonSessionIds =
+      currentAdapter instanceof DegradedDaemonPtyProvider
+        ? currentAdapter.getCurrentDaemonSessionIds()
+        : []
+    const killedPtyIds = new Set([...currentOnly.getActiveSessionIds(), ...currentDaemonSessionIds])
+    const killedCount = killedPtyIds.size + fallbackKilledCount
+    // R326: the superseded adapter spawns nothing and respawns nothing (undone only if the restart fails).
+    currentOnly.retireForRestart()
+    // R326: hold the exits of the ptys this restart kills; the announcement after step 7 recovers them
+    // like a daemon crash (R315) instead of closing every pane. A pty whose own shutdown (close, stop,
+    // hibernate) is in flight is not held: that exit is the user's/runtime's, so it stays today's exit.
+    beginRestartExitHold([...killedPtyIds].filter((id) => !currentOnly.isShutdownInFlight(id)))
     // [S10-21a C7d, Ruling 34 Addendum 23] One main-side 'daemon_died' fact per killed ptyId,
     // BEFORE the fanout below reaches the renderer — see `setDaemonDiedFanoutHandler`'s own doc
     // comment for why this is a callback rather than a direct orchestration-db import here.
@@ -1568,6 +1584,10 @@ async function runRestartDaemon(): Promise<RestartDaemonResult> {
     return { killedCount }
   } finally {
     if (!holdAnnounced) {
+      // Why only while the old provider is still authoritative: after the swap it is dead and superseded.
+      if (adapter === currentAdapter) {
+        currentOnly.reinstateAfterFailedRestart()
+      }
       await releaseRestartExitHold({ mode: 'exit' })
     }
   }

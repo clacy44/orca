@@ -142,7 +142,11 @@ import {
 import { markClaudePtyExited, markClaudePtySpawned } from '../claude-accounts/live-pty-gate'
 import { notifyDaemonDiedFanout } from '../daemon/daemon-died-fanout-registry'
 import { createDaemonSessionLossHandler } from './pty-daemon-session-loss'
-import { createRestartExitHold } from './pty-daemon-restart-hold'
+import {
+  createRestartExitHold,
+  RESTART_SUPERSEDED_SPAWN_MESSAGE,
+  type RestartSpawnTicket
+} from './pty-daemon-restart-hold'
 import { recordDurableCrashBreadcrumb } from '../crash-reporting/durable-crash-breadcrumb'
 import { ensureLinuxTerminalOrcaCliShimDir } from '../cli/linux-terminal-orca-cli-shim'
 import {
@@ -300,6 +304,11 @@ const ptyOwnership = new Map<string, string | null>()
 const ptyIncarnationById = new Map<string, string>()
 // Why: a same-id relaunch mid-spawn must not have its owners and hook state torn down by a late daemon-loss exit.
 const callerSessionSpawnsInFlight = new Map<string, number>()
+
+// Why: after a manual-restart snapshot a spawn that passed the fence earlier is rejected at completion, so it no longer protects its id.
+function isLocalSpawnInFlight(ptyId: string): boolean {
+  return (callerSessionSpawnsInFlight.get(ptyId) ?? 0) - restartExitHold.staleSpawnCount(ptyId) > 0
+}
 
 export function isCurrentPtyExit(payload: { id: string; incarnationId?: string }): boolean {
   const current = ptyIncarnationById.get(payload.id)
@@ -2384,9 +2393,61 @@ let releaseRestartHoldImpl:
   | ((options: { mode: 'announce'; epoch: number } | { mode: 'exit' }) => Promise<void>)
   | null = null
 
+// Why: three bounds so a wedged restart can never hang spawns or the announcement silently; each writes a breadcrumb.
+const RESTART_TIMEOUT_DEFAULTS = { drainMs: 10_000, fenceMs: 30_000, planMs: 5_000 }
+const restartTimeouts = { ...RESTART_TIMEOUT_DEFAULTS }
+const RESTART_STILL_RESTARTING_MESSAGE =
+  'The terminal host is still restarting. Try again in a moment.'
+
+/** Test-only; with no argument restores the defaults. */
+export function _setRestartTimeoutsForTest(partial?: Partial<typeof restartTimeouts>): void {
+  Object.assign(restartTimeouts, RESTART_TIMEOUT_DEFAULTS, partial)
+}
+
+export function closeRestartSpawnFence(): void {
+  if (restartExitHold.closeFence().merged) {
+    console.warn('[daemon] restart spawn fence closed while a window was already open; merged')
+    recordDurableCrashBreadcrumb('daemon_restart_hold_merged', { phase: 'fence' })
+  }
+}
+
+export async function awaitRestartSpawnDrain(): Promise<void> {
+  const { drained, pending } = await restartExitHold.awaitDrain(restartTimeouts.drainMs)
+  if (!drained) {
+    console.warn(
+      `[daemon] restart: ${pending} spawn(s) still running after ${restartTimeouts.drainMs}ms`
+    )
+    recordDurableCrashBreadcrumb('daemon_restart_spawn_drain_timeout', { pending })
+  }
+}
+
 export function beginRestartExitHold(ptyIds: Iterable<string>): void {
   if (restartExitHold.begin(ptyIds).merged) {
     console.warn('[daemon] restart exit hold begun while one was already open; merged')
+    recordDurableCrashBreadcrumb('daemon_restart_hold_merged', { phase: 'hold' })
+  }
+}
+
+// Why: a fenced spawn must outlive neither the window nor the bound; the caller re-checks the fence after every wake.
+async function waitForRestartWindow(
+  pending: Promise<void> | null,
+  deadline: number
+): Promise<void> {
+  if (!pending) {
+    return
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timedOut = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), Math.max(0, deadline - Date.now()))
+  })
+  try {
+    const outcome = await Promise.race([pending.then(() => 'settled' as const), timedOut])
+    if (outcome === 'timeout') {
+      recordDurableCrashBreadcrumb('daemon_restart_spawn_fence_timeout', {})
+      throw new Error(RESTART_STILL_RESTARTING_MESSAGE)
+    }
+  } finally {
+    clearTimeout(timer)
   }
 }
 
@@ -3852,6 +3913,17 @@ export function registerPtyHandlers(
     retiredRejectedPtyIds.set(id, cleanupTimer)
   }
 
+  // Why: a new incarnation for the same id makes the kill mark redundant (isCurrentPtyExit rejects the
+  // killed one) and harmful (it would swallow the new incarnation's first exit, e.g. the restart's).
+  function noteSpawnIncarnation(id: string, incarnationId: string): void {
+    ptyIncarnationById.set(id, incarnationId)
+    const cleanupTimer = syntheticKillExitPtyIds.get(id)
+    if (cleanupTimer) {
+      clearTimeout(cleanupTimer)
+      syntheticKillExitPtyIds.delete(id)
+    }
+  }
+
   function consumeSyntheticKillExit(id: string): boolean {
     const cleanupTimer = syntheticKillExitPtyIds.get(id)
     if (!cleanupTimer) {
@@ -4241,7 +4313,7 @@ export function registerPtyHandlers(
 
   const handleDaemonSessionsLost = createDaemonSessionLossHandler({
     isCurrentPtyExit,
-    isSpawnInFlight: (ptyId) => (callerSessionSpawnsInFlight.get(ptyId) ?? 0) > 0,
+    isSpawnInFlight: isLocalSpawnInFlight,
     notifyDaemonDiedFanout,
     planRecovery: async (sessions) =>
       (runtime
@@ -4252,6 +4324,7 @@ export function registerPtyHandlers(
         paneKey: entry.paneKey ?? getPaneKeyForPtyId(entry.id) ?? null
       })),
     applyProviderPtyExitState,
+    sendExitToRenderer: sendPtyExitToRenderer,
     sendToRenderer: (payload) => {
       if (
         mainWindow.isDestroyed() ||
@@ -4279,16 +4352,24 @@ export function registerPtyHandlers(
       if (options.mode === 'announce') {
         await handleDaemonSessionsLost(
           { epoch: options.epoch, sessions: released.captured },
-          { auditWritten: true, cause: 'manual_restart' }
+          {
+            auditWritten: true,
+            cause: 'manual_restart',
+            planTimeoutMs: restartTimeouts.planMs,
+            exitUnnotified: true,
+            excludeAfterPlan: released.isLateExit
+          }
         )
         return
       }
       let skippedInFlight = 0
+      let skippedStale = 0
       for (const held of released.captured) {
         if (!isCurrentPtyExit(held)) {
+          skippedStale += 1
           continue
         }
-        if ((callerSessionSpawnsInFlight.get(held.id) ?? 0) > 0) {
+        if (isLocalSpawnInFlight(held.id)) {
           skippedInFlight += 1
           continue
         }
@@ -4302,7 +4383,8 @@ export function registerPtyHandlers(
       }
       recordDurableCrashBreadcrumb('daemon_restart_hold_exited', {
         count: released.captured.length,
-        ...(skippedInFlight > 0 ? { inFlight: skippedInFlight } : {})
+        ...(skippedInFlight > 0 ? { inFlight: skippedInFlight } : {}),
+        ...(skippedStale > 0 ? { stale: skippedStale } : {})
       })
     } catch (error) {
       // Why: the restart itself already finished; a failing announcement must not fail it, but must leave a trace.
@@ -5429,7 +5511,7 @@ export function registerPtyHandlers(
                 if (providerResult.incarnationId) {
                   // Why: local providers cannot serialize controller claims, so liveness proof
                   // needs the exact incarnation before the registry promotes the new owner.
-                  ptyIncarnationById.set(providerResult.id, providerResult.incarnationId)
+                  noteSpawnIncarnation(providerResult.id, providerResult.incarnationId)
                 }
                 const providerEnsure = providerResult.agentSessionEnsure
                 return {
@@ -5634,7 +5716,7 @@ export function registerPtyHandlers(
           ptyOwnership.set(result.id, args.connectionId ?? ptyOwnership.get(result.id) ?? null)
           runtime?.registerPreAllocatedHandleForPty(result.id, owner.surface.terminalHandle)
           if (result.incarnationId) {
-            ptyIncarnationById.set(result.id, result.incarnationId)
+            noteSpawnIncarnation(result.id, result.incarnationId)
           }
           runtime?.registerPty(result.id, owner.surface.worktreeId, args.connectionId ?? null, {
             tabId: owner.surface.tabId,
@@ -5675,7 +5757,7 @@ export function registerPtyHandlers(
         }
         ptyOwnership.set(result.id, args.connectionId ?? null)
         if (result.incarnationId) {
-          ptyIncarnationById.set(result.id, result.incarnationId)
+          noteSpawnIncarnation(result.id, result.incarnationId)
         }
         // Why: record the native-Windows-local-PTY determination before any byte reaches the emulator, so its ConPTY DA1 override exists from byte zero.
         if (
@@ -6531,6 +6613,7 @@ export function registerPtyHandlers(
       let preparedProvisionalExecutionContext = false
       let releaseWorktreeSpawn: (() => void) | undefined
       const inFlightId = args.sessionId ? getAppPtyId(args.connectionId, args.sessionId) : null
+      let restartTicket: RestartSpawnTicket | null = null
       if (inFlightId) {
         callerSessionSpawnsInFlight.set(
           inFlightId,
@@ -6538,15 +6621,22 @@ export function registerPtyHandlers(
         )
       }
       try {
-        // R326: while a manual restart holds the killed ids, a local spawn waits for it to settle so
-        // it resolves the NEW provider (never the old adapter's respawn closure). Already counted in
-        // flight above, so the restart's announcement skips this id instead of exiting it.
-        const restartHoldSettled = !args.connectionId ? restartExitHold.pendingSettle() : null
-        if (restartHoldSettled) {
-          await restartHoldSettled
-        }
         if (!earlyStablePaneOwner) {
           await assertFolderWorkspacePtyPathUsable(args.worktreeId)
+        }
+        // R326 fence. Why: while a manual restart's window is open a local spawn waits, then re-checks
+        // (a new window may have opened), so it resolves the NEW provider. Counted in flight above, so
+        // the announcement skips this id. Why NO await between the last tryPassFence and getProvider:
+        // an await there lets a window open after the ticket was issued yet before the provider is chosen.
+        if (!args.connectionId) {
+          const deadline = Date.now() + restartTimeouts.fenceMs
+          for (;;) {
+            restartTicket = restartExitHold.tryPassFence(inFlightId)
+            if (restartTicket) {
+              break
+            }
+            await waitForRestartWindow(restartExitHold.pendingSettle(), deadline)
+          }
         }
         const provider = getProvider(args.connectionId)
         spawnTiming.mark('stable_adoption_setup')
@@ -7106,6 +7196,9 @@ export function registerPtyHandlers(
             ? paneSpawnReservationsByOwnerKey.get(paneSpawnReservationKey)
             : undefined
           if (existingPaneSpawnAfterPreflight) {
+            // Why: this spawn never uses its provider again; keeping the ticket while waiting on another
+            // (possibly fenced) spawn could stall the restart's drain.
+            restartTicket?.leave()
             return { ...(await existingPaneSpawnAfterPreflight.promise), isReattach: true }
           }
           paneSpawnReservation = paneSpawnReservationKey
@@ -7182,6 +7275,28 @@ export function registerPtyHandlers(
           // `admittedLaunch` via `onAdmitted` — mirrors the other branch's own assignment.
           providerResult = stablePaneSpawn.result
           stablePaneOwner = stablePaneSpawn.owner
+          // R326 ticket guard. Why: a restart snapshot landed while this spawn ran (the drain timed out),
+          // so its session is on a superseded adapter and nobody announced it; fail loudly and tear it
+          // down. Why no await: from here to the handler's return nothing may yield between this check
+          // and completion, or the snapshot could land after it.
+          if (restartTicket && restartTicket.generation !== restartExitHold.snapshotGeneration()) {
+            recordDurableCrashBreadcrumb('daemon_restart_spawn_superseded', {
+              reattach: result.isReattach === true
+            })
+            if (!result.isReattach) {
+              void (async () => {
+                try {
+                  await provider.shutdown(result.id, {
+                    immediate: true,
+                    deadlineMs: Date.now() + 5_000
+                  })
+                } catch {
+                  // Best effort: the old daemon dies at the restart's step 3 anyway.
+                }
+              })()
+            }
+            throw new Error(RESTART_SUPERSEDED_SPAWN_MESSAGE)
+          }
           // [S10-21a C7g, Ruling 34 Addendum 25] Read-only main->renderer push of this launch's
           // admission classification, whenever admission classified one — unconditional, unlike
           // the daemon_died gate below (the renderer decides what to do with it; a pane with no
@@ -7354,7 +7469,7 @@ export function registerPtyHandlers(
         })
         ptyOwnership.set(result.id, args.connectionId ?? null)
         if (result.incarnationId) {
-          ptyIncarnationById.set(result.id, result.incarnationId)
+          noteSpawnIncarnation(result.id, result.incarnationId)
         }
         if (initiallyHidden) {
           // Why marked synchronously here: provider data events dispatch on later tasks, so this still lands ahead of the first byte's delivery decision (idempotent if already marked pre-spawn).
@@ -7753,6 +7868,7 @@ export function registerPtyHandlers(
       } finally {
         releaseWorktreeSpawn?.()
         finishTerminalInstall()
+        restartTicket?.leave()
         if (inFlightId) {
           const remaining = (callerSessionSpawnsInFlight.get(inFlightId) ?? 1) - 1
           if (remaining > 0) {

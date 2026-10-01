@@ -282,6 +282,9 @@ type MockAdapter = {
   }
   getActiveSessionIds: ReturnType<typeof vi.fn>
   fanoutSyntheticExits: ReturnType<typeof vi.fn>
+  retireForRestart: ReturnType<typeof vi.fn>
+  reinstateAfterFailedRestart: ReturnType<typeof vi.fn>
+  isShutdownInFlight: ReturnType<typeof vi.fn>
   listProcesses: ReturnType<typeof vi.fn>
   listSessions: ReturnType<typeof vi.fn>
   establishLifecycleLease: ReturnType<typeof vi.fn>
@@ -430,6 +433,9 @@ vi.mock('./daemon-pty-adapter', () => ({
     readonly options: MockAdapter['options']
     readonly getActiveSessionIds: ReturnType<typeof vi.fn>
     readonly fanoutSyntheticExits: ReturnType<typeof vi.fn>
+    readonly retireForRestart: ReturnType<typeof vi.fn>
+    readonly reinstateAfterFailedRestart: ReturnType<typeof vi.fn>
+    readonly isShutdownInFlight: ReturnType<typeof vi.fn>
     readonly listProcesses: ReturnType<typeof vi.fn>
     readonly listSessions: ReturnType<typeof vi.fn>
     readonly establishLifecycleLease: ReturnType<typeof vi.fn>
@@ -449,6 +455,9 @@ vi.mock('./daemon-pty-adapter', () => ({
       this.fanoutSyntheticExits = vi.fn(() => {
         this.callOrder.push('fanoutSyntheticExits')
       })
+      this.retireForRestart = vi.fn()
+      this.reinstateAfterFailedRestart = vi.fn()
+      this.isShutdownInFlight = vi.fn((_id: string) => false)
       this.listProcesses = vi.fn(async () =>
         listProcessesControl.current ? listProcessesControl.current() : []
       )
@@ -489,21 +498,30 @@ vi.mock('../ipc/pty', () => ({
   unbindLocalProviderListeners: unbindLocalProviderListenersMock,
   rebindLocalProviderListeners: rebindLocalProviderListenersMock,
   beginRestartExitHold: beginRestartExitHoldMock,
-  releaseRestartExitHold: releaseRestartExitHoldMock
+  releaseRestartExitHold: releaseRestartExitHoldMock,
+  closeRestartSpawnFence: closeRestartSpawnFenceMock,
+  awaitRestartSpawnDrain: awaitRestartSpawnDrainMock
 }))
 
 // R326: the restart's hold/announce bracket (pty.ts) and the shared loss-epoch sequence (adapter).
-const { beginRestartExitHoldMock, releaseRestartExitHoldMock, nextDaemonLossEpochMock } =
-  vi.hoisted(() => {
-    let epoch = 9000
-    return {
-      beginRestartExitHoldMock: vi.fn((_ptyIds: Iterable<string>) => {}),
-      releaseRestartExitHoldMock: vi.fn(
-        async (_options: { mode: 'announce'; epoch: number } | { mode: 'exit' }) => {}
-      ),
-      nextDaemonLossEpochMock: vi.fn(() => ++epoch)
-    }
-  })
+const {
+  beginRestartExitHoldMock,
+  releaseRestartExitHoldMock,
+  nextDaemonLossEpochMock,
+  closeRestartSpawnFenceMock,
+  awaitRestartSpawnDrainMock
+} = vi.hoisted(() => {
+  let epoch = 9000
+  return {
+    closeRestartSpawnFenceMock: vi.fn(() => {}),
+    awaitRestartSpawnDrainMock: vi.fn(async () => {}),
+    beginRestartExitHoldMock: vi.fn((_ptyIds: Iterable<string>) => {}),
+    releaseRestartExitHoldMock: vi.fn(
+      async (_options: { mode: 'announce'; epoch: number } | { mode: 'exit' }) => {}
+    ),
+    nextDaemonLossEpochMock: vi.fn(() => ++epoch)
+  }
+})
 
 async function importFresh() {
   vi.resetModules()
@@ -525,6 +543,9 @@ async function importFresh() {
   unbindLocalProviderListenersMock.mockClear()
   rebindLocalProviderListenersMock.mockClear()
   beginRestartExitHoldMock.mockClear()
+  closeRestartSpawnFenceMock.mockReset()
+  awaitRestartSpawnDrainMock.mockReset()
+  awaitRestartSpawnDrainMock.mockResolvedValue(undefined)
   releaseRestartExitHoldMock.mockClear()
   releaseRestartExitHoldMock.mockResolvedValue(undefined)
   nextDaemonLossEpochMock.mockClear()
@@ -1045,6 +1066,143 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
       await expect(mod.restartDaemon()).rejects.toThrow('unbind blew up')
 
       expect(releaseRestartExitHoldMock.mock.calls).toEqual([[{ mode: 'exit' }]])
+    })
+
+    it('F1: closes the spawn fence and drains BEFORE the snapshot, so ids registered during the drain are held', async () => {
+      const mod = await initWithActive(['pty-1'])
+      const trace: string[] = []
+      let finishDrain!: () => void
+      closeRestartSpawnFenceMock.mockImplementation(() => trace.push('fence'))
+      awaitRestartSpawnDrainMock.mockImplementation(async () => {
+        trace.push('drain')
+        await new Promise<void>((resolve) => {
+          finishDrain = resolve
+        })
+      })
+      adapterInstances[0].getActiveSessionIds.mockClear()
+      adapterInstances[0].retireForRestart.mockImplementation(() => trace.push('retire'))
+      beginRestartExitHoldMock.mockImplementation((ids) => {
+        trace.push(`hold:${[...ids].sort().join(',')}`)
+      })
+      mod.setDaemonDiedFanoutHandler((ids: readonly string[]) => {
+        trace.push(`audit:${[...ids].sort().join(',')}`)
+      })
+      adapterInstances[0].fanoutSyntheticExits.mockImplementation(() => trace.push('fanout'))
+      try {
+        const restarting = mod.restartDaemon()
+        await vi.waitFor(() => expect(trace).toContain('drain'))
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        expect(trace).toEqual(['fence', 'drain'])
+        expect(adapterInstances[0].getActiveSessionIds).not.toHaveBeenCalled()
+        expect(beginRestartExitHoldMock).not.toHaveBeenCalled()
+
+        adapterInstances[0].getActiveSessionIds.mockImplementation(() => ['pty-1', 'pty-late'])
+        finishDrain()
+        await restarting
+      } finally {
+        mod.setDaemonDiedFanoutHandler(null)
+        beginRestartExitHoldMock.mockReset()
+      }
+
+      expect(trace).toEqual([
+        'fence',
+        'drain',
+        'retire',
+        'hold:pty-1,pty-late',
+        'audit:pty-1,pty-late',
+        'fanout'
+      ])
+    })
+
+    it('F1: the drain runs before the fallback-session shutdown (a drained spawn could otherwise orphan a fallback session)', async () => {
+      const mod = await importFresh()
+      ensureRunningOverrides.push(async () => ({
+        socketPath: '/fake/degraded-socket',
+        tokenPath: '/fake/degraded-token',
+        mode: 'degraded-new-pty-fallback'
+      }))
+      await mod.initDaemonPtyProvider()
+      const { DegradedDaemonPtyProvider } = await import('./degraded-daemon-pty-provider')
+      const degraded = mod.getDaemonProvider() as InstanceType<typeof DegradedDaemonPtyProvider>
+      const trace: string[] = []
+      awaitRestartSpawnDrainMock.mockImplementation(async () => {
+        trace.push('drain')
+      })
+      vi.spyOn(degraded, 'shutdownFallbackSessions').mockImplementation(async () => {
+        trace.push('fallback-shutdown')
+        return 0
+      })
+
+      await mod.restartDaemon()
+
+      expect(trace).toEqual(['drain', 'fallback-shutdown'])
+    })
+
+    it('F1: retire precedes the hold; a failure while the old provider is still authoritative reinstates it once, before the exit release', async () => {
+      const mod = await initWithActive(['pty-1'])
+      const trace: string[] = []
+      adapterInstances[0].retireForRestart.mockImplementation(() => trace.push('retire'))
+      adapterInstances[0].reinstateAfterFailedRestart.mockImplementation(() =>
+        trace.push('reinstate')
+      )
+      beginRestartExitHoldMock.mockImplementation(() => {
+        trace.push('hold')
+      })
+      releaseRestartExitHoldMock.mockImplementation(async (options) => {
+        trace.push(`release:${options.mode}`)
+      })
+      ensureRunningOverrides.push(async () => {
+        throw new Error('respawn failed')
+      })
+
+      await expect(mod.restartDaemon()).rejects.toThrow('respawn failed')
+
+      expect(trace).toEqual(['retire', 'hold', 'reinstate', 'release:exit'])
+      beginRestartExitHoldMock.mockReset()
+    })
+
+    it('F1: a successful restart never reinstates the superseded adapter', async () => {
+      const mod = await initWithActive(['pty-1'])
+
+      await mod.restartDaemon()
+
+      expect(adapterInstances[0].retireForRestart).toHaveBeenCalledTimes(1)
+      expect(adapterInstances[0].reinstateAfterFailedRestart).not.toHaveBeenCalled()
+    })
+
+    it('F1: a throw after the provider swap (step 7) does not reinstate the superseded adapter', async () => {
+      const mod = await initWithActive(['pty-1'])
+      rebindLocalProviderListenersMock.mockImplementationOnce(() => {
+        throw new Error('rebind blew up')
+      })
+
+      await expect(mod.restartDaemon()).rejects.toThrow('rebind blew up')
+
+      expect(adapterInstances[0].reinstateAfterFailedRestart).not.toHaveBeenCalled()
+      expect(releaseRestartExitHoldMock.mock.calls).toEqual([[{ mode: 'exit' }]])
+    })
+
+    it('F2: an id with a shutdown in flight at the click is not held, but is still audited and fanned out', async () => {
+      const mod = await initWithActive(['pty-1', 'pty-2'])
+      adapterInstances[0].isShutdownInFlight.mockImplementation((id: string) => id === 'pty-2')
+      const trace: string[] = []
+      beginRestartExitHoldMock.mockImplementation((ids) => {
+        trace.push(`hold:${[...ids].sort().join(',')}`)
+      })
+      mod.setDaemonDiedFanoutHandler((ids: readonly string[]) => {
+        trace.push(`audit:${[...ids].sort().join(',')}`)
+      })
+      adapterInstances[0].fanoutSyntheticExits.mockImplementation(() => trace.push('fanout'))
+      let result: { killedCount: number }
+      try {
+        result = await mod.restartDaemon()
+      } finally {
+        mod.setDaemonDiedFanoutHandler(null)
+        beginRestartExitHoldMock.mockReset()
+      }
+
+      expect(trace).toEqual(['hold:pty-1', 'audit:pty-1,pty-2', 'fanout'])
+      expect(result.killedCount).toBe(2)
     })
 
     it('a successful restart releases exactly once (announce), never also in exit mode', async () => {
