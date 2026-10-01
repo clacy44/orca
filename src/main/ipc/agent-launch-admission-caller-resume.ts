@@ -65,16 +65,37 @@ async function refuseLive(
       holderTerminal: handle,
       via,
       chair: chair?.name ?? null,
-      nextSteps: [
-        handle
-          ? `Use that pane, or close it first: orca terminal close --terminal ${handle}`
-          : `Use pane ${holder}, or close it first.`,
-        chair
-          ? `After that pane is closed, recover the chair with \`orca chairs restore --only ${chair.name}\` — run it twice at least 10 s apart.`
-          : 'After that pane is closed, run this resume again.'
-      ]
+      nextSteps:
+        via === 'session_holder'
+          ? sessionHolderNextSteps(db, ctx, holder, chair?.name ?? null)
+          : [
+              handle
+                ? `Use that pane, or close it first: orca terminal close --terminal ${handle}`
+                : `Use pane ${holder}, or close it first.`,
+              chair
+                ? `After that pane is closed, recover the chair with \`orca chairs restore --only ${chair.name}\` — run it twice at least 10 s apart.`
+                : 'After that pane is closed, run this resume again.'
+            ]
     }
   )
+}
+
+// Why not "close the pane": the books holder keeps `current_sessions` until its agent is retired.
+function sessionHolderNextSteps(
+  db: OrchestrationDb,
+  ctx: AgentLaunchAdmissionContext,
+  holder: string,
+  chairName: string | null
+): string[] {
+  const agent = db.getAgentByPaneKey(ctx.hostId, holder)
+  return [
+    agent
+      ? `Release the session by retiring the agent that holds it: orca agents retire ${agent.display_name}`
+      : `Release the session by retiring the agent bound to pane ${holder}: orca agents retire <name|id>`,
+    chairName
+      ? `Or recover the chair with \`orca chairs restore --only ${chairName}\` — run it twice at least 10 s apart.`
+      : 'After the session is released, run this resume again.'
+  ]
 }
 
 /** Rules 1-2: refuse when X's holder runs claude in its foreground, or a hook report of X stands

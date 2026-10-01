@@ -426,7 +426,15 @@ describe('10z.5 R287: caller-resume liveness refusal', () => {
       expect(error).toMatchObject({
         code: 'resume_target_owned_by_another_pane',
         message: `Claude session ${OWN} is still reported live by pane ${OTHER}; ${TAIL}`,
-        data: { via: 'hook_report', holderPaneKey: OTHER }
+        data: {
+          via: 'hook_report',
+          holderPaneKey: OTHER,
+          // The hook_report wording is unchanged.
+          nextSteps: [
+            `Use pane ${OTHER}, or close it first.`,
+            'After that pane is closed, run this resume again.'
+          ]
+        }
       })
       expect(lastAudit(db)).toMatchObject({
         verb: 'launch_refused',
@@ -462,7 +470,15 @@ describe('10z.5 R287: caller-resume liveness refusal', () => {
         expect(error).toMatchObject({
           code: 'resume_target_owned_by_another_pane',
           message: `Claude session ${OWN} is recorded as held by pane ${HOLDER}; ${TAIL}`,
-          data: { via: 'session_holder', holderPaneKey: HOLDER }
+          data: {
+            via: 'session_holder',
+            holderPaneKey: HOLDER,
+            // N2: closing the pane does not release current_sessions, so it must not be advised.
+            nextSteps: [
+              `Release the session by retiring the agent bound to pane ${HOLDER}: orca agents retire <name|id>`,
+              'After the session is released, run this resume again.'
+            ]
+          }
         })
         expect(lastAudit(db)).toMatchObject({
           verb: 'launch_refused',
@@ -471,6 +487,40 @@ describe('10z.5 R287: caller-resume liveness refusal', () => {
         })
         expect(db.paneHoldingSession(HOST_ID, OWN)).toBe(HOLDER)
         expect(db.newestLaunchForPane(HOST_ID, HOLDER)?.session_id).toBe(OWN)
+      })
+
+      it('N2: a registered holder is named in the retire step, and a manifest chair adds the chairs-restore step', async () => {
+        const db = freshDb(false)
+        moveHolderToQ(db)
+        db.upsertAgentByPaneSuffix({
+          displayName: 'holder-agent',
+          role: null,
+          hostId: HOST_ID,
+          paneKey: HOLDER,
+          terminalHandle: null,
+          processIncarnation: null,
+          worktreeId: null,
+          worktreePath: null,
+          branch: null,
+          title: null,
+          agentLabel: null,
+          originHandle: null,
+          originHostId: HOST_ID
+        })
+        const d = deps({ manifestChairForSession: vi.fn(async () => ({ name: 'alpha' })) })
+
+        const error = await admit(db, d, [], CALLER, resume).catch((e: unknown) => e)
+
+        expect(error).toMatchObject({
+          data: {
+            via: 'session_holder',
+            chair: 'alpha',
+            nextSteps: [
+              'Release the session by retiring the agent that holds it: orca agents retire holder-agent',
+              'Or recover the chair with `orca chairs restore --only alpha` — run it twice at least 10 s apart.'
+            ]
+          }
+        })
       })
 
       it('(v) with the liveness deps unwired it is still refused, loudly', async () => {

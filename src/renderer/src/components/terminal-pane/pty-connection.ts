@@ -565,6 +565,8 @@ type ColdRestoreAgentResumeStartup = PendingStartupCommand & {
   useLiveEntry: boolean
   hasSleepingRecord: boolean
   sleepingRecordEntry: { paneKey: string; record: SleepingAgentSessionRecord } | null
+  /** Set only when `command` carries the re-anchor prompt; the fallback spawn uses this instead. */
+  commandWithoutReanchorPrompt?: string
 }
 
 const e2eTerminalPtyOutputDebugState: E2eTerminalPtyOutputDebugSnapshot = {
@@ -5084,10 +5086,9 @@ export function connectPanePty(
           state.clearSleepingAgentReanchorFlag(sleepingRecordEntry.paneKey)
         }
       }
-      const startupPlan = buildAgentResumeStartupPlan({
+      const resumePlanArgs = {
         agent,
         providerSession,
-        ...(resumePrompt ? { resumePrompt } : {}),
         cmdOverrides: state.settings?.agentCmdOverrides ?? {},
         agentArgs:
           launchConfig !== undefined
@@ -5103,10 +5104,18 @@ export function connectPanePty(
           : {}),
         platform: resumeTarget.platform,
         shell: resumeTarget.shell
+      }
+      const startupPlan = buildAgentResumeStartupPlan({
+        ...resumePlanArgs,
+        ...(resumePrompt ? { resumePrompt } : {})
       })
       if (!startupPlan) {
         return null
       }
+      // Why: a fallback spawn after a failed first attempt is a different launch and must never carry the prompt.
+      const commandWithoutReanchorPrompt = resumePrompt
+        ? buildAgentResumeStartupPlan(resumePlanArgs)?.launchCommand
+        : undefined
       const coldRestoreLaunchToken = createBrowserUuid()
       // Why: cold restore means the PTY process is gone but the agent provider
       // session is still resumable, so the replacement spawn must launch it.
@@ -5122,7 +5131,8 @@ export function connectPanePty(
         launchToken: coldRestoreLaunchToken,
         useLiveEntry: Boolean(useLiveEntry),
         hasSleepingRecord: Boolean(sleepingRecord),
-        sleepingRecordEntry
+        sleepingRecordEntry,
+        ...(commandWithoutReanchorPrompt ? { commandWithoutReanchorPrompt } : {})
       }
     }
     const applyColdRestoreAgentResumeStartup = (
@@ -5172,11 +5182,18 @@ export function connectPanePty(
           }
         : undefined
     const startFreshColdRestoreAgentResume = (
-      startup: ColdRestoreAgentResumeStartup | null = buildColdRestoreAgentResumeStartup(),
+      startup?: ColdRestoreAgentResumeStartup | null,
       options: FreshSpawnOptions = {}
     ): Promise<string | null> => {
-      applyColdRestoreAgentResumeStartup(startup)
-      return startFreshSpawn(startup, options)
+      // Why: an explicit startup is a fallback after a first attempt that already carried the prompt.
+      const resolved =
+        startup === undefined
+          ? buildColdRestoreAgentResumeStartup()
+          : startup?.commandWithoutReanchorPrompt
+            ? { ...startup, command: startup.commandWithoutReanchorPrompt }
+            : startup
+      applyColdRestoreAgentResumeStartup(resolved)
+      return startFreshSpawn(resolved, options)
     }
     // Why: the hibernation wake fires from noteVisibilityResume in the outer
     // connection scope, long after this deferred-connect closure has run.

@@ -35,8 +35,7 @@ export function createDaemonSessionLossHandler(
   deps: DaemonSessionLossDeps
 ): (event: PtySessionsLostToDaemonDeathEvent) => Promise<void> {
   const isCurrent = ({ id, incarnationId }: { id: string; incarnationId?: string }): boolean =>
-    deps.isCurrentPtyExit({ id, ...(incarnationId ? { incarnationId } : {}) }) &&
-    !deps.isSpawnInFlight(id)
+    deps.isCurrentPtyExit({ id, ...(incarnationId ? { incarnationId } : {}) })
   return async (event) => {
     // Why: a pty id the runtime already moved to a newer incarnation was respawned by some other
     // trigger before this announcement landed; it is not a casualty any more.
@@ -66,8 +65,11 @@ export function createDaemonSessionLossHandler(
     } catch (error) {
       console.error('[daemon] daemon-loss recovery plan failed:', error)
     }
-    // Re-check after the plan's await: a concurrent respawn of the same pane id wins.
-    const toApply = lost.filter(isCurrent)
+    // Why: an id whose same-id relaunch spawn is mid-flight is still audited (the gate needs it) but
+    // must not be notified or exited. Re-checked after the plan's await: a concurrent respawn wins.
+    const toApply = lost.filter(
+      (session) => isCurrent(session) && !deps.isSpawnInFlight(session.id)
+    )
     // No await from here on: main cannot service the renderer's relaunch before every exit is applied.
     let notified = false
     if (plan) {
@@ -98,6 +100,7 @@ export function createDaemonSessionLossHandler(
       ...(event.sessions.length > lost.length
         ? { stale: event.sessions.length - lost.length }
         : {}),
+      ...(lost.length > toApply.length ? { inFlight: lost.length - toApply.length } : {}),
       ...(event.sinceDisconnectMs === undefined
         ? {}
         : { sinceDisconnectMs: event.sinceDisconnectMs })

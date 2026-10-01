@@ -245,7 +245,7 @@ describe('daemon-session-loss handler: ordering and exit semantics', () => {
     expect(h.sent[0]?.sessions.map((s) => s.id)).toEqual(['lost'])
   })
 
-  it('skips an id whose same-id relaunch spawn is already in flight', async () => {
+  it('audits an id whose same-id relaunch spawn is in flight, but neither notifies nor exits it', async () => {
     const h = buildHarness(
       async (sessions) =>
         sessions.map(({ id }) => ({ id, paneKey: `t:${id}`, peerOwned: false, reanchor: false })),
@@ -253,11 +253,14 @@ describe('daemon-session-loss handler: ordering and exit semantics', () => {
     )
     await h.handle({ epoch: 1, sessions: [{ id: 'a' }, { id: 'b' }] })
 
+    expect(h.order).toEqual(['audit:a,b', 'plan', 'send', 'exit:a'])
     expect(h.applied.map((p) => p.id)).toEqual(['a'])
     expect(h.sent[0]?.sessions.map((session) => session.id)).toEqual(['a'])
-    expect(h.order).toEqual(['audit:a', 'plan', 'send', 'exit:a'])
     expect(h.breadcrumbs).toEqual([
-      { name: 'daemon_sessions_lost', data: { count: 1, applied: 1, notified: true, stale: 1 } }
+      {
+        name: 'daemon_sessions_lost',
+        data: { count: 2, applied: 1, notified: true, inFlight: 1 }
+      }
     ])
   })
 

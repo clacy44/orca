@@ -11188,12 +11188,15 @@ describe('connectPanePty', () => {
         connectRejects: true
       })
 
-      // Why: the built plan carries the prompt into its own immediate fallback attempt; the first connect is the positive control.
-      const first = transport.connect.mock.calls.find(
-        ([options]) => (options as { command?: string }).command !== undefined
-      )?.[0] as { command?: string }
-      expect(first.command).toBe(withPrompt)
-      expect(first.command?.split(DAEMON_DEATH_REANCHOR_PROMPT)).toHaveLength(2)
+      // N3: the first connect carries the prompt (positive control); the fallback plan never does.
+      const commands = transport.connect.mock.calls.map(
+        ([options]) => (options as { command?: string }).command
+      )
+      expect(commands.length).toBeGreaterThanOrEqual(2)
+      expect(commands[0]).toBe(withPrompt)
+      expect(commands[0]?.split(DAEMON_DEATH_REANCHOR_PROMPT)).toHaveLength(2)
+      expect(commands.slice(1).filter((command) => command?.includes('re-anchor'))).toEqual([])
+      expect(commands.slice(1)).toContain(CLAUDE_RESUME)
       expect(registry.isDaemonSessionLostRelaunch(paneKey)).toBe(false)
       expect(mockStoreState.sleepingAgentSessionsByPaneKey[paneKey]).not.toHaveProperty(
         'reanchorAfterDaemonDeath'
