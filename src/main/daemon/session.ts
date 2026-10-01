@@ -104,6 +104,8 @@ export type SessionOptions = {
   onExit?: (code: number) => void
   startupIngress?: PtyStartupIngressIntent
   ownerBackend?: PtyOwnerBackend
+  /** A resize the daemon refused (non-integer or past the size cap); the applied size stays as it was. */
+  onResizeRejected?: (size: { cols: number; rows: number }) => void
 }
 
 type AttachedClient = {
@@ -126,6 +128,7 @@ export class Session {
   private emulator: HeadlessEmulator
   private subprocess: SubprocessHandle
   private readonly onSessionExit?: (code: number) => void
+  private readonly onResizeRejected?: SessionOptions['onResizeRejected']
   private attachedClients: AttachedClient[] = []
   private preReadyStdinQueue: string[] = []
   private releaseStartupDeviceAttributesResponder: (() => void) | null = null
@@ -157,6 +160,7 @@ export class Session {
     this.wslDistro = opts.wslDistro ?? null
     this.subprocess = opts.subprocess
     this.onSessionExit = opts.onExit
+    this.onResizeRejected = opts.onResizeRejected
     const size = normalizePtySize(opts.cols, opts.rows)
     this.emulator = new HeadlessEmulator({
       cols: size.cols,
@@ -296,6 +300,7 @@ export class Session {
       return
     }
     if (!isValidPtySize(cols, rows)) {
+      this.onResizeRejected?.({ cols, rows })
       return
     }
     this.emulator.resize(cols, rows)
@@ -534,6 +539,18 @@ export class Session {
       overflowed,
       snapshot: includeSnapshot ? this.getSnapshot() : null
     }
+  }
+
+  /** W2 heap shed: drop queued pending records and flag overflow so the next take falls back to one snapshot. Returns bytes freed. */
+  shedPendingOutput(): number {
+    if (this._disposed || this.pendingOutputBytes === 0) {
+      return 0
+    }
+    const freed = this.pendingOutputBytes
+    this.pendingOutputRecords = []
+    this.pendingOutputBytes = 0
+    this.pendingOutputOverflowed = true
+    return freed
   }
 
   getCwd(): string | null {

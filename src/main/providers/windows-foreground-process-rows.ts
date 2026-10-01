@@ -1,6 +1,10 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createProcessTableSnapshotReader } from '../../shared/process-table-snapshot'
+import {
+  collectProcessDescendants,
+  type ProcessTreeAnomaly
+} from '../../shared/process-tree-descendants'
 
 const execFileAsync = promisify(execFile)
 const WINDOWS_PROCESS_QUERY_TIMEOUT_MS = 3_000
@@ -59,7 +63,10 @@ export function queryWindowsProcessRowsFresh(): Promise<WindowsProcessRow[]> {
 
 export async function queryWindowsProcessDescendants(
   rootPid: number,
-  options: { fresh?: boolean } = {}
+  options: {
+    fresh?: boolean
+    onTreeAnomaly?: (anomaly: ProcessTreeAnomaly) => void
+  } = {}
 ): Promise<WindowsProcessCandidate[] | null> {
   let rows: WindowsProcessRow[]
   try {
@@ -75,7 +82,20 @@ export async function queryWindowsProcessDescendants(
   if (!rows.some((row) => row.pid === rootPid)) {
     return null
   }
-  return collectDescendants(rows, rootPid).sort((a, b) => b.depth - a.depth)
+  const { descendants, staleEdgesSkipped } = collectProcessDescendants(rows, rootPid)
+  if (staleEdgesSkipped > 0) {
+    try {
+      options.onTreeAnomaly?.({
+        rows,
+        descendants,
+        staleEdgesSkipped,
+        fresh: options.fresh === true
+      })
+    } catch {
+      // Diagnostics must not break the scan.
+    }
+  }
+  return descendants.sort((a, b) => b.depth - a.depth)
 }
 
 /**
@@ -194,29 +214,6 @@ function numberFromWindowsProcessField(value: unknown): number {
     return Number.parseInt(value, 10)
   }
   return Number.NaN
-}
-
-function collectDescendants<Row extends { pid: number; ppid: number }>(
-  rows: Row[],
-  rootPid: number
-): (Row & { depth: number })[] {
-  const childrenByParent = new Map<number, Row[]>()
-  for (const row of rows) {
-    const children = childrenByParent.get(row.ppid) ?? []
-    children.push(row)
-    childrenByParent.set(row.ppid, children)
-  }
-
-  const descendants: (Row & { depth: number })[] = []
-  const stack = (childrenByParent.get(rootPid) ?? []).map((row) => ({ row, depth: 1 }))
-  while (stack.length > 0) {
-    const { row, depth } = stack.pop()!
-    descendants.push({ ...row, depth })
-    for (const child of childrenByParent.get(row.pid) ?? []) {
-      stack.push({ row: child, depth: depth + 1 })
-    }
-  }
-  return descendants
 }
 
 /** Runs the PowerShell/CIM whole-process-table scan; returns null when unavailable. */

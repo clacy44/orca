@@ -1,5 +1,6 @@
 import { recognizeAgentProcessFromCommandLine } from '../../shared/agent-process-recognition'
 import { resolveOuterWrapperForegroundProcess } from '../../shared/foreground-wrapper-agent'
+import { collectProcessDescendants } from '../../shared/process-tree-descendants'
 import {
   getFreshProcessTableSnapshot,
   getProcessTableSnapshot,
@@ -16,29 +17,6 @@ export type { AgentForegroundResolutionOptions } from './windows-agent-foregroun
 export type AgentForegroundProcessResolution = {
   available: boolean
   processName: string | null
-}
-
-function collectDescendants<Row extends { pid: number; ppid: number }>(
-  rows: Row[],
-  rootPid: number
-): (Row & { depth: number })[] {
-  const childrenByParent = new Map<number, Row[]>()
-  for (const row of rows) {
-    const children = childrenByParent.get(row.ppid) ?? []
-    children.push(row)
-    childrenByParent.set(row.ppid, children)
-  }
-
-  const descendants: (Row & { depth: number })[] = []
-  const stack = (childrenByParent.get(rootPid) ?? []).map((row) => ({ row, depth: 1 }))
-  while (stack.length > 0) {
-    const { row, depth } = stack.pop()!
-    descendants.push({ ...row, depth })
-    for (const child of childrenByParent.get(row.pid) ?? []) {
-      stack.push({ row: child, depth: depth + 1 })
-    }
-  }
-  return descendants
 }
 
 function candidateScore(row: ProcessTableRow & { depth: number }): number {
@@ -99,7 +77,7 @@ export async function resolveAgentForegroundProcessWithAvailability(
     }
     return {
       available: true,
-      processName: resolveAgentForegroundProcessFromPs(rows, shellPid) ?? fallbackProcess
+      processName: resolveAgentForegroundProcessFromPs(rows, shellPid, options) ?? fallbackProcess
     }
   } catch {
     // Why: a failed scan cannot prove fallback ownership; callers retain the last recognized agent.
@@ -109,12 +87,24 @@ export async function resolveAgentForegroundProcessWithAvailability(
 
 function resolveAgentForegroundProcessFromPs(
   rows: ProcessTableRow[],
-  shellPid: number
+  shellPid: number,
+  options: AgentForegroundResolutionOptions
 ): string | null {
   const shellRow = rows.find((row) => row.pid === shellPid)
-  const candidates = collectDescendants(rows, shellPid).sort(
-    (a, b) => candidateScore(b) - candidateScore(a)
-  )
+  const { descendants, staleEdgesSkipped } = collectProcessDescendants(rows, shellPid)
+  if (staleEdgesSkipped > 0) {
+    try {
+      options.onTreeAnomaly?.({
+        rows,
+        descendants,
+        staleEdgesSkipped,
+        fresh: options.fresh === true
+      })
+    } catch {
+      // Diagnostics must not break the scan.
+    }
+  }
+  const candidates = descendants.sort((a, b) => candidateScore(b) - candidateScore(a))
   // Why: `+` in `ps stat` marks the process holding the terminal foreground.
   // The root shell can hold it after Ctrl-Z, so use the whole PTY tree as the
   // foreground gate; otherwise a stopped agent child still masquerades as live.

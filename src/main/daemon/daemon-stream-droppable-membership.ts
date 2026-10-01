@@ -62,3 +62,26 @@ export function refreshDroppableSessionMembership(
     }
   }
 }
+
+/** W2 heap shed: drop every droppable (backgrounded) session's queued bytes across the given batches. */
+export function shedDroppableSessionQueues(
+  batches: Iterable<PendingStreamDataBatch>,
+  isSessionDroppable: (sessionId: string) => boolean,
+  salvageDroppedData: (dropped: string) => string
+): { sessions: number; droppedChars: number } {
+  let sessions = 0
+  let droppedChars = 0
+  for (const batch of batches) {
+    for (const sessionId of batch.queuedCharsBySession.keys()) {
+      if (!isSessionDroppable(sessionId)) {
+        continue
+      }
+      const dropped = dropOldestQueuedForSession(batch, sessionId, 0, salvageDroppedData)
+      if (dropped > 0) {
+        sessions += 1
+        droppedChars += dropped
+      }
+    }
+  }
+  return { sessions, droppedChars }
+}

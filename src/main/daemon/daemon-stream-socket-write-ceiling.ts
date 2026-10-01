@@ -36,6 +36,12 @@ export function shouldHoldControlEntryOverCeiling(
   return control.event !== 'exit' && control.event !== 'dataGap' && writableLength > ceilingBytes
 }
 
+export type SocketWriteCeilingHoldInfo = {
+  sessionId: string
+  writableLength: number
+  droppedChars: number
+}
+
 export type SocketWriteCeilingHold = (
   batch: PendingStreamDataBatch,
   entry: StreamQueueEntry,
@@ -50,19 +56,32 @@ export type SocketWriteCeilingHold = (
 export function createSocketWriteCeilingHold(
   salvageDroppedData: (dropped: string) => string,
   ceilingBytes: number = SOCKET_WRITE_CEILING_BYTES,
-  keepTailChars: number = SOCKET_WRITE_CEILING_KEEP_TAIL_CHARS
+  keepTailChars: number = SOCKET_WRITE_CEILING_KEEP_TAIL_CHARS,
+  onHold?: (info: SocketWriteCeilingHoldInfo) => void
 ): SocketWriteCeilingHold {
   return (batch, entry, writableLength, heldSessions, retained) => {
     if (writableLength <= ceilingBytes) {
       return false
     }
-    dropOldestQueuedForSession(batch, entry.sessionId, keepTailChars, salvageDroppedData)
+    const droppedChars = dropOldestQueuedForSession(
+      batch,
+      entry.sessionId,
+      keepTailChars,
+      salvageDroppedData
+    )
     heldSessions.add(entry.sessionId)
-    const heldEntry = batch.queue[0]
-    if (heldEntry) {
-      retained.push(heldEntry)
-      batch.queue.shift()
+    // Why: holding only the head let the re-salvaged query copy become the next head and be dropped
+    // again forever; the session's whole remainder waits, in order, for the socket to drain.
+    const remaining: StreamQueueEntry[] = []
+    for (const queued of batch.queue) {
+      if (queued.sessionId === entry.sessionId) {
+        retained.push(queued)
+      } else {
+        remaining.push(queued)
+      }
     }
+    batch.queue = remaining
+    onHold?.({ sessionId: entry.sessionId, writableLength, droppedChars })
     return true
   }
 }

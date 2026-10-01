@@ -22,6 +22,7 @@ type TerminalHostSessionCreateDependencies = {
   onDeadSessionRemoved: (sessionId: string) => void
   onSessionCreated: (sessionId: string, generation: string | undefined, isAlive: boolean) => void
   onSessionExit: (sessionId: string, generation: string | undefined) => void
+  onResizeRejected: TerminalHostOptions['onResizeRejected']
 }
 
 export async function createOrAttachTerminalSession(
@@ -113,6 +114,9 @@ export async function createOrAttachTerminalSession(
     ...(opts.startupIngress ? { startupIngress: opts.startupIngress } : {}),
     wslDistro,
     onExit: () => deps.onSessionExit(opts.sessionId, opts.agentSessionGeneration),
+    ...(deps.onResizeRejected
+      ? { onResizeRejected: (size) => deps.onResizeRejected?.(opts.sessionId, size) }
+      : {}),
     ...(opts.shellReadyTimeoutMs !== undefined
       ? { shellReadyTimeoutMs: opts.shellReadyTimeoutMs }
       : {})

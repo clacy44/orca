@@ -7,15 +7,23 @@ import {
 } from './daemon-stream-data-split'
 import type { PendingStreamDataBatch } from './daemon-stream-keep-tail-drop'
 import type { DaemonEvent } from './types'
-import { appendDaemonStreamData, type DaemonStreamEnqueueOptions } from './daemon-stream-data-entry'
+import {
+  appendDaemonStreamData,
+  queuedCharsForSession,
+  takeSessionEntries,
+  type DaemonStreamEnqueueOptions
+} from './daemon-stream-data-entry'
 import {
   evaluateDroppableEnqueue,
-  refreshDroppableSessionMembership
+  refreshDroppableSessionMembership,
+  shedDroppableSessionQueues
 } from './daemon-stream-droppable-membership'
 import {
   createSocketWriteCeilingHold,
   shouldHoldControlEntryOverCeiling,
-  SOCKET_WRITE_CEILING_BYTES
+  SOCKET_WRITE_CEILING_BYTES,
+  SOCKET_WRITE_CEILING_KEEP_TAIL_CHARS,
+  type SocketWriteCeilingHoldInfo
 } from './daemon-stream-socket-write-ceiling'
 import { shouldHoldForShallowSocket } from './daemon-stream-shallow-echo-hold'
 
@@ -54,6 +62,8 @@ type DaemonStreamDataBatcherOptions = {
   socketWriteCeilingBytes?: number
   /** Carve reply-eliciting query bytes (DSR/DA/DECRQM/OSC probes) out of dropped data — the hidden program blocks on the reply, so they must still be delivered even when their flood is not. */
   salvageDroppedData?: (dropped: string) => string
+  /** Fires when a session's queue is held over the socket-write ceiling (the server rate-limits and logs it). */
+  onCeilingHold?: (info: SocketWriteCeilingHoldInfo) => void
 }
 
 export class DaemonStreamDataBatcher {
@@ -80,7 +90,9 @@ export class DaemonStreamDataBatcher {
     this.socketWriteCeilingBytes = options.socketWriteCeilingBytes ?? SOCKET_WRITE_CEILING_BYTES
     this.holdOverSocketWriteCeiling = createSocketWriteCeilingHold(
       this.salvageDroppedData,
-      this.socketWriteCeilingBytes
+      this.socketWriteCeilingBytes,
+      SOCKET_WRITE_CEILING_KEEP_TAIL_CHARS,
+      options.onCeilingHold
     )
   }
 
@@ -109,8 +121,7 @@ export class DaemonStreamDataBatcher {
 
     if (
       options.flushImmediately === true &&
-      this.queuedCharsForSession(batch, sessionId) <=
-        (options.flushMaxChars ?? Number.POSITIVE_INFINITY)
+      queuedCharsForSession(batch, sessionId) <= (options.flushMaxChars ?? Number.POSITIVE_INFINITY)
     ) {
       this.flushSession(clientId, sessionId)
       return
@@ -276,41 +287,16 @@ export class DaemonStreamDataBatcher {
     })
   }
 
-  private queuedCharsForSession(batch: PendingStreamDataBatch, sessionId: string): number {
-    let chars = 0
-    for (const entry of batch.queue) {
-      if (entry.sessionId === sessionId) {
-        chars += entry.data.length
-      }
-    }
-    return chars
-  }
-
   private flushSession(clientId: string, sessionId: string): void {
     const batch = this.pendingByClient.get(clientId)
     if (!batch) {
       return
     }
 
-    const flushed: PendingStreamDataBatch['queue'] = []
-    const retained: PendingStreamDataBatch['queue'] = []
-    let flushedChars = 0
-    for (const entry of batch.queue) {
-      if (entry.sessionId === sessionId) {
-        flushed.push(entry)
-        flushedChars += entry.data.length
-      } else {
-        retained.push(entry)
-      }
-    }
+    const flushed = takeSessionEntries(batch, sessionId)
     if (flushed.length === 0) {
       return
     }
-
-    batch.queue = retained
-    batch.queuedChars -= flushedChars
-    batch.queuedCharsBySession.delete(sessionId)
-    batch.droppableQueuedSessionIds.delete(sessionId)
     if (batch.queue.length === 0) {
       if (batch.timer) {
         clearTimeout(batch.timer)
@@ -341,6 +327,15 @@ export class DaemonStreamDataBatcher {
         this.onAfterSocketWrite?.(clientId, entry.sessionId)
       }
     }
+  }
+
+  /** W2 heap shed: drop every backgrounded session's queued bytes; each cut leaves a dataGap and the reveal resyncs from a snapshot. */
+  shedDroppableQueues(): { sessions: number; droppedChars: number } {
+    return shedDroppableSessionQueues(
+      this.pendingByClient.values(),
+      this.isSessionDroppable,
+      this.salvageDroppedData
+    )
   }
 
   clear(clientId?: string): void {
