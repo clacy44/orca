@@ -157,6 +157,7 @@ function buildHarness(
       sent.push(payload)
       return true
     },
+    sendExitToRenderer: (payload) => order.push(`rexit:${payload.id}`),
     recordBreadcrumb: (name, data) => breadcrumbs.push({ name, data })
   })
   return { handle, order, sent, applied, breadcrumbs }
@@ -297,6 +298,192 @@ describe('daemon-session-loss handler: ordering and exit semantics', () => {
     expect(h.breadcrumbs).toEqual([
       { name: 'daemon_sessions_lost', data: { count: 2, applied: 2, notified: false } }
     ])
+  })
+
+  it('auditWritten skips the daemon_died audit but still plans, notifies before the exits, and applies them', async () => {
+    const h = buildHarness(async (sessions) =>
+      sessions.map(({ id }) => ({ id, paneKey: `t:${id}`, peerOwned: false, reanchor: true }))
+    )
+    await h.handle({ epoch: 9, sessions: [{ id: 'a' }, { id: 'b' }] }, { auditWritten: true })
+
+    expect(h.order).toEqual(['plan', 'send', 'exit:a', 'exit:b'])
+    expect(h.sent).toEqual([
+      {
+        epoch: 9,
+        sessions: [
+          { id: 'a', paneKey: 't:a', reanchor: true },
+          { id: 'b', paneKey: 't:b', reanchor: true }
+        ]
+      }
+    ])
+  })
+
+  it('without options the audit is still written (the adapter path is unchanged)', async () => {
+    const h = buildHarness(async (sessions) =>
+      sessions.map(({ id }) => ({ id, paneKey: `t:${id}`, peerOwned: false, reanchor: false }))
+    )
+    await h.handle({ epoch: 1, sessions: [{ id: 'a' }] }, {})
+
+    expect(h.order).toEqual(['audit:a', 'plan', 'send', 'exit:a'])
+  })
+
+  it('puts the per-call cause in the breadcrumb, and omits it when not given', async () => {
+    const h = buildHarness(async (sessions) =>
+      sessions.map(({ id }) => ({ id, paneKey: `t:${id}`, peerOwned: false, reanchor: false }))
+    )
+    await h.handle(
+      { epoch: 1, sessions: [{ id: 'a' }] },
+      { auditWritten: true, cause: 'manual_restart' }
+    )
+    await h.handle({ epoch: 2, sessions: [{ id: 'b' }] })
+
+    expect(h.breadcrumbs).toEqual([
+      {
+        name: 'daemon_sessions_lost',
+        data: { count: 1, applied: 1, notified: true, cause: 'manual_restart' }
+      },
+      { name: 'daemon_sessions_lost', data: { count: 1, applied: 1, notified: true } }
+    ])
+  })
+
+  it('puts the cause in the stale-only breadcrumb too', async () => {
+    const h = buildHarness(async () => [], { current: () => false })
+    await h.handle({ epoch: 1, sessions: [{ id: 'x' }] }, { cause: 'manual_restart' })
+
+    expect(h.breadcrumbs).toEqual([
+      {
+        name: 'daemon_sessions_lost',
+        data: { count: 0, applied: 0, notified: false, stale: 1, cause: 'manual_restart' }
+      }
+    ])
+  })
+
+  it('auditWritten still skips an in-flight id from the notice and the exits', async () => {
+    const h = buildHarness(
+      async (sessions) =>
+        sessions.map(({ id }) => ({ id, paneKey: `t:${id}`, peerOwned: false, reanchor: false })),
+      { inFlight: (id) => id === 'b' }
+    )
+    await h.handle({ epoch: 1, sessions: [{ id: 'a' }, { id: 'b' }] }, { auditWritten: true })
+
+    expect(h.order).toEqual(['plan', 'send', 'exit:a'])
+    expect(h.sent[0]?.sessions.map((session) => session.id)).toEqual(['a'])
+  })
+
+  it('F3: a plan that never resolves is bounded by planTimeoutMs: no notice, every exit applied, planTimedOut recorded', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const h = buildHarness(() => new Promise(() => {}))
+
+    const outcome = await Promise.race([
+      h
+        .handle({ epoch: 1, sessions: [{ id: 'a' }, { id: 'b' }] }, { planTimeoutMs: 50 })
+        .then(() => 'settled'),
+      new Promise((resolve) => setTimeout(() => resolve('hung'), 1_000))
+    ])
+
+    expect(outcome).toBe('settled')
+    expect(h.sent).toEqual([])
+    expect(h.order).toEqual(['audit:a,b', 'plan', 'exit:a', 'exit:b'])
+    expect(h.breadcrumbs).toEqual([
+      {
+        name: 'daemon_sessions_lost',
+        data: { count: 2, applied: 2, notified: false, planTimedOut: true }
+      }
+    ])
+  })
+
+  it('F3: a plan that resolves inside planTimeoutMs behaves as before', async () => {
+    const h = buildHarness(async (sessions) =>
+      sessions.map(({ id }) => ({ id, paneKey: `t:${id}`, peerOwned: false, reanchor: false }))
+    )
+    await h.handle({ epoch: 1, sessions: [{ id: 'a' }] }, { planTimeoutMs: 5_000 })
+
+    expect(h.order).toEqual(['audit:a', 'plan', 'send', 'exit:a'])
+    expect(h.breadcrumbs[0]?.data).not.toHaveProperty('planTimedOut')
+  })
+
+  it('F3 (R315 pin): without options the plan is awaited unbounded', async () => {
+    let resolvePlan!: (entries: DaemonLossRecoveryPlanEntry[]) => void
+    const h = buildHarness(
+      () =>
+        new Promise((resolve) => {
+          resolvePlan = resolve
+        })
+    )
+    let settled = false
+    const handled = h.handle({ epoch: 1, sessions: [{ id: 'a' }] }).then(() => {
+      settled = true
+    })
+    await new Promise((resolve) => setTimeout(resolve, 120))
+    expect(settled).toBe(false)
+
+    resolvePlan([{ id: 'a', paneKey: 't:a', peerOwned: false, reanchor: false }])
+    await handled
+
+    expect(h.order).toEqual(['audit:a', 'plan', 'send', 'exit:a'])
+  })
+
+  it('F5: when the plan fails, exitUnnotified gives each current, not-in-flight id the renderer exit after its main exit state', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const h = buildHarness(
+      async () => {
+        throw new Error('directory unavailable')
+      },
+      { inFlight: (id) => id === 'c' }
+    )
+    await h.handle(
+      { epoch: 1, sessions: [{ id: 'a' }, { id: 'b' }, { id: 'c' }] },
+      { auditWritten: true, exitUnnotified: true }
+    )
+
+    expect(h.order).toEqual(['plan', 'exit:a', 'rexit:a', 'exit:b', 'rexit:b'])
+    expect(h.breadcrumbs[0]?.data).toMatchObject({ applied: 2, exited: 2, notified: false })
+  })
+
+  it('F5: with no window every non-peer id gets the renderer exit; a peer-owned id and a notified id do not', async () => {
+    const plan = async () => [
+      { id: 'a', paneKey: 't:a', peerOwned: true, reanchor: false },
+      { id: 'b', paneKey: 't:b', peerOwned: false, reanchor: false }
+    ]
+    const noWindow = buildHarness(plan, { windowAvailable: false })
+    await noWindow.handle(
+      { epoch: 1, sessions: [{ id: 'a' }, { id: 'b' }] },
+      { auditWritten: true, exitUnnotified: true }
+    )
+    expect(noWindow.order).toEqual(['plan', 'send', 'exit:a', 'exit:b', 'rexit:b'])
+
+    const withWindow = buildHarness(plan)
+    await withWindow.handle(
+      { epoch: 1, sessions: [{ id: 'a' }, { id: 'b' }] },
+      { auditWritten: true, exitUnnotified: true }
+    )
+    expect(withWindow.order).toEqual(['plan', 'send', 'exit:a', 'exit:b'])
+    expect(withWindow.sent[0]?.sessions.map((session) => session.id)).toEqual(['b'])
+  })
+
+  it('F5 (R315 pin): without exitUnnotified a plan failure sends no renderer exit', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const h = buildHarness(async () => {
+      throw new Error('directory unavailable')
+    })
+    await h.handle({ epoch: 1, sessions: [{ id: 'a' }] })
+
+    expect(h.order).toEqual(['audit:a', 'plan', 'exit:a'])
+    expect(h.breadcrumbs[0]?.data).not.toHaveProperty('exited')
+  })
+
+  it('F8: excludeAfterPlan removes an id (its exit was forwarded during the plan await) from the notice and the exits', async () => {
+    const h = buildHarness(async (sessions) =>
+      sessions.map(({ id }) => ({ id, paneKey: `t:${id}`, peerOwned: false, reanchor: false }))
+    )
+    await h.handle(
+      { epoch: 1, sessions: [{ id: 'a' }, { id: 'b' }] },
+      { auditWritten: true, excludeAfterPlan: (id) => id === 'b' }
+    )
+
+    expect(h.order).toEqual(['plan', 'send', 'exit:a'])
+    expect(h.sent[0]?.sessions.map((session) => session.id)).toEqual(['a'])
+    expect(h.breadcrumbs[0]?.data).toMatchObject({ count: 2, applied: 1, superseded: 1 })
   })
 
   it('records a daemon_sessions_lost breadcrumb with the count and the time since disconnect', async () => {

@@ -85,6 +85,7 @@ vi.mock('./client', () => ({ DaemonClient: h.FakeDaemonClient }))
 import {
   DaemonPtyAdapter,
   _resetDaemonLossEpochSequenceForTests,
+  nextDaemonLossEpoch,
   type DaemonPtyAdapterOptions
 } from './daemon-pty-adapter'
 import { PtyWriteUnavailableError } from '../providers/pty-write-unavailable-error'
@@ -475,5 +476,168 @@ describe('DaemonPtyAdapter proactive daemon-loss recovery (R315)', () => {
     await flush()
 
     expect(lost.map((event) => event.epoch)).toEqual([1, 2])
+  })
+
+  it('R326: the manual restart draws its epoch from the same sequence, so it never collides with an adapter epoch', async () => {
+    const first = makeAdapter()
+    seedActive(first, ['s1'])
+    fake.aliveSessionIds = []
+    fake.crash()
+    await flush()
+    const restartEpoch = nextDaemonLossEpoch()
+    first.dispose()
+
+    const second = makeAdapter()
+    seedActive(second, ['s1'])
+    fake.aliveSessionIds = []
+    fake.crash()
+    await flush()
+
+    expect(restartEpoch).toBe(2)
+    expect(lost.map((event) => event.epoch)).toEqual([1, 3])
+  })
+
+  describe('R326: retirement and shutdown tracking for the manual restart', () => {
+    const goneError = () =>
+      Object.assign(new Error('connect ENOENT'), { code: 'ENOENT', syscall: 'connect' })
+
+    it('a retired adapter refuses spawn at entry and never calls respawn', async () => {
+      const respawn = vi.fn(async () => {})
+      const a = makeAdapter({}, respawn)
+
+      a.retireForRestart()
+
+      await expect(a.spawn({ cols: 80, rows: 24, sessionId: 's-late' })).rejects.toThrow(
+        /restarted while this terminal was starting/
+      )
+      expect(respawn).not.toHaveBeenCalled()
+    })
+
+    it('an in-flight spawn that hits a daemon-gone error while retired rethrows it without respawning', async () => {
+      const respawn = vi.fn(async () => {})
+      const a = makeAdapter({}, respawn)
+      let failRequest!: () => void
+      const started = new Promise<void>((resolve) => {
+        const original = fake.request.bind(fake)
+        fake.request = async (method: string) => {
+          if (method === 'createOrAttach') {
+            resolve()
+            await new Promise<void>((release) => {
+              failRequest = release
+            })
+            throw goneError()
+          }
+          return original(method)
+        }
+      })
+
+      const spawning = a.spawn({ cols: 80, rows: 24, sessionId: 's-inflight' })
+      const outcome = spawning.then(
+        () => 'resolved',
+        (error: Error) => error.message
+      )
+      await started
+      a.retireForRestart()
+      failRequest()
+
+      await expect(outcome).resolves.toBe('connect ENOENT')
+      expect(respawn).not.toHaveBeenCalled()
+    })
+
+    it('the same in-flight daemon-gone error DOES respawn when the adapter is not retired (control)', async () => {
+      const respawn = vi.fn(async () => {
+        fake.gone = false
+      })
+      const a = makeAdapter({}, respawn)
+      let calls = 0
+      const original = fake.request.bind(fake)
+      fake.request = async (method: string) => {
+        if (method === 'createOrAttach' && calls++ === 0) {
+          throw goneError()
+        }
+        return original(method)
+      }
+
+      await a.spawn({ cols: 80, rows: 24, sessionId: 's-control' })
+
+      expect(respawn).toHaveBeenCalledTimes(1)
+    })
+
+    it('reinstateAfterFailedRestart lets the adapter spawn and respawn again', async () => {
+      const respawn = vi.fn(async () => {
+        fake.gone = false
+      })
+      const a = makeAdapter({}, respawn)
+      a.retireForRestart()
+      a.reinstateAfterFailedRestart()
+      let calls = 0
+      const original = fake.request.bind(fake)
+      fake.request = async (method: string) => {
+        if (method === 'createOrAttach' && calls++ === 0) {
+          throw goneError()
+        }
+        return original(method)
+      }
+
+      await a.spawn({ cols: 80, rows: 24, sessionId: 's-back' })
+
+      expect(respawn).toHaveBeenCalledTimes(1)
+    })
+
+    it('isShutdownInFlight is true while a plain or keepHistory shutdown is pending, and false after resolve and after reject', async () => {
+      const a = makeAdapter()
+      seedActive(a, ['s1', 's2'])
+      const gates: { resolve: () => void; reject: (error: Error) => void }[] = []
+      const original = fake.request.bind(fake)
+      fake.request = async (method: string, ...rest: unknown[]) => {
+        if (method === 'shutdown' || method === 'kill') {
+          await new Promise<void>((resolve, reject) => gates.push({ resolve, reject }))
+        }
+        return original(method, ...(rest as []))
+      }
+      expect(a.isShutdownInFlight('s1')).toBe(false)
+
+      const plain = a.shutdown('s1', { immediate: true })
+      const keep = a.shutdown('s2', { immediate: true, keepHistory: true })
+      void keep.catch(() => {})
+      void plain.catch(() => {})
+      expect(a.isShutdownInFlight('s1')).toBe(true)
+      expect(a.isShutdownInFlight('s2')).toBe(true)
+      expect(a.isShutdownInFlight('other')).toBe(false)
+
+      await vi.waitFor(() => expect(gates.length).toBe(2))
+      gates[0]!.resolve()
+      await plain.catch(() => {})
+      expect(a.isShutdownInFlight('s1')).toBe(false)
+      gates[1]!.reject(new Error('kill failed'))
+      await keep.catch(() => {})
+      expect(a.isShutdownInFlight('s2')).toBe(false)
+    })
+
+    it('counts two concurrent shutdowns of one id', async () => {
+      const a = makeAdapter()
+      seedActive(a, ['s1'])
+      const gates: (() => void)[] = []
+      const original = fake.request.bind(fake)
+      fake.request = async (method: string, ...rest: unknown[]) => {
+        if (method === 'shutdown' || method === 'kill') {
+          await new Promise<void>((resolve) => gates.push(resolve))
+        }
+        return original(method, ...(rest as []))
+      }
+
+      const first = a.shutdown('s1', { immediate: true })
+      const second = a.shutdown('s1', { immediate: true })
+      void first.catch(() => {})
+      void second.catch(() => {})
+      await vi.waitFor(() => expect(gates.length).toBeGreaterThanOrEqual(1))
+      gates[0]!()
+      await first.catch(() => {})
+      await vi.waitFor(() => expect(gates.length).toBeGreaterThanOrEqual(2))
+      expect(a.isShutdownInFlight('s1')).toBe(true)
+      gates[1]!()
+      await second.catch(() => {})
+      expect(a.isShutdownInFlight('s1')).toBe(false)
+    })
   })
 })

@@ -64,6 +64,7 @@ import type {
 import type { PtyProcessInspection } from '../providers/pty-process-inspection'
 import { parseTerminalKittyKeyboardFlags } from '../../shared/terminal-kitty-keyboard-flags'
 import { isShellProcess } from '../../shared/agent-detection'
+import { RESTART_SUPERSEDED_SPAWN_MESSAGE } from '../ipc/pty-daemon-restart-hold'
 import { resolveWslSessionContext } from './wsl-session-context'
 import { normalizeWslColdRestoreCwd } from './wsl-cold-restore-cwd'
 import { recognizeAgentProcessFromCommandLine } from '../../shared/agent-process-recognition'
@@ -170,6 +171,10 @@ const MAX_TOMBSTONES = 1000
 let daemonLossEpochSequence = 0
 export function _resetDaemonLossEpochSequenceForTests(): void {
   daemonLossEpochSequence = 0
+}
+// R326: the manual restart announces its killed ptys with an epoch from this same sequence.
+export function nextDaemonLossEpoch(): number {
+  return ++daemonLossEpochSequence
 }
 // R315: waits before each retry of the post-respawn inventory (so at most 3 retries).
 const DAEMON_LOSS_INVENTORY_RETRY_DELAYS_MS = [2_000, 8_000, 30_000]
@@ -331,6 +336,10 @@ export class DaemonPtyAdapter implements IPtyProvider {
   private overlayDeadlineWarnedSessionIds = new Set<string>()
   private periodicDeadlineWarnedSessionIds = new Set<string>()
   private keepHistoryShutdowns = new Set<Promise<void>>()
+  // R326: ids with a shutdown (close, stop, hibernate) in flight; the manual restart leaves them out of its hold.
+  private shutdownsInFlight = new Map<string, number>()
+  // Why not respawnAdoptionClosed: that is also the dispose/disconnect latch; a failed restart must undo only this.
+  private retiredByRestart = false
   private disconnectOnlyPromise: Promise<void> | null = null
   // Why: checkpoint persistence needs the getSnapshot RPC (v4+); legacy daemons reject it, spamming logs every 5s.
   private supportsCheckpoints: boolean
@@ -466,7 +475,24 @@ export class DaemonPtyAdapter implements IPtyProvider {
     return this.protocolVersion >= AGENT_SESSION_CREATE_OPERATION_DAEMON_PROTOCOL_VERSION
   }
 
+  /** R326: this adapter is superseded by a manual restart; it spawns nothing and respawns nothing. */
+  retireForRestart(): void {
+    this.retiredByRestart = true
+  }
+
+  /** R326: the restart failed and this adapter stays authoritative. */
+  reinstateAfterFailedRestart(): void {
+    this.retiredByRestart = false
+  }
+
+  isShutdownInFlight(id: string): boolean {
+    return (this.shutdownsInFlight.get(id) ?? 0) > 0
+  }
+
   async spawn(opts: PtySpawnOptions): Promise<PtySpawnResult> {
+    if (this.retiredByRestart) {
+      throw new Error(RESTART_SUPERSEDED_SPAWN_MESSAGE)
+    }
     const sessionId = opts.sessionId ?? mintPtySessionId(opts.worktreeId)
     const operation = {
       exitsBySessionId: new Map<string, { incarnationId?: string }[]>(),
@@ -1193,16 +1219,27 @@ export class DaemonPtyAdapter implements IPtyProvider {
     if (opts.keepHistory && this.disconnectOnlyPromise) {
       throw new Error('Cannot keep history after daemon disconnect has started')
     }
-    const shutdown = this.withHistorySpawnLock(id, () => this.shutdownWithHistoryLock(id, opts))
-    if (!opts.keepHistory) {
-      await shutdown
-      return
-    }
-    this.keepHistoryShutdowns.add(shutdown)
+    // Why synchronously at entry: the restart snapshot can land while this waits on the history lock.
+    this.shutdownsInFlight.set(id, (this.shutdownsInFlight.get(id) ?? 0) + 1)
     try {
-      await shutdown
+      const shutdown = this.withHistorySpawnLock(id, () => this.shutdownWithHistoryLock(id, opts))
+      if (!opts.keepHistory) {
+        await shutdown
+        return
+      }
+      this.keepHistoryShutdowns.add(shutdown)
+      try {
+        await shutdown
+      } finally {
+        this.keepHistoryShutdowns.delete(shutdown)
+      }
     } finally {
-      this.keepHistoryShutdowns.delete(shutdown)
+      const remaining = (this.shutdownsInFlight.get(id) ?? 1) - 1
+      if (remaining > 0) {
+        this.shutdownsInFlight.set(id, remaining)
+      } else {
+        this.shutdownsInFlight.delete(id)
+      }
     }
   }
 
@@ -2618,7 +2655,12 @@ export class DaemonPtyAdapter implements IPtyProvider {
           ['token_file']
         )
       }
-      if (this.respawnAdoptionClosed || !this.respawnFn || !isDaemonGoneError(err)) {
+      if (
+        this.respawnAdoptionClosed ||
+        this.retiredByRestart ||
+        !this.respawnFn ||
+        !isDaemonGoneError(err)
+      ) {
         throw err
       }
       if (!this.respawnPromise) {
@@ -2763,7 +2805,7 @@ export class DaemonPtyAdapter implements IPtyProvider {
     }
     this.daemonLossEmitTimes.push(Date.now())
     const event = {
-      epoch: ++daemonLossEpochSequence,
+      epoch: nextDaemonLossEpoch(),
       sessions,
       sinceDisconnectMs: Math.max(0, Date.now() - this.daemonLossDisconnectedAt)
     }
@@ -2992,12 +3034,15 @@ export class DaemonPtyAdapter implements IPtyProvider {
     message = '[daemon] Daemon died — respawning',
     reason: DaemonRespawnReason = 'daemon_died'
   ): Promise<void> {
+    if (this.retiredByRestart) {
+      throw new Error(RESTART_SUPERSEDED_SPAWN_MESSAGE)
+    }
     console.warn(message)
     this.removeEventListener?.()
     this.removeEventListener = null
     this.client.disconnect()
     const releaseAdoptionLease = await this.respawnFn!(reason)
-    if (this.respawnAdoptionClosed) {
+    if (this.respawnAdoptionClosed || this.retiredByRestart) {
       // Why: app teardown may win mid-respawn; a late result must not reinstall a lease nobody owns.
       releaseAdoptionLease?.()
       throw new Error('Daemon adapter closed during respawn')

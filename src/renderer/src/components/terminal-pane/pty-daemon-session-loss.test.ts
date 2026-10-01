@@ -263,4 +263,36 @@ describe('handleDaemonSessionsLost (R315)', () => {
 
     expect(h.recover).toHaveBeenCalledTimes(1)
   })
+
+  // R326: the manual restart announces through this same dispatcher. The tab still holds the killed
+  // pty id and the chair is mid-turn, because main sent no pty:exit and cleared no status first.
+  it('R326: a restart-shaped notice (tab still holds the id, chair working) captures a re-anchor daemon-death record from the live status and requests one recovery', () => {
+    const captured: { paneKey: string; reanchor: boolean | undefined; liveState: unknown }[] = []
+    h.state = baseState({
+      agentStatusByPaneKey: {
+        [PANE_A]: { paneKey: PANE_A, tabId: 'tab-1', state: 'working', agentType: 'claude' }
+      },
+      captureSleepingAgentSessionForDaemonDeath: (
+        paneKey: string,
+        opts?: { reanchor?: boolean }
+      ) => {
+        const live = (h.state.agentStatusByPaneKey as Record<string, { state: string }>)[paneKey]
+        captured.push({ paneKey, reanchor: opts?.reanchor, liveState: live?.state })
+      }
+    })
+
+    handleDaemonSessionsLost({
+      epoch: 9001,
+      sessions: [{ id: 'pty-a', paneKey: PANE_A, reanchor: true }]
+    })
+
+    expect(captured).toEqual([{ paneKey: PANE_A, reanchor: true, liveState: 'working' }])
+    expect(h.recover).toHaveBeenCalledTimes(1)
+    expect(h.recover).toHaveBeenCalledWith({
+      tabId: 'tab-1',
+      ptyId: 'pty-a',
+      reason: 'daemon-session-lost',
+      relaunchPaneKeys: [PANE_A]
+    })
+  })
 })

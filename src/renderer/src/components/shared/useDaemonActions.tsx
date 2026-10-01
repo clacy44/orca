@@ -240,8 +240,8 @@ function getCopy(kind: DaemonActionKind): CopyShape {
       description: (
         <>
           {translate(
-            'auto.components.shared.useDaemonActions.01d6b7c64e',
-            'Kills every running terminal pane and restarts the daemon process. Panes show "Process exited" and can be reopened immediately. Legacy-protocol sessions from a previous app version are preserved. This can\'t be undone.'
+            'auto.components.shared.useDaemonActions.e80e25f9fe',
+            "Kills every running terminal pane and restarts the daemon process. Agent panes relaunch automatically and other terminals restart fresh. Legacy-protocol sessions from a previous app version are preserved. This can't be undone."
           )}
         </>
       ),
