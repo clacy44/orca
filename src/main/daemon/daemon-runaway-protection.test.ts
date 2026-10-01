@@ -14,6 +14,9 @@ describe('createDaemonRunawayProtection', () => {
       staleEdgesSkipped: 1,
       rowCount: 10,
       descendantCount: 2,
+      cycleLength: 0,
+      cutIndex: 0,
+      cutBy: 'midpoint',
       fresh: false
     })
     expect(log.log).toHaveBeenCalledWith(
@@ -30,9 +33,10 @@ describe('createDaemonRunawayProtection', () => {
     expect(exit).toHaveBeenCalledWith(DAEMON_EXIT_HEAP_PRESSURE)
   })
 
-  it('does not start a watchdog worker without a log file path', () => {
+  it('starts the stall watchdog even without a log file path (abort protection stays)', () => {
     const log = { log: vi.fn(), close: vi.fn() }
-    createDaemonRunawayProtection(log, undefined).startStallWatchdog()
-    expect(log.log).not.toHaveBeenCalled()
+    const stop = createDaemonRunawayProtection(log, undefined).startStallWatchdog()
+    expect(log.log).toHaveBeenCalledWith('daemon-stall-watchdog-start', expect.any(Object))
+    stop()
   })
 })

@@ -125,6 +125,20 @@ describe('daemon heap-pressure guard', () => {
     guard.stop()
   })
 
+  it('keeps shedding every tick but rate-limits daemon_heap_shed to once per 30s', () => {
+    const { log, shed, guard, tick } = createHarness([0.75, 0.75, 0.75, 0.75])
+    tick(5_000)
+    tick(5_000)
+    expect(shed).toHaveBeenCalledTimes(2)
+    expect(events(log).filter((e) => e === 'daemon_heap_shed')).toHaveLength(1)
+    tick(30_000)
+    expect(shed).toHaveBeenCalledTimes(3)
+    expect(events(log).filter((e) => e === 'daemon_heap_shed')).toHaveLength(2)
+    const second = log.log.mock.calls.filter((c) => c[0] === 'daemon_heap_shed')[1][1]
+    expect(second).toMatchObject({ shedPasses: 2 })
+    guard.stop()
+  })
+
   it('logs daemon_heap_exit with attribution and exits at 85%', () => {
     const { log, shed, exit, guard, tick } = createHarness([0.9])
     tick()

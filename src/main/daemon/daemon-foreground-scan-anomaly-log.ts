@@ -21,6 +21,9 @@ export function createForegroundScanAnomalyLog(
       staleEdgesSkipped: anomaly.staleEdgesSkipped,
       rowCount: anomaly.rowCount,
       descendantCount: anomaly.descendantCount,
+      cycleLength: anomaly.cycleLength,
+      cutIndex: anomaly.cutIndex,
+      cutBy: anomaly.cutBy,
       fresh: anomaly.fresh
     })
 }

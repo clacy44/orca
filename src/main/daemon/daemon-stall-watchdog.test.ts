@@ -29,6 +29,7 @@ describe('stall poller decisions', () => {
       readHeartbeat: () => beat,
       now: () => nowMs,
       rss: () => rss,
+      cpuMs: () => nowMs,
       log,
       abort,
       exitCode: DAEMON_EXIT_STALL,
@@ -159,6 +160,7 @@ describe('daemon stall watchdog worker', () => {
   })
 
   const testThresholds = (extra: Partial<StallWatchdogThresholds>): StallWatchdogThresholds => ({
+    ...DEFAULT_STALL_WATCHDOG_THRESHOLDS,
     heartbeatIntervalMs: 10,
     pollIntervalMs: 10,
     stallLogMs: 100,

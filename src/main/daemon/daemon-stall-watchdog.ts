@@ -2,7 +2,8 @@
  * D-26b W1: off-main-thread stall watchdog. A synchronous runaway (R314) never returns to the main
  * event loop, so no main-thread timer can see or end it. The main thread bumps a SharedArrayBuffer
  * heartbeat; a Worker polls it, logs a stall, and ends the process when the stall is a runaway
- * (>=6s with >=512MB rss growth since the stall began) or hopeless (>=30s).
+ * (>=6s with >=512MB rss growth since the stall began) or a >=30s CPU spin. A 30s stall that burns
+ * no CPU (a blocked syscall) is only logged: it is not the runaway and may still recover.
  *
  * The worker cannot set the process exit code (worker process.exit ends only the worker), so the
  * production abort is SIGKILL after daemon-stall-abort is logged; the line carries DAEMON_EXIT_STALL.
@@ -18,6 +19,9 @@ export type StallWatchdogThresholds = {
   abortStallMs: number
   abortRssGrowthStallMs: number
   abortRssGrowthBytes: number
+  /** The duration abort also needs process CPU time to grow by this fraction of the stall's wall time. */
+  abortCpuRatio: number
+  blockedLogIntervalMs: number
   /** A gap this long between the worker's own polls means the whole process was suspended, not stalled. */
   resyncGapMs: number
 }
@@ -29,6 +33,8 @@ export const DEFAULT_STALL_WATCHDOG_THRESHOLDS: StallWatchdogThresholds = {
   abortStallMs: 30_000,
   abortRssGrowthStallMs: 6_000,
   abortRssGrowthBytes: 512 * 1024 * 1024,
+  abortCpuRatio: 0.8,
+  blockedLogIntervalMs: 30_000,
   resyncGapMs: 2_000
 }
 
@@ -37,12 +43,15 @@ export type StallAbortInfo = {
   stalledMs: number
   rss: number
   rssGrowthBytes: number
+  cpuGrowthMs: number
 }
 
 export type StallPollerEnv = {
   readHeartbeat: () => number
   now: () => number
   rss: () => number
+  /** Process-wide CPU time (user + system) in ms; a main-thread spin shows up here from the worker. */
+  cpuMs: () => number
   log: (event: string, details: Record<string, unknown>) => void
   abort: (info: StallAbortInfo) => void
   exitCode: number
@@ -57,6 +66,8 @@ export function createStallPoller(env: StallPollerEnv): () => void {
   let lastBeatAt = env.now()
   let lastPollAt = lastBeatAt
   let healthyRss = env.rss()
+  let healthyCpuMs = env.cpuMs()
+  let lastBlockedLogAt = Number.NEGATIVE_INFINITY
   let stallLogged = false
   let aborted = false
   return () => {
@@ -71,6 +82,7 @@ export function createStallPoller(env: StallPollerEnv): () => void {
       lastBeat = env.readHeartbeat()
       lastBeatAt = at
       healthyRss = env.rss()
+      healthyCpuMs = env.cpuMs()
       stallLogged = false
       return
     }
@@ -86,6 +98,7 @@ export function createStallPoller(env: StallPollerEnv): () => void {
       lastBeat = beat
       lastBeatAt = at
       healthyRss = rss
+      healthyCpuMs = env.cpuMs()
       stallLogged = false
       return
     }
@@ -99,8 +112,19 @@ export function createStallPoller(env: StallPollerEnv): () => void {
       env.log('daemon-event-loop-stall', { stalledMs: Math.round(stalledMs), rss })
     }
     const rssGrowthBytes = rss - healthyRss
+    const cpuGrowthMs = env.cpuMs() - healthyCpuMs
+    const longEnough = stalledMs >= thresholds.abortStallMs
+    const spinning = cpuGrowthMs >= thresholds.abortCpuRatio * stalledMs
+    if (longEnough && !spinning && at - lastBlockedLogAt >= thresholds.blockedLogIntervalMs) {
+      lastBlockedLogAt = at
+      env.log('daemon-event-loop-stall-blocked', {
+        stalledMs: Math.round(stalledMs),
+        cpuGrowthMs: Math.round(cpuGrowthMs),
+        rss
+      })
+    }
     const reason =
-      stalledMs >= thresholds.abortStallMs
+      longEnough && spinning
         ? 'duration'
         : stalledMs >= thresholds.abortRssGrowthStallMs &&
             rssGrowthBytes >= thresholds.abortRssGrowthBytes
@@ -110,7 +134,13 @@ export function createStallPoller(env: StallPollerEnv): () => void {
       return
     }
     aborted = true
-    const info: StallAbortInfo = { reason, stalledMs: Math.round(stalledMs), rss, rssGrowthBytes }
+    const info: StallAbortInfo = {
+      reason,
+      stalledMs: Math.round(stalledMs),
+      rss,
+      rssGrowthBytes,
+      cpuGrowthMs: Math.round(cpuGrowthMs)
+    }
     env.log('daemon-stall-abort', { ...info, exitCode: env.exitCode })
     env.abort(info)
   }
@@ -123,6 +153,7 @@ const { performance } = require('node:perf_hooks')
 const createStallPoller = ${createStallPoller.toString()}
 const heartbeat = new Int32Array(workerData.heartbeat)
 const log = (event, details) => {
+  if (!workerData.logFilePath) return
   try {
     const line = { src: 'daemon', ts: new Date().toISOString(), pid: process.pid, event, ...details }
     appendFileSync(workerData.logFilePath, JSON.stringify(line) + '\\n', { mode: 0o600 })
@@ -133,13 +164,18 @@ const poll = createStallPoller({
   readHeartbeat: () => Atomics.load(heartbeat, 0),
   now: () => performance.now(),
   rss: () => process.memoryUsage.rss(),
+  cpuMs: () => { const usage = process.cpuUsage(); return (usage.user + usage.system) / 1000 },
   log,
   exitCode: workerData.exitCode,
   thresholds: workerData.thresholds,
   abort: (info) => {
     clearInterval(timer)
     if (workerData.abortMode === 'kill') {
-      try { process.kill(process.pid, 'SIGKILL') } catch {}
+      try {
+        process.kill(workerData.killPid || process.pid, 'SIGKILL')
+      } catch (error) {
+        log('daemon-stall-abort-failed', { message: String(error && error.message) })
+      }
     }
     parentPort.postMessage({ type: 'abort', info })
   }
@@ -149,10 +185,13 @@ timer = setInterval(poll, workerData.thresholds.pollIntervalMs)
 
 export type DaemonStallWatchdogOptions = {
   log: DaemonFileLog
-  logFilePath: string
+  /** Absent when the daemon has no log file: the worker's logging becomes a no-op, the abort stays. */
+  logFilePath?: string
   thresholds?: Partial<StallWatchdogThresholds>
   /** Test seam: replaces the SIGKILL so the abort path can run without ending the process. */
   onAbort?: (info: StallAbortInfo) => void
+  /** Test seam: the pid the production abort signals (always this process otherwise). */
+  killPid?: number
 }
 
 export function startDaemonStallWatchdog(opts: DaemonStallWatchdogOptions): { stop: () => void } {
@@ -165,7 +204,8 @@ export function startDaemonStallWatchdog(opts: DaemonStallWatchdogOptions): { st
       eval: true,
       workerData: {
         heartbeat: heartbeatBuffer,
-        logFilePath: opts.logFilePath,
+        logFilePath: opts.logFilePath ?? '',
+        ...(opts.killPid === undefined ? {} : { killPid: opts.killPid }),
         thresholds,
         exitCode: DAEMON_EXIT_STALL,
         abortMode: opts.onAbort ? 'message' : 'kill'

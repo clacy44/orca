@@ -9,8 +9,8 @@ export type DaemonRunawayProtection = {
   /** Heap-pressure guard exit: logs nothing itself (daemon_heap_exit is already written), ends the process. */
   onHeapPressureExit: () => void
   foregroundScanAnomalyFor: (sessionId: string) => (anomaly: ForegroundScanAnomaly) => void
-  /** Needs the log file path: the watchdog's worker writes it directly while the main thread is blocked. */
-  startStallWatchdog: () => void
+  /** The worker writes the log file directly while the main thread is blocked; without a path it only protects. */
+  startStallWatchdog: () => () => void
 }
 
 export function createDaemonRunawayProtection(
@@ -22,10 +22,6 @@ export function createDaemonRunawayProtection(
     onHeapPressureExit: createDaemonProcessExit(log, DAEMON_EXIT_HEAP_PRESSURE),
     foregroundScanAnomalyFor: (sessionId) => (anomaly) =>
       logForegroundScanAnomaly(sessionId, anomaly),
-    startStallWatchdog: () => {
-      if (logFilePath) {
-        startDaemonStallWatchdog({ log, logFilePath })
-      }
-    }
+    startStallWatchdog: () => startDaemonStallWatchdog({ log, logFilePath }).stop
   }
 }

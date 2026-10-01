@@ -85,12 +85,18 @@ describe('daemon pty foreground scan anomaly wiring', () => {
       ],
       descendants: [{ pid: 2, ppid: 1, command: 'secret --token abc' }],
       staleEdgesSkipped: 3,
+      cycleLength: 6,
+      cutIndex: 2,
+      cutBy: 'creation-time',
       fresh: false
     })
     expect(onForegroundScanAnomaly).toHaveBeenCalledWith({
       staleEdgesSkipped: 3,
       rowCount: 2,
       descendantCount: 1,
+      cycleLength: 6,
+      cutIndex: 2,
+      cutBy: 'creation-time',
       fresh: false
     })
 

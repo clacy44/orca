@@ -6,7 +6,15 @@ describe('createForegroundScanAnomalyLog', () => {
     const log = { log: vi.fn(), close: vi.fn() }
     let now = 0
     const report = createForegroundScanAnomalyLog(log, () => now)
-    const anomaly = { staleEdgesSkipped: 2, rowCount: 300, descendantCount: 4, fresh: true }
+    const anomaly = {
+      staleEdgesSkipped: 2,
+      rowCount: 300,
+      descendantCount: 4,
+      cycleLength: 6,
+      cutIndex: 3,
+      cutBy: 'midpoint' as const,
+      fresh: true
+    }
 
     report('pty-session-abcdef0123456789', anomaly)
     report('pty-session-abcdef0123456789', anomaly)
@@ -22,11 +30,17 @@ describe('createForegroundScanAnomalyLog', () => {
         staleEdgesSkipped: 2,
         rowCount: 300,
         descendantCount: 4,
+        cycleLength: 6,
+        cutIndex: 3,
+        cutBy: 'midpoint',
         fresh: true
       }
     ])
     expect(log.log.mock.calls[2][1]).toMatchObject({ suppressed: 1 })
     expect(Object.keys(log.log.mock.calls[0][1]).sort()).toEqual([
+      'cutBy',
+      'cutIndex',
+      'cycleLength',
       'descendantCount',
       'fresh',
       'rowCount',

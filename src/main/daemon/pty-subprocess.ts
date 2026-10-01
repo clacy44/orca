@@ -147,6 +147,9 @@ export type ForegroundScanAnomaly = {
   staleEdgesSkipped: number
   rowCount: number
   descendantCount: number
+  cycleLength: number
+  cutIndex: number
+  cutBy: 'creation-time' | 'midpoint'
   fresh: boolean
 }
 
@@ -987,11 +990,22 @@ export function createPtySubprocess(opts: PtySubprocessOptions): SubprocessHandl
   const foregroundScanAnomalyOption: Pick<AgentForegroundResolutionOptions, 'onTreeAnomaly'> =
     opts.onForegroundScanAnomaly
       ? {
-          onTreeAnomaly: ({ staleEdgesSkipped, rows, descendants, fresh }) =>
+          onTreeAnomaly: ({
+            staleEdgesSkipped,
+            rows,
+            descendants,
+            cycleLength,
+            cutIndex,
+            cutBy,
+            fresh
+          }) =>
             opts.onForegroundScanAnomaly?.({
               staleEdgesSkipped,
               rowCount: rows.length,
               descendantCount: descendants.length,
+              cycleLength,
+              cutIndex,
+              cutBy,
               fresh
             })
         }

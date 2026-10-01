@@ -13,6 +13,7 @@ export const HEAP_PRESSURE_LOG_RATIO = 0.5
 export const HEAP_PRESSURE_SHED_RATIO = 0.7
 export const HEAP_PRESSURE_EXIT_RATIO = 0.85
 const PRESSURE_LOG_MIN_GAP_MS = 30_000
+const SHED_LOG_MIN_GAP_MS = 30_000
 const MAX_ATTRIBUTION_ENTRIES = 8
 
 export type HeapPressureClientAttribution = {
@@ -99,6 +100,8 @@ export function startDaemonHeapPressureGuard(
   const readRss = opts.readRss ?? ((): number => memoryUsage().rss)
   const now = opts.now ?? Date.now
   let lastPressureLogAt = Number.NEGATIVE_INFINITY
+  let lastShedLogAt = Number.NEGATIVE_INFINITY
+  let shedPassesSinceLog = 0
   let exiting = false
   let timer: ReturnType<typeof setInterval> | null = null
 
@@ -138,7 +141,13 @@ export function startDaemonHeapPressureGuard(
       opts.log.log('daemon_heap_pressure', { ...base, ...attribution })
     }
     if (ratio >= HEAP_PRESSURE_SHED_RATIO) {
-      opts.log.log('daemon_heap_shed', { ...base, ...opts.shed() })
+      const outcome = opts.shed()
+      shedPassesSinceLog += 1
+      if (at - lastShedLogAt >= SHED_LOG_MIN_GAP_MS) {
+        lastShedLogAt = at
+        opts.log.log('daemon_heap_shed', { ...base, ...outcome, shedPasses: shedPassesSinceLog })
+        shedPassesSinceLog = 0
+      }
     }
   }
 

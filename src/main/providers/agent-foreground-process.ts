@@ -91,13 +91,17 @@ function resolveAgentForegroundProcessFromPs(
   options: AgentForegroundResolutionOptions
 ): string | null {
   const shellRow = rows.find((row) => row.pid === shellPid)
-  const { descendants, staleEdgesSkipped } = collectProcessDescendants(rows, shellPid)
+  const { descendants, staleEdgesSkipped, cycleLength, cutIndex, cutBy } =
+    collectProcessDescendants(rows, shellPid)
   if (staleEdgesSkipped > 0) {
     try {
       options.onTreeAnomaly?.({
         rows,
         descendants,
         staleEdgesSkipped,
+        cycleLength,
+        cutIndex,
+        cutBy,
         fresh: options.fresh === true
       })
     } catch {

@@ -13,8 +13,8 @@ const WINDOWS_PROCESS_QUERY_TIMEOUT_MS = 3_000
 const POWERSHELL_PROCESS_QUERY =
   '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ' +
   'Get-CimInstance -ClassName Win32_Process ' +
-  '-Property CommandLine,ExecutablePath,Name,ParentProcessId,ProcessId | ' +
-  'Select-Object CommandLine,ExecutablePath,Name,ParentProcessId,ProcessId | ' +
+  '-Property CommandLine,CreationDate,ExecutablePath,Name,ParentProcessId,ProcessId | ' +
+  'Select-Object CommandLine,CreationDate,ExecutablePath,Name,ParentProcessId,ProcessId | ' +
   'ConvertTo-Json -Compress'
 
 export type WindowsProcessRow = {
@@ -23,6 +23,8 @@ export type WindowsProcessRow = {
   name: string
   command: string
   executablePath: string
+  /** Process creation time (epoch ms); absent when the probe did not report a parsable one. */
+  createdAtMs?: number
 }
 
 export type WindowsProcessCandidate = WindowsProcessRow & { depth: number }
@@ -82,13 +84,17 @@ export async function queryWindowsProcessDescendants(
   if (!rows.some((row) => row.pid === rootPid)) {
     return null
   }
-  const { descendants, staleEdgesSkipped } = collectProcessDescendants(rows, rootPid)
+  const { descendants, staleEdgesSkipped, cycleLength, cutIndex, cutBy } =
+    collectProcessDescendants(rows, rootPid)
   if (staleEdgesSkipped > 0) {
     try {
       options.onTreeAnomaly?.({
         rows,
         descendants,
         staleEdgesSkipped,
+        cycleLength,
+        cutIndex,
+        cutBy,
         fresh: options.fresh === true
       })
     } catch {
@@ -113,11 +119,20 @@ function parseWindowsProcessValueRows(stdout: string): WindowsProcessRow[] {
   let name = ''
   let pid = Number.NaN
   let ppid = Number.NaN
+  let createdAtMs: number | undefined
 
   const flush = (): void => {
     if (Number.isFinite(pid) && Number.isFinite(ppid)) {
-      rows.push({ pid, ppid, name, command: command || name, executablePath })
+      rows.push({
+        pid,
+        ppid,
+        name,
+        command: command || name,
+        executablePath,
+        ...(createdAtMs === undefined ? {} : { createdAtMs })
+      })
     }
+    createdAtMs = undefined
     command = ''
     executablePath = ''
     name = ''
@@ -139,6 +154,8 @@ function parseWindowsProcessValueRows(stdout: string): WindowsProcessRow[] {
     const value = line.slice(eq + 1)
     if (key === 'CommandLine') {
       command = value
+    } else if (key === 'CreationDate') {
+      createdAtMs = parseWindowsCreationDate(value)
     } else if (key === 'ExecutablePath') {
       executablePath = value
     } else if (key === 'Name') {
@@ -155,6 +172,7 @@ function parseWindowsProcessValueRows(stdout: string): WindowsProcessRow[] {
 
 type WindowsProcessJsonRow = {
   CommandLine?: unknown
+  CreationDate?: unknown
   ExecutablePath?: unknown
   Name?: unknown
   ParentProcessId?: unknown
@@ -181,19 +199,44 @@ function parseWindowsProcessJsonRows(stdout: string): WindowsProcessRow[] | null
       }
       const name = stringFromWindowsProcessField(row.Name)
       const command = stringFromWindowsProcessField(row.CommandLine) || name
+      const createdAtMs = parseWindowsCreationDate(row.CreationDate)
       return [
         {
           pid,
           ppid,
           name,
           command,
-          executablePath: stringFromWindowsProcessField(row.ExecutablePath)
+          executablePath: stringFromWindowsProcessField(row.ExecutablePath),
+          ...(createdAtMs === undefined ? {} : { createdAtMs })
         }
       ]
     })
   } catch {
     return null
   }
+}
+
+// Why: Windows PowerShell 5.1 serializes DateTime as "/Date(ms)/", PowerShell 7 as ISO-8601, and
+// wmic as "yyyymmddHHMMSS.ffffff+UUU" (UUU = minutes east of UTC).
+function parseWindowsCreationDate(value: unknown): number | undefined {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : undefined
+  }
+  if (typeof value !== 'string') {
+    return undefined
+  }
+  const dotNet = /^\/Date\((-?\d+)(?:[+-]\d{4})?\)\/$/.exec(value)
+  if (dotNet) {
+    return Number(dotNet[1])
+  }
+  const wmic = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.(\d{6})([+-]\d{3})$/.exec(value)
+  if (wmic) {
+    const [, y, mo, d, h, mi, s, micro, offset] = wmic
+    const utcMs = Date.UTC(+y, +mo - 1, +d, +h, +mi, +s) + Number(micro) / 1000
+    return utcMs - Number(offset) * 60_000
+  }
+  const parsed = Date.parse(value)
+  return Number.isFinite(parsed) ? parsed : undefined
 }
 
 function stringFromWindowsProcessField(value: unknown): string {
@@ -248,7 +291,7 @@ async function queryWindowsProcessesWithWmic(): Promise<WindowsProcessRow[] | nu
       [
         'process',
         'get',
-        'CommandLine,ExecutablePath,Name,ParentProcessId,ProcessId',
+        'CommandLine,CreationDate,ExecutablePath,Name,ParentProcessId,ProcessId',
         '/format:value'
       ],
       {
