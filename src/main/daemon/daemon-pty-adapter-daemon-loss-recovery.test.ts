@@ -85,6 +85,7 @@ vi.mock('./client', () => ({ DaemonClient: h.FakeDaemonClient }))
 import {
   DaemonPtyAdapter,
   _resetDaemonLossEpochSequenceForTests,
+  nextDaemonLossEpoch,
   type DaemonPtyAdapterOptions
 } from './daemon-pty-adapter'
 import { PtyWriteUnavailableError } from '../providers/pty-write-unavailable-error'
@@ -475,5 +476,24 @@ describe('DaemonPtyAdapter proactive daemon-loss recovery (R315)', () => {
     await flush()
 
     expect(lost.map((event) => event.epoch)).toEqual([1, 2])
+  })
+
+  it('R326: the manual restart draws its epoch from the same sequence, so it never collides with an adapter epoch', async () => {
+    const first = makeAdapter()
+    seedActive(first, ['s1'])
+    fake.aliveSessionIds = []
+    fake.crash()
+    await flush()
+    const restartEpoch = nextDaemonLossEpoch()
+    first.dispose()
+
+    const second = makeAdapter()
+    seedActive(second, ['s1'])
+    fake.aliveSessionIds = []
+    fake.crash()
+    await flush()
+
+    expect(restartEpoch).toBe(2)
+    expect(lost.map((event) => event.epoch)).toEqual([1, 3])
   })
 })

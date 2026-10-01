@@ -12,6 +12,14 @@ export type DaemonSessionsLostRendererPayload = {
   sessions: { id: string; paneKey: string | null; reanchor: boolean }[]
 }
 
+/** Per-call options: the manual restart announces the ids it killed through this same handler. */
+export type DaemonSessionLossOptions = {
+  /** The caller already wrote the `daemon_died` audit rows for these ids (restart step 1). */
+  auditWritten?: boolean
+  /** What announced the loss; carried into the breadcrumb only. */
+  cause?: string
+}
+
 export type DaemonSessionLossDeps = {
   isCurrentPtyExit: (payload: { id: string; incarnationId?: string }) => boolean
   /** A same-id `pty:spawn` (the recovery relaunch) is mid-flight: its state must not be torn down. */
@@ -33,10 +41,11 @@ const DAEMON_LOSS_EXIT_CODE = -1
 
 export function createDaemonSessionLossHandler(
   deps: DaemonSessionLossDeps
-): (event: PtySessionsLostToDaemonDeathEvent) => Promise<void> {
+): (event: PtySessionsLostToDaemonDeathEvent, options?: DaemonSessionLossOptions) => Promise<void> {
   const isCurrent = ({ id, incarnationId }: { id: string; incarnationId?: string }): boolean =>
     deps.isCurrentPtyExit({ id, ...(incarnationId ? { incarnationId } : {}) })
-  return async (event) => {
+  return async (event, options) => {
+    const causeData: Record<string, string> = options?.cause ? { cause: options.cause } : {}
     // Why: a pty id the runtime already moved to a newer incarnation was respawned by some other
     // trigger before this announcement landed; it is not a casualty any more.
     const lost = event.sessions.filter(isCurrent)
@@ -49,15 +58,19 @@ export function createDaemonSessionLossHandler(
         stale: event.sessions.length,
         ...(event.sinceDisconnectMs === undefined
           ? {}
-          : { sinceDisconnectMs: event.sinceDisconnectMs })
+          : { sinceDisconnectMs: event.sinceDisconnectMs }),
+        ...causeData
       })
       return
     }
     // Audit and plan read state that onPtyExit / clearProviderPtyState tear down, so both come first.
-    try {
-      deps.notifyDaemonDiedFanout(lost.map(({ id }) => id))
-    } catch (error) {
-      console.error('[daemon] daemon_died audit for lost sessions failed:', error)
+    // Why skippable: the manual restart writes the audit at its own step 1 (one row per death).
+    if (!options?.auditWritten) {
+      try {
+        deps.notifyDaemonDiedFanout(lost.map(({ id }) => id))
+      } catch (error) {
+        console.error('[daemon] daemon_died audit for lost sessions failed:', error)
+      }
     }
     let plan: DaemonLossRecoveryPlanEntry[] | null = null
     try {
@@ -103,7 +116,8 @@ export function createDaemonSessionLossHandler(
       ...(lost.length > toApply.length ? { inFlight: lost.length - toApply.length } : {}),
       ...(event.sinceDisconnectMs === undefined
         ? {}
-        : { sinceDisconnectMs: event.sinceDisconnectMs })
+        : { sinceDisconnectMs: event.sinceDisconnectMs }),
+      ...causeData
     })
   }
 }

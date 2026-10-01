@@ -142,6 +142,7 @@ import {
 import { markClaudePtyExited, markClaudePtySpawned } from '../claude-accounts/live-pty-gate'
 import { notifyDaemonDiedFanout } from '../daemon/daemon-died-fanout-registry'
 import { createDaemonSessionLossHandler } from './pty-daemon-session-loss'
+import { createRestartExitHold } from './pty-daemon-restart-hold'
 import { recordDurableCrashBreadcrumb } from '../crash-reporting/durable-crash-breadcrumb'
 import { ensureLinuxTerminalOrcaCliShimDir } from '../cli/linux-terminal-orca-cli-shim'
 import {
@@ -2374,6 +2375,40 @@ export function rebindLocalProviderListeners(): void {
   rebindProviderListeners?.()
 }
 
+// R326: the manual "Restart daemon" holds the exits of the ptys it kills until the new provider is
+// bound, then announces them through R315's session-loss handler (or, on a failed restart, gives
+// them today's exits). State lives in pty-daemon-restart-hold.ts; the wiring is below and in
+// `registerPtyHandlers` (exit listener, `pty:hasPty`, the local `pty:spawn` fence).
+const restartExitHold = createRestartExitHold()
+let releaseRestartHoldImpl:
+  | ((options: { mode: 'announce'; epoch: number } | { mode: 'exit' }) => Promise<void>)
+  | null = null
+
+export function beginRestartExitHold(ptyIds: Iterable<string>): void {
+  if (restartExitHold.begin(ptyIds).merged) {
+    console.warn('[daemon] restart exit hold begun while one was already open; merged')
+  }
+}
+
+export async function releaseRestartExitHold(
+  options: { mode: 'announce'; epoch: number } | { mode: 'exit' }
+): Promise<void> {
+  if (releaseRestartHoldImpl) {
+    await releaseRestartHoldImpl(options)
+    return
+  }
+  // Why: with no handlers registered nothing could have been captured; still settle so the hold never leaks.
+  const released = restartExitHold.release()
+  if (released) {
+    if (released.captured.length > 0) {
+      console.error(
+        `[daemon] restart exit hold released with ${released.captured.length} captured exit(s) but no pty handlers registered`
+      )
+    }
+    released.settle()
+  }
+}
+
 export type PtyRendererDeliveryDebugSnapshot = {
   pendingPtyCount: number
   pendingChars: number
@@ -4231,6 +4266,56 @@ export function registerPtyHandlers(
     recordBreadcrumb: (name, data) => recordDurableCrashBreadcrumb(name, data)
   })
 
+  // R326: ends the manual-restart hold. 'announce' (restart succeeded, new provider bound) runs the
+  // held ids through the R315 handler, which already wrote its audit rows at restart step 1;
+  // 'exit' (restart failed) gives each held id today's exit. The hold stays open (spawns fenced,
+  // hasPty null) until the announcement's synchronous exits have been applied.
+  releaseRestartHoldImpl = async (options) => {
+    const released = restartExitHold.release()
+    if (!released) {
+      return
+    }
+    try {
+      if (options.mode === 'announce') {
+        await handleDaemonSessionsLost(
+          { epoch: options.epoch, sessions: released.captured },
+          { auditWritten: true, cause: 'manual_restart' }
+        )
+        return
+      }
+      let skippedInFlight = 0
+      for (const held of released.captured) {
+        if (!isCurrentPtyExit(held)) {
+          continue
+        }
+        if ((callerSessionSpawnsInFlight.get(held.id) ?? 0) > 0) {
+          skippedInFlight += 1
+          continue
+        }
+        const payload = {
+          id: held.id,
+          code: -1,
+          ...(held.incarnationId ? { incarnationId: held.incarnationId } : {})
+        }
+        applyProviderPtyExitState(payload)
+        sendPtyExitToRenderer(payload)
+      }
+      recordDurableCrashBreadcrumb('daemon_restart_hold_exited', {
+        count: released.captured.length,
+        ...(skippedInFlight > 0 ? { inFlight: skippedInFlight } : {})
+      })
+    } catch (error) {
+      // Why: the restart itself already finished; a failing announcement must not fail it, but must leave a trace.
+      console.error('[daemon] releasing the restart exit hold failed:', error)
+      recordDurableCrashBreadcrumb('daemon_restart_hold_release_failed', {
+        mode: options.mode,
+        captured: released.captured.length
+      })
+    } finally {
+      released.settle()
+    }
+  }
+
   // Why extracted: the "Restart daemon" flow rebinds against the fresh adapter after replaceDaemonProvider, sharing this code path with startup registration.
   const bindProviderListeners = (): void => {
     localDataUnsub?.()
@@ -4310,6 +4395,10 @@ export function registerPtyHandlers(
         return
       }
       if (consumeSyntheticKillExit(payload.id)) {
+        return
+      }
+      // R326: a pty the manual restart killed is announced (or exited) when the restart settles.
+      if (restartExitHold.captureIfHeld(payload)) {
         return
       }
       if (!isLocalProvider) {
@@ -6449,6 +6538,13 @@ export function registerPtyHandlers(
         )
       }
       try {
+        // R326: while a manual restart holds the killed ids, a local spawn waits for it to settle so
+        // it resolves the NEW provider (never the old adapter's respawn closure). Already counted in
+        // flight above, so the restart's announcement skips this id instead of exiting it.
+        const restartHoldSettled = !args.connectionId ? restartExitHold.pendingSettle() : null
+        if (restartHoldSettled) {
+          await restartHoldSettled
+        }
         if (!earlyStablePaneOwner) {
           await assertFolderWorkspacePtyPathUsable(args.worktreeId)
         }
@@ -8307,6 +8403,11 @@ export function registerPtyHandlers(
       // a runtime terminal handle and parseAppSshPtyId ignores it, so the lookup
       // falls through to the local provider and its "not in my table" reads as an
       // authoritative dead. That is a fabricated answer about another host's PTY.
+      return null
+    }
+    // R326: the old adapter's table was emptied by the restart teardown, so its "not mine" would be an
+    // authoritative false that closes the pane. Unknown (null) until the restart settles.
+    if (restartExitHold.isHeld(args.id)) {
       return null
     }
     const ownedConnectionId = ptyOwnership.get(args.id)

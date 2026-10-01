@@ -171,6 +171,10 @@ let daemonLossEpochSequence = 0
 export function _resetDaemonLossEpochSequenceForTests(): void {
   daemonLossEpochSequence = 0
 }
+// R326: the manual restart announces its killed ptys with an epoch from this same sequence.
+export function nextDaemonLossEpoch(): number {
+  return ++daemonLossEpochSequence
+}
 // R315: waits before each retry of the post-respawn inventory (so at most 3 retries).
 const DAEMON_LOSS_INVENTORY_RETRY_DELAYS_MS = [2_000, 8_000, 30_000]
 // R315 circuit breaker: a crash-looping daemon must not become a relaunch loop.
@@ -2763,7 +2767,7 @@ export class DaemonPtyAdapter implements IPtyProvider {
     }
     this.daemonLossEmitTimes.push(Date.now())
     const event = {
-      epoch: ++daemonLossEpochSequence,
+      epoch: nextDaemonLossEpoch(),
       sessions,
       sinceDisconnectMs: Math.max(0, Date.now() - this.daemonLossDisconnectedAt)
     }

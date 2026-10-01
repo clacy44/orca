@@ -424,6 +424,7 @@ vi.mock('./daemon-spawner', () => ({
 }))
 
 vi.mock('./daemon-pty-adapter', () => ({
+  nextDaemonLossEpoch: nextDaemonLossEpochMock,
   DaemonPtyAdapter: class MockDaemonPtyAdapter {
     readonly protocolVersion: number
     readonly options: MockAdapter['options']
@@ -486,8 +487,23 @@ vi.mock('../ipc/pty', () => ({
   getLocalPtyProvider: getLocalPtyProviderMock,
   setLocalPtyProvider: setLocalPtyProviderMock,
   unbindLocalProviderListeners: unbindLocalProviderListenersMock,
-  rebindLocalProviderListeners: rebindLocalProviderListenersMock
+  rebindLocalProviderListeners: rebindLocalProviderListenersMock,
+  beginRestartExitHold: beginRestartExitHoldMock,
+  releaseRestartExitHold: releaseRestartExitHoldMock
 }))
+
+// R326: the restart's hold/announce bracket (pty.ts) and the shared loss-epoch sequence (adapter).
+const { beginRestartExitHoldMock, releaseRestartExitHoldMock, nextDaemonLossEpochMock } =
+  vi.hoisted(() => {
+    let epoch = 9000
+    return {
+      beginRestartExitHoldMock: vi.fn((_ptyIds: Iterable<string>) => {}),
+      releaseRestartExitHoldMock: vi.fn(
+        async (_options: { mode: 'announce'; epoch: number } | { mode: 'exit' }) => {}
+      ),
+      nextDaemonLossEpochMock: vi.fn(() => ++epoch)
+    }
+  })
 
 async function importFresh() {
   vi.resetModules()
@@ -508,6 +524,10 @@ async function importFresh() {
   setLocalPtyProviderMock.mockClear()
   unbindLocalProviderListenersMock.mockClear()
   rebindLocalProviderListenersMock.mockClear()
+  beginRestartExitHoldMock.mockClear()
+  releaseRestartExitHoldMock.mockClear()
+  releaseRestartExitHoldMock.mockResolvedValue(undefined)
+  nextDaemonLossEpochMock.mockClear()
   trackDaemonReplacedMock.mockClear()
   trackDaemonRetiredMock.mockClear()
   recordDurableCrashBreadcrumbMock.mockClear()
@@ -926,6 +946,116 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
     }
 
     expect(handler).not.toHaveBeenCalled()
+  })
+
+  describe('R326: hold the killed ptys, announce after the rebind', () => {
+    async function initWithActive(ids: string[]) {
+      const mod = await importFresh()
+      await mod.initDaemonPtyProvider()
+      adapterInstances[0].getActiveSessionIds.mockImplementation(() => [...ids])
+      beginRestartExitHoldMock.mockClear()
+      releaseRestartExitHoldMock.mockClear()
+      return mod
+    }
+
+    it('begins the hold with the killed ids BEFORE the daemon_died audit and the synthetic-exit fanout', async () => {
+      const mod = await initWithActive(['pty-1', 'pty-2'])
+      const trace: string[] = []
+      beginRestartExitHoldMock.mockImplementation((ids) => {
+        trace.push(`hold:${[...ids].sort().join(',')}`)
+      })
+      mod.setDaemonDiedFanoutHandler((ids: readonly string[]) => {
+        trace.push(`audit:${[...ids].sort().join(',')}`)
+      })
+      adapterInstances[0].fanoutSyntheticExits.mockImplementation(() => trace.push('fanout'))
+      try {
+        await mod.restartDaemon()
+      } finally {
+        mod.setDaemonDiedFanoutHandler(null)
+        beginRestartExitHoldMock.mockReset()
+      }
+
+      expect(trace).toEqual(['hold:pty-1,pty-2', 'audit:pty-1,pty-2', 'fanout'])
+    })
+
+    it('announces only after the new provider is swapped in and the listeners rebound, with the shared epoch', async () => {
+      const mod = await initWithActive(['pty-1'])
+      const trace: string[] = []
+      adapterInstances[0].fanoutSyntheticExits.mockImplementation(() => trace.push('fanout'))
+      unbindLocalProviderListenersMock.mockImplementation(() => trace.push('unbind'))
+      setLocalPtyProviderMock.mockImplementation(() => trace.push('replaceProvider'))
+      rebindLocalProviderListenersMock.mockImplementation(() => trace.push('rebind'))
+      releaseRestartExitHoldMock.mockImplementation(async (options) => {
+        trace.push(`release:${JSON.stringify(options)}`)
+      })
+      nextDaemonLossEpochMock.mockReturnValueOnce(4321)
+
+      const result = await mod.restartDaemon()
+
+      expect(trace).toEqual([
+        'fanout',
+        'unbind',
+        'replaceProvider',
+        'rebind',
+        'release:{"mode":"announce","epoch":4321}'
+      ])
+      expect(releaseRestartExitHoldMock).toHaveBeenCalledTimes(1)
+      expect(nextDaemonLossEpochMock).toHaveBeenCalledTimes(1)
+      expect(result.killedCount).toBe(1)
+    })
+
+    it('a failure at ensureRunning releases the hold in exit mode (after the rebind) and never announces', async () => {
+      const mod = await initWithActive(['pty-1'])
+      const trace: string[] = []
+      rebindLocalProviderListenersMock.mockImplementation(() => trace.push('rebind'))
+      releaseRestartExitHoldMock.mockImplementation(async (options) => {
+        trace.push(`release:${options.mode}`)
+      })
+      ensureRunningOverrides.push(async () => {
+        throw new Error('respawn failed')
+      })
+
+      await expect(mod.restartDaemon()).rejects.toThrow('respawn failed')
+
+      expect(trace).toEqual(['rebind', 'release:exit'])
+      expect(releaseRestartExitHoldMock).toHaveBeenCalledTimes(1)
+      expect(nextDaemonLossEpochMock).not.toHaveBeenCalled()
+    })
+
+    it('a failure at the lifecycle lease releases the hold in exit mode and never announces', async () => {
+      const mod = await initWithActive(['pty-1'])
+      ensureRunningOverrides.push(async () => ({
+        socketPath: '/fake/restart-lease-socket',
+        tokenPath: '/fake/restart-lease-token'
+      }))
+      lifecycleLeaseErrors.push(new Error('restart lease failed'))
+
+      await expect(mod.restartDaemon()).rejects.toThrow('restart lease failed')
+
+      expect(releaseRestartExitHoldMock.mock.calls).toEqual([[{ mode: 'exit' }]])
+      expect(nextDaemonLossEpochMock).not.toHaveBeenCalled()
+    })
+
+    it('the hold always settles: an unexpected throw anywhere after the hold began still releases it in exit mode', async () => {
+      const mod = await initWithActive(['pty-1'])
+      unbindLocalProviderListenersMock.mockImplementationOnce(() => {
+        throw new Error('unbind blew up')
+      })
+
+      await expect(mod.restartDaemon()).rejects.toThrow('unbind blew up')
+
+      expect(releaseRestartExitHoldMock.mock.calls).toEqual([[{ mode: 'exit' }]])
+    })
+
+    it('a successful restart releases exactly once (announce), never also in exit mode', async () => {
+      const mod = await initWithActive(['pty-1'])
+
+      await mod.restartDaemon()
+
+      expect(releaseRestartExitHoldMock.mock.calls).toEqual([
+        [{ mode: 'announce', epoch: expect.any(Number) }]
+      ])
+    })
   })
 
   it('uses daemon-owned idle retirement after a failed manual-restart adoption', async () => {
