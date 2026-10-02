@@ -60,6 +60,7 @@ import { recordDesktopMaterialize } from './restore-sweep-desktop-materialize-qu
 import { restoreSweepDeferralFamily } from './restore-sweep-deferral-family'
 import { notifyPaneBestEffort } from './restore-sweep-pane-notice'
 import { applyResumePreflight } from './restore-sweep-resume-preflight-arm'
+import { hostRestoreInternal, sweepReanchorEligible } from './restore-sweep-reanchor'
 import {
   auditSweepSkip,
   auditLayer3,
@@ -210,6 +211,7 @@ export async function restoreOneRegisteredPane(
   if (preflightOutcome) {
     return preflightOutcome
   }
+  const armed = await sweepReanchorEligible(deps, agentId, launchRow, occupant, occupantLiveness)
   const ticket = deps.mintRestoreTicket({
     predecessorPaneKey: launchRow.pane_key,
     sessionId: launchRow.session_id,
@@ -230,14 +232,13 @@ export async function restoreOneRegisteredPane(
         launchPreferences: launchPreferencesFromRow(launchRow)
       },
       {},
-      { restoreProvenance: { kind: 'host-restore', ticket } }
+      hostRestoreInternal(ticket, armed)
     )
   } catch (err) {
     const reasonCode = `ensure_agent_session_failed: ${err instanceof Error ? err.message : String(err)}`
     auditLayer3(db, hostId, launchRow.pane_key, agentId, reasonCode)
     return { kind: 'layer3', reasonCode }
   }
-  const newPaneKey = created.terminal.paneKey ?? launchRow.pane_key
   const newTerminalHandle = created.terminal.handle
   const newProcessIncarnation = deps.getTerminalProcessIncarnation(newTerminalHandle)
   const result = db.rebindRestoredPane({
@@ -248,7 +249,7 @@ export async function restoreOneRegisteredPane(
       launchGeneration: currentGeneration,
       launchSeq: launchRow.seq
     },
-    newPaneKey,
+    newPaneKey: created.terminal.paneKey ?? launchRow.pane_key,
     newTerminalHandle,
     hostId,
     executionHostId: created.terminal.executionHostId ?? launchRow.execution_host_id,

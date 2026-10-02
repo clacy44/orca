@@ -192,6 +192,8 @@ import {
   type RestoreSweepDeps,
   type RestoreSweepSummary
 } from './startup/restore-registered-agent-panes'
+import { createIsManifestChairPane } from './startup/restore-sweep-reanchor'
+import { runQuitDaemonTeardown } from './startup/quit-daemon-teardown'
 import { acquireRestoreSweepLock, releaseRestoreSweepLock } from './runtime/restore-sweep-lock'
 import { runChairSuccessionStartupHook } from './startup/chair-succession-startup-hook'
 import { resolveResumeTranscript } from './startup/resolve-resume-transcript'
@@ -1115,7 +1117,12 @@ function buildRestoreSweepDeps(runtimeService: OrcaRuntimeService): RestoreSweep
     federatedPactEmitRuntime: runtimeService,
     // [S10-21e] Daemon-survived arm's own provider attach — orca-runtime.ts's
     // `ensureProviderAttachForSurvivedPty`.
-    attachSurvivedPty: (ptyId) => runtimeService.ensureProviderAttachForSurvivedPty(ptyId)
+    attachSurvivedPty: (ptyId) => runtimeService.ensureProviderAttachForSurvivedPty(ptyId),
+    // [D-30a] Manifest read once per sweep: this builder runs once per sweep, so the memo is per sweep.
+    isManifestChairPane: createIsManifestChairPane(
+      () => runtimeService.getOrchestrationDb(),
+      () => runtimeService.getOrchestrationCompatibilityHostId()
+    )
   }
 }
 
@@ -3731,7 +3738,10 @@ app.on('will-quit', (e) => {
   // Why: allSettled (not all) keeps fail-open — a daemon-disconnect rejection still quits instead of hanging.
   // Why: telemetry flush folds in before app.quit() (bounded 2s); catch defensively so a flush failure can't cancel the quit chain.
   // Why: normal quits keep the detached daemon for warm reattach, but a dead dev parent leaves the temp/dev profile ownerless.
-  const daemonTeardown = isDevParentShutdownRequested() ? shutdownDaemon() : disconnectDaemon()
+  const daemonTeardown = runQuitDaemonTeardown(isDevParentShutdownRequested(), {
+    shutdown: shutdownDaemon,
+    disconnect: disconnectDaemon
+  })
   // Why: a wedged transport (half-open post-sleep socket) can leave one
   // member unsettled forever and block app.quit() until Force Quit (#9447).
   // Why stats/state join here: their writes are durable but not worth hanging the app for.

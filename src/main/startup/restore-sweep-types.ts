@@ -41,7 +41,10 @@ export type RestoreSweepDeps = {
   ensureAgentSession(
     request: RuntimeEnsureAgentSessionRequest,
     caller: RuntimeAgentSessionRpcCaller,
-    internal: { restoreProvenance: { kind: 'host-restore'; ticket: RestoreTicketId } }
+    internal: {
+      restoreProvenance: { kind: 'host-restore'; ticket: RestoreTicketId }
+      hostReanchor?: true
+    }
   ): Promise<RuntimeEnsureAgentSessionResult>
   /** [C7i, Ruling 34 Addendum 27] ONE round for the WHOLE sweep — called once by
    * `runRestoreSweepBody`, before the candidate loop, and the same result handed to every
@@ -115,6 +118,10 @@ export type RestoreSweepDeps = {
    * `RestoreSweepDeps` fixture stays valid without a mechanical edit; absent is treated as a
    * no-op that returns false (see the delivery file's own default). */
   attachSurvivedPty?(ptyId: string): Promise<boolean>
+  /** [D-30a, Ruling 36] Whether `paneKey` is a host-scoped manifest chair (R315's `chairForPane`),
+   * the manifest read once per sweep. Optional so every pre-existing `RestoreSweepDeps` fixture
+   * stays valid; absent reads as "not a chair" and the relaunch carries no re-anchor prompt. */
+  isManifestChairPane?(paneKey: string): Promise<boolean>
 }
 
 export type RestoreSweepSummary = {

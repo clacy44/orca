@@ -40,6 +40,17 @@ describe('reanchorResumePrompt (R315 S2)', () => {
     ).toBeNull()
   })
 
+  // D-30a (T9): after an Orca cold start the renderer hydrates `live`/`quit` records with no flag
+  // and no relaunch mark, so it can never add a second prompt on top of the sweep's own.
+  it('yields none for a hydrated live or quit record with no relaunch mark', () => {
+    for (const origin of ['live', 'quit'] as const) {
+      expect(reanchorResumePrompt('claude', record({ origin }), false)).toBeNull()
+      expect(
+        reanchorResumePrompt('claude', record({ origin, reanchorAfterDaemonDeath: true }), false)
+      ).toBeNull()
+    }
+  })
+
   it('yields none for quit, worktree-sleep or origin-less records, even if flagged', () => {
     for (const origin of ['quit', 'worktree-sleep', undefined] as const) {
       expect(
