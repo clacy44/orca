@@ -60,7 +60,13 @@ describe('D-30a: createIsManifestChairPane and hostRestoreInternal', () => {
 
   function seed(n: number): string {
     const paneKey = paneOf(n)
-    insertAgent(rawDb(), { id: `agent-${n}`, display_name: `chair-${n}`, pane_key: paneKey })
+    insertAgent(rawDb(), {
+      id: `agent-${n}`,
+      display_name: `chair-${n}`,
+      pane_key: paneKey,
+      // Why: a real identity absent from the (empty) round is the sweep's "agent process gone" verdict.
+      process_incarnation: `pty-${n}:80808080-8080-4808-8808-808080808088`
+    })
     recordLaunch(rawDb(), {
       hostId: HOST_ID,
       paneKey,

@@ -23,6 +23,7 @@ type EnsureMock = Mock<RestoreSweepDeps['ensureAgentSession']>
 const PANE = 'tab1:00000000-0000-4000-8000-0000000c0001'
 const PTY_ID = '214dd5c0-7235-4fed-99c9-9d9480fca577::/home/ubuntu@@Zb7_DmyB'
 const PROCESS_INCARNATION = `${PTY_ID}:80808080-8080-4808-8808-808080808088`
+const NEWER_INCARNATION = '90909090-9090-4909-8909-909090909099'
 
 describe('D-30a arm H: the sweep arms hostReanchor on a dead manifest chair only', () => {
   let orchestrationDb: OrchestrationDb | undefined
@@ -59,7 +60,8 @@ describe('D-30a arm H: the sweep arms hostReanchor on a dead manifest chair only
       id: `agent-${paneKey}`,
       display_name: `chair-${paneKey}`,
       pane_key: paneKey,
-      process_incarnation: opts.processIncarnation ?? null
+      process_incarnation:
+        opts.processIncarnation === undefined ? PROCESS_INCARNATION : opts.processIncarnation
     })
     recordLaunch(db, {
       hostId: HOST_ID,
@@ -77,7 +79,7 @@ describe('D-30a arm H: the sweep arms hostReanchor on a dead manifest chair only
     deps: RestoreSweepDeps,
     paneKey: string,
     inventory = emptyInventory(),
-    processIncarnation: string | null = null
+    processIncarnation: string | null = PROCESS_INCARNATION
   ) {
     const launchRow = orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!
     return restoreOneRegisteredPane(
@@ -102,7 +104,7 @@ describe('D-30a arm H: the sweep arms hostReanchor on a dead manifest chair only
     return ensure.mock.calls[0]![2] as Record<string, unknown>
   }
 
-  it('(a) chair, dead identity, empty own pane: one call carrying hostReanchor === true and one reanchor_armed note', async () => {
+  it('(a) chair, real identity absent from the round, empty own pane: one call carrying hostReanchor === true and one reanchor_armed note', async () => {
     const db = rawDb()
     const paneKey = seed(db)
     const ensure = ensureMock(paneKey)
@@ -211,6 +213,157 @@ describe('D-30a arm H: the sweep arms hostReanchor on a dead manifest chair only
     expect(internalArg(ensure).hostReanchor).toBe(true)
   })
 
+  it.each([
+    ['null', null],
+    ['legacy', 'runtime:abc:3']
+  ] as const)(
+    '(j) chair whose identity is unknown (%s): relaunched with no flag and no note',
+    async (_label, identity) => {
+      const db = rawDb()
+      const paneKey = seed(db, { processIncarnation: identity })
+      const ensure = ensureMock(paneKey)
+      const outcome = await runOne(
+        baseDeps(orchestrationDb!, {
+          ensureAgentSession: ensure,
+          isManifestChairPane: async () => true
+        }),
+        paneKey,
+        emptyInventory(),
+        identity
+      )
+      expect(outcome.kind).toBe('layer1')
+      expect(ensure).toHaveBeenCalledTimes(1)
+      expect('hostReanchor' in internalArg(ensure)).toBe(false)
+      expect(reanchorNotes(db)).toHaveLength(0)
+    }
+  )
+
+  it('(k) chair whose own ptyId is live under a newer incarnation: relaunched with no flag and no note', async () => {
+    const db = rawDb()
+    const paneKey = seed(db)
+    const ensure = ensureMock(paneKey)
+    const inventory = emptyInventory({
+      allLivePtyIds: new Set([PTY_ID]),
+      terminalIdentityByPtyId: new Map([
+        [PTY_ID, { handle: 'term_newer', incarnationId: NEWER_INCARNATION }]
+      ])
+    })
+    const outcome = await runOne(
+      baseDeps(orchestrationDb!, {
+        ensureAgentSession: ensure,
+        isManifestChairPane: async () => true
+      }),
+      paneKey,
+      inventory
+    )
+    expect(outcome.kind).toBe('layer1')
+    expect(ensure).toHaveBeenCalledTimes(1)
+    expect('hostReanchor' in internalArg(ensure)).toBe(false)
+    expect(reanchorNotes(db)).toHaveLength(0)
+  })
+
+  function seedPeerAttachment(db: Database.Database, paneKey: string, exited = false): void {
+    db.prepare(
+      `INSERT INTO remote_dispatch_attachments
+         (dispatch_id, task_id, home_peer_fingerprint, runtime_epoch, pane_key, agent_exited_at)
+       VALUES ('dispatch-1', 'task-1', 'fp-1', 'epoch-1', ?, ?)`
+    ).run(paneKey, exited ? '2026-10-02 00:00:00' : null)
+  }
+
+  it('(l) a peer-owned chair pane (R315 parity): relaunched with no flag and no note', async () => {
+    const db = rawDb()
+    const paneKey = seed(db)
+    seedPeerAttachment(db, paneKey)
+    const ensure = ensureMock(paneKey)
+    const outcome = await runOne(
+      baseDeps(orchestrationDb!, {
+        ensureAgentSession: ensure,
+        isManifestChairPane: async () => true
+      }),
+      paneKey
+    )
+    expect(outcome.kind).toBe('layer1')
+    expect(ensure).toHaveBeenCalledTimes(1)
+    expect('hostReanchor' in internalArg(ensure)).toBe(false)
+    expect(reanchorNotes(db)).toHaveLength(0)
+  })
+
+  it('(l2) a peer attachment whose agent has exited does not make the pane peer-owned: still armed', async () => {
+    const db = rawDb()
+    const paneKey = seed(db)
+    seedPeerAttachment(db, paneKey, true)
+    const ensure = ensureMock(paneKey)
+    await runOne(
+      baseDeps(orchestrationDb!, {
+        ensureAgentSession: ensure,
+        isManifestChairPane: async () => true
+      }),
+      paneKey
+    )
+    expect(internalArg(ensure).hostReanchor).toBe(true)
+  })
+
+  it('(m) reanchor_armed is written after the launch returns, never before it', async () => {
+    const db = rawDb()
+    const paneKey = seed(db)
+    const ensure = ensureMock(paneKey)
+    const notesDuringLaunch: number[] = []
+    const resolved = ensure.getMockImplementation()!
+    ensure.mockImplementation(async (...args) => {
+      notesDuringLaunch.push(reanchorNotes(db).length)
+      return resolved(...args)
+    })
+    await runOne(
+      baseDeps(orchestrationDb!, {
+        ensureAgentSession: ensure,
+        isManifestChairPane: async () => true
+      }),
+      paneKey
+    )
+    expect(notesDuringLaunch).toEqual([0])
+    expect(reanchorNotes(db)).toHaveLength(1)
+  })
+
+  it('(m2) a launch that fails or is refused writes no reanchor_armed note', async () => {
+    const db = rawDb()
+    const paneKey = seed(db)
+    const ensure = ensureMock(paneKey)
+    ensure.mockRejectedValueOnce(new Error('launch_record_write_failed'))
+    const outcome = await runOne(
+      baseDeps(orchestrationDb!, {
+        ensureAgentSession: ensure,
+        isManifestChairPane: async () => true
+      }),
+      paneKey
+    )
+    expect(outcome.kind).toBe('layer3')
+    expect(ensure).toHaveBeenCalledTimes(1)
+    expect(internalArg(ensure).hostReanchor).toBe(true)
+    expect(reanchorNotes(db)).toHaveLength(0)
+  })
+
+  it('(m3) a failing reanchor_armed audit write never fails the restore', async () => {
+    const db = rawDb()
+    const paneKey = seed(db)
+    const ensure = ensureMock(paneKey)
+    const write = orchestrationDb!.writeAgentAudit.bind(orchestrationDb)
+    vi.spyOn(orchestrationDb!, 'writeAgentAudit').mockImplementation((entry) => {
+      if (entry.reasonCode === 'reanchor_armed') {
+        throw new Error('audit write failed')
+      }
+      return write(entry)
+    })
+    const outcome = await runOne(
+      baseDeps(orchestrationDb!, {
+        ensureAgentSession: ensure,
+        isManifestChairPane: async () => true
+      }),
+      paneKey
+    )
+    expect(outcome.kind).toBe('layer1')
+    expect(internalArg(ensure).hostReanchor).toBe(true)
+  })
+
   it('(e) chair whose agent identity is still in the inventory: skipped_daemon_survived, ensureAgentSession never called', async () => {
     const db = rawDb()
     const paneKey = seed(db, { processIncarnation: PROCESS_INCARNATION })
@@ -251,7 +404,7 @@ describe('D-30a arm H: the sweep arms hostReanchor on a dead manifest chair only
     expect(reanchorNotes(db)).toHaveLength(0)
   })
 
-  it('(h) two registered rows resolving to one pane: exactly one relaunch, exactly one flag', async () => {
+  it('(h) a second pass over a pane the first relaunch now holds is skipped: one relaunch, one flag, one note', async () => {
     const db = rawDb()
     const paneKey = seed(db)
     const ensure = ensureMock(paneKey)

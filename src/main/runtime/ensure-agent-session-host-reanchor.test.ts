@@ -7,6 +7,9 @@ import { OrcaRuntimeService } from './orca-runtime'
 import { DAEMON_DEATH_REANCHOR_PROMPT } from '../../shared/daemon-death-reanchor-prompt'
 import { quoteStartupArg, type AgentStartupShell } from '../../shared/tui-agent-startup-shell'
 import { _resetRestoreSweepLockForTest } from './restore-sweep-lock'
+import { admitAgentLaunch } from '../ipc/agent-launch-admission'
+import { resolveAdmissionShell } from '../ipc/agent-launch-classification'
+import type { PtySpawnOptions } from '../providers/pty-provider-contract'
 
 vi.mock('electron', () => ({
   BrowserWindow: { fromId: vi.fn(() => null) },
@@ -180,5 +183,73 @@ describe('D-30a arm H: ensureAgentSession hostReanchor', () => {
     expect(without.command).not.toContain(DAEMON_DEATH_REANCHOR_PROMPT)
     expect(withFlag.command).toBe(`${without.command} ${quoted('posix')}`)
     expect(without.launchConfig).toEqual(withFlag.launchConfig)
+  })
+
+  it('(f) the real built command is admitted as host_resume, unchanged, under posix, PowerShell, cmd and Git Bash', async () => {
+    const cases = [
+      { platform: 'linux', windowsShell: undefined, shellOverride: undefined, family: 'posix' },
+      {
+        platform: 'win32',
+        windowsShell: 'powershell.exe',
+        shellOverride: 'powershell.exe',
+        family: 'powershell'
+      },
+      { platform: 'win32', windowsShell: 'cmd.exe', shellOverride: 'cmd.exe', family: 'cmd' },
+      { platform: 'win32', windowsShell: 'git-bash', shellOverride: 'git-bash', family: 'posix' }
+    ] as const
+    for (const c of cases) {
+      const { command } = await launchCommand({
+        platform: c.platform,
+        windowsShell: c.windowsShell
+      })
+      expect(command).toContain(quoteStartupArg(DAEMON_DEATH_REANCHOR_PROMPT, c.family))
+      const admissionDb = new OrchestrationDb(':memory:')
+      const platformSpy = vi.spyOn(process, 'platform', 'get').mockReturnValue(c.platform)
+      try {
+        admissionDb.recordLaunch({
+          hostId: HOST_ID,
+          paneKey: 'tab1:leaf-old',
+          agentType: 'claude',
+          sessionId: SESSION,
+          launchGeneration: 'gen-0',
+          executionHostId: HOST_ID,
+          evidence: 'host_launch'
+        })
+        const spawnOptions: PtySpawnOptions = {
+          cols: 80,
+          rows: 24,
+          launchAgent: 'claude',
+          paneKey: 'tab1:leaf-a',
+          command,
+          ...(c.shellOverride ? { shellOverride: c.shellOverride } : {})
+        }
+        expect(resolveAdmissionShell(spawnOptions)).toBe(c.family)
+        const admitted = await admitAgentLaunch(
+          () => admissionDb,
+          spawnOptions,
+          {
+            kind: 'host-resume',
+            sessionId: SESSION,
+            predecessorPaneKey: 'tab1:leaf-old',
+            executionHostId: HOST_ID,
+            launchGeneration: 'gen-1'
+          },
+          {
+            hostId: HOST_ID,
+            executionHostId: HOST_ID,
+            launchGeneration: 'gen-1',
+            notice: () => {},
+            contestedLineage: () => {},
+            findConnectedPtyForPane: () => false,
+            callerResume: null
+          }
+        )
+        expect(admitted.classification).toBe('host_resume')
+        expect(admitted.spawnOptions.command).toBe(command)
+      } finally {
+        platformSpy.mockRestore()
+        admissionDb.close()
+      }
+    }
   })
 })
