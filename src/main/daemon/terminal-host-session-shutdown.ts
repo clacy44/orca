@@ -59,14 +59,24 @@ async function disposeTerminalHostSessions(
       // Why: live children retain native ownership until physical exit, while
       // exited children must release handles without signalling a recycled pid.
       if (session.isAlive) {
-        let treeKilled = false
+        let sweepOutcome: TreeSweepOutcome = { treeKilled: false, verdict: null }
         if (platform === 'win32') {
           // Why: ConPTY closure does not reap the console's other processes and `taskkill /T` cannot start from a dead root, so the tree goes first.
-          treeKilled = await sweepSessionTreeBeforeRootKill(session, sweep, verify, killTree)
+          sweepOutcome = await sweepSessionTreeBeforeRootKill(session, sweep, verify, killTree)
         }
-        if (treeKilled) {
+        const strangerVerdict =
+          sweepOutcome.verdict === 'foreign' || sweepOutcome.verdict === 'absent'
+            ? sweepOutcome.verdict
+            : null
+        if (sweepOutcome.treeKilled) {
           // Why not force-kill: taskkill already took the root, and node-pty frees its pid on exit, so a second PID-based kill could hit a stranger.
           console.warn('[daemon] Session dispose after tree kill: branch=await_exit')
+          await session.waitForExitAndDisposeSubprocess()
+        } else if (strangerVerdict) {
+          // Why not force-kill: the OS says the root pid no longer belongs to this session (a stranger holds it, or nobody does), so signalling it could terminate an unrelated process.
+          console.warn(
+            `[daemon] Session dispose without a PID kill: branch=skip_${strangerVerdict}`
+          )
           await session.waitForExitAndDisposeSubprocess()
         } else {
           if (platform === 'win32') {
@@ -92,15 +102,18 @@ async function disposeTerminalHostSessions(
   }
 }
 
+type TreeSweepOutcome = { treeKilled: boolean; verdict: WindowsTreeKillTarget | null }
+
 async function sweepSessionTreeBeforeRootKill(
   session: Session,
   sweep: typeof killWithDescendantSweep,
   verify: (rootPid: number) => Promise<WindowsTreeKillTarget>,
   killTree: WindowsTreeKiller
-): Promise<boolean> {
+): Promise<TreeSweepOutcome> {
   // Why capture here: the sweep returns nothing, and taskkill only runs for an identity-verified, still-owned root, so its
   // exit code is exactly "did the tree kill take this root". Anything but a reported 0 leaves the root's fate unproven.
   let taskkillExitCode: number | null = null
+  let verdict: WindowsTreeKillTarget | null = null
   try {
     await sweep(session.pid, () => {}, {
       platform: 'win32',
@@ -108,6 +121,7 @@ async function sweepSessionTreeBeforeRootKill(
       ownsRoot: () => session.isAlive,
       verifyTreeKillTarget: async (rootPid) => {
         const target = await verify(rootPid)
+        verdict = target
         if (target !== 'own') {
           console.warn(`[daemon] Skipping session tree kill on dispose: reason=root_${target}`)
         }
@@ -119,13 +133,13 @@ async function sweepSessionTreeBeforeRootKill(
         return result
       }
     })
-    return taskkillExitCode === 0
+    return { treeKilled: taskkillExitCode === 0, verdict }
   } catch (error) {
     // Why: a failed sweep must never keep the root alive; the force-kill still runs.
     console.warn(
       `[daemon] Session tree kill on dispose failed: reason=sweep_failed error=${error instanceof Error ? error.message : String(error)}`
     )
-    return false
+    return { treeKilled: false, verdict }
   }
 }
 

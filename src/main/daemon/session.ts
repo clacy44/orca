@@ -663,7 +663,16 @@ export class Session {
       this.releaseProducerPause({ resume: true })
     }
     if (this._state !== 'exited') {
-      await this.waitForPhysicalExit(IMMEDIATE_KILL_PHYSICAL_EXIT_TIMEOUT_MS)
+      // Why latch: taskkill already force-killed the root, so a retry dispose after a timed-out wait must not fall through to a PID kill of a possibly recycled pid.
+      this.forceKillSent = true
+      try {
+        await this.waitForPhysicalExit(IMMEDIATE_KILL_PHYSICAL_EXIT_TIMEOUT_MS)
+      } catch (error) {
+        console.warn(
+          `[Session] exit wait after tree kill timed out for ${this.sessionId}; PID force-kill stays latched off`
+        )
+        throw error
+      }
     }
     this.dispose()
   }

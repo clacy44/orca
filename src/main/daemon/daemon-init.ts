@@ -45,6 +45,7 @@ import {
   getDaemonLaunchIdentity,
   checkDaemonHealth,
   isDaemonStaleForCurrentBundle,
+  getDaemonCommandLine,
   inspectDaemonProcessIdentity,
   killStaleDaemon,
   parseDaemonPidFile,
@@ -1474,6 +1475,7 @@ async function runRestartDaemon(): Promise<RestartDaemonResult> {
   closeRestartSpawnFence()
   let holdAnnounced = false
   let holdBegun = false
+  let restartFailure: unknown
   let adapterOwnedIds = new Set<string>()
   try {
     // Why: spawns already past the fence must finish BEFORE the snapshot, so the ids they registered
@@ -1622,6 +1624,10 @@ async function runRestartDaemon(): Promise<RestartDaemonResult> {
     await releaseRestartExitHold({ mode: 'announce', epoch: nextDaemonLossEpoch() })
 
     return { killedCount }
+  } catch (error) {
+    // Why remember: the handback below must never let a secondary failure replace the reason the user sees.
+    restartFailure = error
+    throw error
   } finally {
     if (!holdAnnounced) {
       if (adapter !== currentAdapter) {
@@ -1636,6 +1642,18 @@ async function runRestartDaemon(): Promise<RestartDaemonResult> {
         try {
           // O1 rebind first: the recovery's emit must find the crash binding on the provider that is still authoritative.
           rebindLocalProviderListeners()
+        } catch (rebindError) {
+          // Why not rethrow: the restart's own failure is the one the user must see; this one is logged, recorded and attached as its cause.
+          console.error(
+            '[daemon] Restart failed and rebinding the provider listeners also failed:',
+            rebindError
+          )
+          recordDurableCrashBreadcrumb('daemon_restart_rebind_failed', {
+            error: rebindError instanceof Error ? rebindError.message : String(rebindError)
+          })
+          if (restartFailure instanceof Error && restartFailure.cause === undefined) {
+            restartFailure.cause = rebindError
+          }
         } finally {
           // Why finally: a throwing rebind must still reinstate and settle the window, or fenced spawns hang until the next press.
           // O2 reinstate before the kick: a retired adapter's withDaemonRetry rethrows instead of respawning.
@@ -1863,6 +1881,13 @@ async function settleUnprovenPredecessor(opts: {
       recordPredecessorStage('survived', { pid, identity: verdict })
       return 'survived'
     }
+    // Why not trust 'mismatch' alone: it also fires for the REAL old daemon when its start time falls outside the clock
+    // tolerance (a slow win32 bootstrap, NTP drift). The launch nonce in its command line is exact and clock-free.
+    const reuse = await recordedPidIsReused(pid, record)
+    if (reuse !== 'reused') {
+      recordPredecessorStage('survived', { pid, identity: verdict, reason: reuse })
+      return 'survived'
+    }
     recordPredecessorStage('pid_reused', { pid })
     unprovenPredecessor = null
     return 'gone'
@@ -1870,6 +1895,21 @@ async function settleUnprovenPredecessor(opts: {
   recordPredecessorStage('killed', { pid, killed: killOutcome.killed })
   unprovenPredecessor = null
   return killOutcome.killed ? 'killed' : 'gone'
+}
+
+async function recordedPidIsReused(
+  pid: number,
+  record: ParsedDaemonPid
+): Promise<'reused' | 'nonce_present' | 'cmdline_unreadable'> {
+  // A record from before launch nonces existed carries none: there is nothing more to prove, so the mismatch stands.
+  if (!record.launchNonce) {
+    return 'reused'
+  }
+  const commandLine = await getDaemonCommandLine(pid)
+  if (commandLine === null) {
+    return 'cmdline_unreadable'
+  }
+  return commandLine.includes(record.launchNonce) ? 'nonce_present' : 'reused'
 }
 
 // Why: step 4 must never fork a replacement beside a predecessor that is still alive and disposing.

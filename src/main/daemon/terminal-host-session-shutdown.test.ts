@@ -90,7 +90,7 @@ describe('shutdownTerminalHostSessions: win32 descendant sweep before the root f
     expect(session.forceKillAndDisposeSubprocess).toHaveBeenCalledTimes(1)
   })
 
-  it('never tree-kills a root whose ownership probe says foreign, still force-kills it, and logs', async () => {
+  it('never tree-kills a root whose ownership probe says foreign, never signals its pid, waits for the exit, and logs', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const session = fakeSession(50564, true)
     const killWindowsTree = vi.fn(async () => {})
@@ -103,8 +103,10 @@ describe('shutdownTerminalHostSessions: win32 descendant sweep before the root f
     })
 
     expect(killWindowsTree).not.toHaveBeenCalled()
-    expect(session.forceKillAndDisposeSubprocess).toHaveBeenCalledTimes(1)
+    expect(session.forceKillAndDisposeSubprocess).not.toHaveBeenCalled()
+    expect(session.waitForExitAndDisposeSubprocess).toHaveBeenCalledTimes(1)
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('reason=root_foreign'))
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('branch=skip_foreign'))
   })
 
   it('tree-kills an owned root through the real sweep before the root force-kill', async () => {
@@ -191,8 +193,8 @@ describe('shutdownTerminalHostSessions: win32 descendant sweep before the root f
       expect(session.forceKillAndDisposeSubprocess).toHaveBeenCalledTimes(1)
     })
 
-    it('a foreign root never runs taskkill and keeps the PID force-kill', async () => {
-      vi.spyOn(console, 'warn').mockImplementation(() => {})
+    it('a foreign root never runs taskkill and never receives a PID-based kill', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
       const session = fakeSession(50564, true)
       const killWindowsTree = taskkill(0)
 
@@ -203,7 +205,38 @@ describe('shutdownTerminalHostSessions: win32 descendant sweep before the root f
       })
 
       expect(killWindowsTree).not.toHaveBeenCalled()
+      expect(session.forceKillAndDisposeSubprocess).not.toHaveBeenCalled()
+      expect(session.waitForExitAndDisposeSubprocess).toHaveBeenCalledTimes(1)
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('branch=skip_foreign'))
+    })
+
+    it('an absent root never receives a PID-based kill either', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const session = fakeSession(50564, true)
+
+      await shutdownTerminalHostSessions(new Map([['s1', session]]), undefined, {
+        platform: 'win32',
+        verifyTreeKillTarget: async (): Promise<'absent'> => 'absent',
+        killWindowsTree: taskkill(0)
+      })
+
+      expect(session.forceKillAndDisposeSubprocess).not.toHaveBeenCalled()
+      expect(session.waitForExitAndDisposeSubprocess).toHaveBeenCalledTimes(1)
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('branch=skip_absent'))
+    })
+
+    it('an unknown verdict keeps the PID force-kill (no proof the pid is a stranger)', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const session = fakeSession(50564, true)
+
+      await shutdownTerminalHostSessions(new Map([['s1', session]]), undefined, {
+        platform: 'win32',
+        verifyTreeKillTarget: async (): Promise<'unknown'> => 'unknown',
+        killWindowsTree: taskkill(0)
+      })
+
       expect(session.forceKillAndDisposeSubprocess).toHaveBeenCalledTimes(1)
+      expect(session.waitForExitAndDisposeSubprocess).not.toHaveBeenCalled()
     })
 
     it('a custom sweep that reports nothing keeps the PID force-kill', async () => {

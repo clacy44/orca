@@ -601,7 +601,7 @@ export async function inspectDaemonProcessIdentity(
   }
 }
 
-async function getDaemonCommandLine(pid: number): Promise<string | null> {
+export async function getDaemonCommandLine(pid: number): Promise<string | null> {
   if (process.platform === 'win32') {
     return (await queryWindowsProcessIdentity(pid))?.commandLine ?? null
   }
