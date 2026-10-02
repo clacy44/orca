@@ -294,6 +294,8 @@ export class DaemonPtyAdapter implements IPtyProvider {
   private daemonLossDisconnects = 0
   private daemonLossTornDown = 0
   private announcedLostSessionIds = new Set<string>()
+  // FX-3: ids a failed restart handed back; their `daemon_died` audit row exists already (one row per death).
+  private auditedCasualtyIds = new Set<string>()
   private daemonLossEmitTimes: number[] = []
   private daemonLossDisconnectedAt = 0
   private sessionsLostListeners: ((event: PtySessionsLostToDaemonDeathEvent) => void)[] = []
@@ -483,6 +485,90 @@ export class DaemonPtyAdapter implements IPtyProvider {
   /** R326: the restart failed and this adapter stays authoritative. */
   reinstateAfterFailedRestart(): void {
     this.retiredByRestart = false
+  }
+
+  /**
+   * FX-3: a restart failed before the provider swap and hands the ids it killed back as an unannounced
+   * crash. Synchronous and never emits. Returns the entries it refused (the caller gives those today's exit).
+   */
+  adoptRestartCasualties(
+    entries: readonly { id: string; incarnationId?: string }[]
+  ): { id: string; incarnationId?: string }[] {
+    if (this.retiredByRestart || this.respawnAdoptionClosed) {
+      this.writeBreadcrumb('daemon_restart_handback_refused', {
+        count: entries.length,
+        retired: this.retiredByRestart,
+        closed: this.respawnAdoptionClosed
+      })
+      return [...entries]
+    }
+    for (const { id, incarnationId } of entries) {
+      this.activeSessionIds.add(id)
+      if (incarnationId) {
+        this.sessionIncarnations.set(id, incarnationId)
+      }
+      this.sessionsAwaitingDaemonRecovery.add(id)
+      this.deathCandidates.set(id, incarnationId)
+      this.auditedCasualtyIds.add(id)
+    }
+    this.writeRecoveryAttempted = false
+    return []
+  }
+
+  /**
+   * FX-3: starts this adapter's own single-flight recovery for the handed-back ids. Deliberately skips
+   * `isRecoverySuppressed`: the restart is still in flight, and this IS the restart's own recovery.
+   */
+  recoverRestartCasualties(): void {
+    if (this.deathCandidates.size === 0 || !this.respawnFn) {
+      return
+    }
+    const now = Date.now()
+    this.daemonLossEmitTimes = this.daemonLossEmitTimes.filter(
+      (at) => now - at < DAEMON_LOSS_BREAKER_WINDOW_MS
+    )
+    if (this.daemonLossEmitTimes.length >= DAEMON_LOSS_BREAKER_MAX_EPOCHS) {
+      this.writeBreadcrumb('daemon_loss_recovery_suppressed', {
+        epochsInWindow: this.daemonLossEmitTimes.length,
+        sessionCount: this.activeSessionIds.size,
+        cause: 'restart_handback'
+      })
+      return
+    }
+    if (this.daemonLossRecoveryPromise === null) {
+      this.daemonLossDisconnectedAt = now
+      this.daemonLossTornDown = 0
+    }
+    this.daemonLossDisconnects += 1
+    void this.recoverAfterDaemonLoss()
+  }
+
+  /** FX-3: true once nothing of this adapter's own respawn is in flight; false if it outlasts `timeoutMs`. */
+  async awaitRespawnQuiesce(timeoutMs: number): Promise<boolean> {
+    const pending = this.respawnPromise
+    if (!pending) {
+      return true
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timedOut = new Promise<false>((resolve) => {
+      timer = setTimeout(() => resolve(false), timeoutMs)
+    })
+    try {
+      // Why settled either way: a failed respawn is no longer in flight.
+      return await Promise.race([
+        pending.then(
+          () => true as const,
+          () => true as const
+        ),
+        timedOut
+      ])
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  isAuditedCasualty(id: string): boolean {
+    return this.auditedCasualtyIds.has(id)
   }
 
   isShutdownInFlight(id: string): boolean {
@@ -2791,7 +2877,11 @@ export class DaemonPtyAdapter implements IPtyProvider {
     // which a concurrent listProcesses prune also empties.
     const sessions = [...this.deathCandidates]
       .filter(([id]) => !aliveSessionIds.has(id))
-      .map(([id, incarnationId]) => ({ id, ...(incarnationId ? { incarnationId } : {}) }))
+      .map(([id, incarnationId]) => ({
+        id,
+        ...(incarnationId ? { incarnationId } : {}),
+        ...(this.auditedCasualtyIds.has(id) ? { auditWritten: true as const } : {})
+      }))
     this.deathCandidates.clear()
     for (const { id } of sessions) {
       this.announcedLostSessionIds.add(id)
@@ -2821,11 +2911,13 @@ export class DaemonPtyAdapter implements IPtyProvider {
       this.daemonLossTornDown += 1
     }
     this.announcedLostSessionIds.delete(id)
+    this.auditedCasualtyIds.delete(id)
   }
 
   // Why: a re-attached id is a live session again and may be announced lost by a future death.
   private noteSessionAttached(id: string): void {
     this.announcedLostSessionIds.delete(id)
+    this.auditedCasualtyIds.delete(id)
   }
 
   private writeBreadcrumb(name: string, data: Record<string, string | number | boolean>): void {

@@ -553,6 +553,11 @@ export class DaemonServer {
   }
 
   private async finishOrdinaryShutdown(serverClose: Promise<void>): Promise<void> {
+    await this.releaseResourcesKeepingPidRecordUntilDisposed()
+    await serverClose
+  }
+
+  private async releaseResourcesKeepingPidRecordUntilDisposed(): Promise<void> {
     this.unlinkOwnedTokenFile()
     try {
       await this.disposeDaemonResources()
@@ -560,7 +565,6 @@ export class DaemonServer {
       // Why after dispose: while PTYs are still being reaped the record is the only way a launcher can find and kill this process.
       this.unlinkOwnedPidRecord()
     }
-    await serverClose
   }
 
   private async finishRpcShutdown(serverClose: Promise<void>): Promise<void> {
@@ -818,8 +822,7 @@ export class DaemonServer {
   }
 
   private async finishIdleShutdown(serverClose: Promise<void>): Promise<void> {
-    this.unlinkOwnedEndpointArtifacts()
-    await this.disposeDaemonResources()
+    await this.releaseResourcesKeepingPidRecordUntilDisposed()
     await serverClose
     this.onIdleShutdown()
   }

@@ -19,6 +19,11 @@ import {
 } from './daemon-spawner'
 import { DAEMON_EXIT_ENDPOINT_OCCUPIED } from './daemon-endpoint-ownership'
 import {
+  DAEMON_RPC_SHUTDOWN_PROCESS_EXIT_WAIT_MS,
+  DAEMON_SELF_SHUTDOWN_WAIT_MS,
+  RESTART_RESPAWN_QUIESCE_MS
+} from './restart-duration-bounds'
+import {
   DaemonPtyAdapter,
   nextDaemonLossEpoch,
   type DaemonRespawnReason
@@ -98,10 +103,9 @@ function logDaemonMilestone(event: string, details: Record<string, unknown> = {}
 
 // Why: extra hello+listSessions probes (~5s each) giving a wedged-but-connectable daemon ~60s grace to answer and keep its live sessions before a permanent wedge (#8689) is replaced; raise only alongside the fail-open cap.
 export const WEDGED_DAEMON_GRACE_RETRIES = 11
-const DAEMON_SELF_SHUTDOWN_WAIT_MS = 5_000
 // Why: after `shutdown` the daemon closes its listener and may drop its PID record while it is still
 // disposing an unkillable PTY (two 8 s waits), so "endpoint gone" is not "process gone".
-const DAEMON_RPC_SHUTDOWN_PROCESS_EXIT_WAIT_MS = 20_000
+// The bound lives in restart-duration-bounds.ts, which derives the spawn-fence wait from it.
 const DAEMON_PROCESS_EXIT_POLL_MS = 100
 // R117 FIX 4: the daemon fork previously ran at V8's unset default (~4GB on a 64-bit host) — the
 // field cliff (two OOM deaths, diag-r117-2026-09-08.md). Pinning it moves the cliff to a
@@ -577,6 +581,11 @@ async function shouldPreserveDaemonWithLiveSessions(
 // The adapter hands the reason across so the launch it triggers reports what actually drove it.
 let attributedReplaceReason: DaemonReplaceReason | null = null
 
+// Why: step 3 told the current-protocol daemon to shut down, but "endpoint gone" is not "process gone" (it closes its
+// listener and may drop its PID record while still disposing). The record stays stored until the process is PROVEN gone,
+// so the launcher's pre-fork choke point can wait for it, identity-kill it, or refuse to fork beside it.
+let unprovenPredecessor: { record: ParsedDaemonPid; exitDeadlineMs: number } | null = null
+
 function createOutOfProcessLauncher(
   runtimeDir: string,
   macosLoginSessionWatch = false
@@ -797,7 +806,24 @@ function createOutOfProcessLauncher(
       // Why: a raw socket can outlive a broken daemon; kill by PID before respawn so the new daemon doesn't race the stale one.
       adoptionClient?.disconnect()
       adoptionClient = null
-      const killOutcome = await killStaleDaemon(runtimeDir, socketPath, tokenPath)
+      // Why before killStaleDaemon: its own PID-record read finds nothing once the predecessor unlinked the record, so a fork
+      // here would land beside a live process. Wait (bounded), then identity-kill the stored record, then refuse.
+      const predecessorOutcome = await settleUnprovenPredecessor({
+        runtimeDir,
+        socketPath,
+        tokenPath,
+        protocolVersion: PROTOCOL_VERSION,
+        waitMs: unprovenPredecessor
+          ? Math.max(0, unprovenPredecessor.exitDeadlineMs - Date.now())
+          : 0
+      })
+      if (predecessorOutcome === 'killed') {
+        recordDurableCrashBreadcrumb('daemon_predecessor_killed', {})
+      }
+      const killOutcome =
+        predecessorOutcome === 'survived'
+          ? { killed: false, liveOwnerSurvived: true }
+          : await killStaleDaemon(runtimeDir, socketPath, tokenPath)
       if (killOutcome.liveOwnerSurvived) {
         // Why: forking beside a daemon we could not prove dead is precisely how the endpoint
         // owner and the session host diverge. But refusing outright would leave the user with
@@ -1445,6 +1471,8 @@ async function runRestartDaemon(): Promise<RestartDaemonResult> {
   // resolve a provider from here until the window settles; the `finally` below always settles it.
   closeRestartSpawnFence()
   let holdAnnounced = false
+  let holdBegun = false
+  let adapterOwnedIds = new Set<string>()
   try {
     // Why: spawns already past the fence must finish BEFORE the snapshot, so the ids they registered
     // are killed, held and announced. Bounded (10 s); a straggler is rejected by pty.ts's ticket guard.
@@ -1463,6 +1491,8 @@ async function runRestartDaemon(): Promise<RestartDaemonResult> {
       currentAdapter instanceof DegradedDaemonPtyProvider
         ? currentAdapter.getCurrentDaemonSessionIds()
         : []
+    // Why: only ids the adapter itself owns can be handed back to it; ids from a degraded fallback get today's exit.
+    adapterOwnedIds = new Set(currentOnly.getActiveSessionIds())
     const killedPtyIds = new Set([...currentOnly.getActiveSessionIds(), ...currentDaemonSessionIds])
     const killedCount = killedPtyIds.size + fallbackKilledCount
     // R326: the superseded adapter spawns nothing and respawns nothing (undone only if the restart fails).
@@ -1471,11 +1501,14 @@ async function runRestartDaemon(): Promise<RestartDaemonResult> {
     // like a daemon crash (R315) instead of closing every pane. A pty whose own shutdown (close, stop,
     // hibernate) is in flight is not held: that exit is the user's/runtime's, so it stays today's exit.
     beginRestartExitHold([...killedPtyIds].filter((id) => !currentOnly.isShutdownInFlight(id)))
+    holdBegun = true
     // [S10-21a C7d, Ruling 34 Addendum 23] One main-side 'daemon_died' fact per killed ptyId,
     // BEFORE the fanout below reaches the renderer — see `setDaemonDiedFanoutHandler`'s own doc
     // comment for why this is a callback rather than a direct orchestration-db import here.
-    if (killedPtyIds.size > 0) {
-      notifyDaemonDiedFanout([...killedPtyIds])
+    // Why skip audited casualties: a second press before the first failure's recovery announced must not write a second row for the same death.
+    const toAudit = [...killedPtyIds].filter((id) => !currentOnly.isAuditedCasualty(id))
+    if (toAudit.length > 0) {
+      notifyDaemonDiedFanout(toAudit)
     }
     currentOnly.fanoutSyntheticExits(-1)
     if (currentAdapter instanceof DegradedDaemonPtyProvider) {
@@ -1485,19 +1518,20 @@ async function runRestartDaemon(): Promise<RestartDaemonResult> {
     // Step 2: detach renderer listeners — after step 1 (so synthesized exits land) and before step 6 (no stale binding).
     unbindLocalProviderListeners()
 
-    // Step 3: kill the current-protocol daemon process; legacy adapters untouched.
-    let info: Awaited<ReturnType<DaemonSpawner['ensureRunning']>>
-    try {
-      await cleanupDaemonForProtocol(runtimeDir, PROTOCOL_VERSION)
-
-      // Step 4: reuse the existing spawner so the respawn closure baked into long-lived adapters stays valid (do NOT new one).
-      currentSpawner.resetHandle()
-      info = await currentSpawner.ensureRunning()
-    } catch (error) {
-      // Why: old provider stays authoritative until the final swap; rebind since relaunch failed after teardown.
-      rebindLocalProviderListeners()
-      throw error
+    // Why quiesce here (after the retire, before step 3): the retired adapter can start no NEW respawn, but one already inside
+    // the launcher would overlap step 4's launcher, and a respawn that outlives the click is the second-daemon hazard.
+    // On timeout nothing has been killed yet, so abort; the finally below hands the ids back.
+    if (!(await currentOnly.awaitRespawnQuiesce(RESTART_RESPAWN_QUIESCE_MS))) {
+      recordDurableCrashBreadcrumb('daemon_restart_respawn_quiesce_timeout', {})
+      throw new Error('The terminal host is still recovering. Try the restart again in a moment.')
     }
+
+    // Step 3: kill the current-protocol daemon process; legacy adapters untouched.
+    await cleanupDaemonForProtocol(runtimeDir, PROTOCOL_VERSION)
+
+    // Step 4: reuse the existing spawner so the respawn closure baked into long-lived adapters stays valid (do NOT new one).
+    currentSpawner.resetHandle()
+    const info = await currentSpawner.ensureRunning()
 
     // Step 5: build a fresh current adapter against the respawned daemon.
     const newCurrent = new DaemonPtyAdapter({
@@ -1565,8 +1599,7 @@ async function runRestartDaemon(): Promise<RestartDaemonResult> {
       } catch (caught) {
         cleanupError = caught
       }
-      // Previous provider stays module-authoritative until the swap; restore its renderer bindings when adoption fails.
-      rebindLocalProviderListeners()
+      // Previous provider stays module-authoritative until the swap; the finally below restores its renderer bindings.
       if (cleanupError) {
         throw new AggregateError([error, cleanupError], 'Daemon restart and cleanup both failed')
       }
@@ -1589,11 +1622,31 @@ async function runRestartDaemon(): Promise<RestartDaemonResult> {
     return { killedCount }
   } finally {
     if (!holdAnnounced) {
-      // Why only while the old provider is still authoritative: after the swap it is dead and superseded.
-      if (adapter === currentAdapter) {
+      if (adapter !== currentAdapter) {
+        // Why announce: after the swap the new provider is bound and its lease established, so a failure here is a success for the held ids.
+        await releaseRestartExitHold({ mode: 'announce', epoch: nextDaemonLossEpoch() })
+      } else if (!holdBegun) {
+        // Why exit: a failure before the hold began captured nothing and killed nothing, so there is nothing to hand back.
         currentOnly.reinstateAfterFailedRestart()
+        await releaseRestartExitHold({ mode: 'exit' })
+      } else {
+        // Why this order (O1-O4): do NOT tidy.
+        // O1 rebind first: the recovery's emit must find the crash binding on the provider that is still authoritative.
+        rebindLocalProviderListeners()
+        // O2 reinstate before the kick: a retired adapter's withDaemonRetry rethrows instead of respawning.
+        currentOnly.reinstateAfterFailedRestart()
+        // O3 one synchronous block (release, currency filter, adopt, declined exits, settle; no await inside): no exit can land between release and settle.
+        await releaseRestartExitHold({
+          mode: 'handback',
+          adopt: (held) => {
+            const adoptable = held.filter(({ id }) => adapterOwnedIds.has(id))
+            const refused = currentOnly.adoptRestartCasualties(adoptable)
+            return [...refused, ...held.filter(({ id }) => !adapterOwnedIds.has(id))]
+          }
+        })
+        // O4 kick only after the window settled: relaunches the recovery triggers must find the spawn fence open.
+        currentOnly.recoverRestartCasualties()
       }
-      await releaseRestartExitHold({ mode: 'exit' })
     }
   }
 }
@@ -1655,6 +1708,14 @@ export async function cleanupDaemonForProtocol(
       .catch(() => ({ sessions: [] }))
     killedCount = sessions.sessions.filter((s) => s.isAlive).length
 
+    // Why only the current protocol: the launcher gate and step 4 concern the daemon the spawner will replace.
+    unprovenPredecessor =
+      protocolVersion === PROTOCOL_VERSION && predecessor
+        ? {
+            record: predecessor,
+            exitDeadlineMs: Date.now() + DAEMON_RPC_SHUTDOWN_PROCESS_EXIT_WAIT_MS
+          }
+        : unprovenPredecessor
     // Use the single-shot `shutdown` RPC (kills all sessions then exits) to avoid racing per-session `kill` calls against the daemon exiting.
     await client.request('shutdown', { killSessions: true }).catch(() => {
       // Daemon exits immediately after the RPC, so the socket may close before the reply arrives; treat as success.
@@ -1745,28 +1806,33 @@ function recordPredecessorStage(stage: string, data: Record<string, string | num
   recordDurableCrashBreadcrumb('daemon_restart_predecessor', { stage, ...data })
 }
 
-// Why: step 4 must never fork a replacement beside a predecessor that is still alive and disposing.
-async function confirmPredecessorProcessGone(opts: {
-  predecessor: ParsedDaemonPid | null
+type PredecessorSettlement = 'gone' | 'killed' | 'survived'
+
+// Why one function for step 3 and the launcher: the stored record is the single source of truth for "is the old process
+// proven gone", so the wait/kill/refuse sequence must not exist twice. The record is cleared only on proof.
+async function settleUnprovenPredecessor(opts: {
   runtimeDir: string
   socketPath: string
   tokenPath: string
   protocolVersion: number
-}): Promise<void> {
-  const { predecessor } = opts
-  if (!predecessor) {
-    recordPredecessorStage('unverified', { reason: 'no_pid_record' })
-    return
+  waitMs: number
+}): Promise<PredecessorSettlement> {
+  const pending = unprovenPredecessor
+  if (!pending) {
+    return 'gone'
   }
-  const { pid } = predecessor
+  const { record } = pending
+  const { pid } = record
   if (!isProcessAlive(pid)) {
-    return
+    unprovenPredecessor = null
+    return 'gone'
   }
   const waitStartedAt = Date.now()
-  recordPredecessorStage('waiting', { pid, timeoutMs: DAEMON_RPC_SHUTDOWN_PROCESS_EXIT_WAIT_MS })
-  if (await waitForProcessExit(pid, DAEMON_RPC_SHUTDOWN_PROCESS_EXIT_WAIT_MS)) {
+  recordPredecessorStage('waiting', { pid, timeoutMs: opts.waitMs })
+  if (await waitForProcessExit(pid, opts.waitMs)) {
     recordPredecessorStage('exited', { pid, waitedMs: Date.now() - waitStartedAt })
-    return
+    unprovenPredecessor = null
+    return 'gone'
   }
   recordPredecessorStage('escalating', { pid, waitedMs: Date.now() - waitStartedAt })
   const killOutcome = await killStaleDaemon(
@@ -1775,15 +1841,41 @@ async function confirmPredecessorProcessGone(opts: {
     opts.tokenPath,
     opts.protocolVersion,
     undefined,
-    predecessor
+    record
   )
   if (killOutcome.liveOwnerSurvived) {
     recordPredecessorStage('survived', { pid })
+    return 'survived'
+  }
+  recordPredecessorStage('killed', { pid, killed: killOutcome.killed })
+  unprovenPredecessor = null
+  return killOutcome.killed ? 'killed' : 'gone'
+}
+
+// Why: step 4 must never fork a replacement beside a predecessor that is still alive and disposing.
+async function confirmPredecessorProcessGone(opts: {
+  predecessor: ParsedDaemonPid | null
+  runtimeDir: string
+  socketPath: string
+  tokenPath: string
+  protocolVersion: number
+}): Promise<void> {
+  if (!opts.predecessor) {
+    recordPredecessorStage('unverified', { reason: 'no_pid_record' })
+    return
+  }
+  const outcome = await settleUnprovenPredecessor({
+    runtimeDir: opts.runtimeDir,
+    socketPath: opts.socketPath,
+    tokenPath: opts.tokenPath,
+    protocolVersion: opts.protocolVersion,
+    waitMs: DAEMON_RPC_SHUTDOWN_PROCESS_EXIT_WAIT_MS
+  })
+  if (outcome === 'survived') {
     throw new DaemonEndpointOwnershipError(
       'Daemon cleanup aborted: the existing daemon could not be confirmed stopped'
     )
   }
-  recordPredecessorStage('killed', { pid, killed: killOutcome.killed })
 }
 
 function legacyDaemonProcessMayBeAlive(runtimeDir: string, protocolVersion: number): boolean {

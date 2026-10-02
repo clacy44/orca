@@ -145,8 +145,14 @@ import { createDaemonSessionLossHandler } from './pty-daemon-session-loss'
 import {
   createRestartExitHold,
   RESTART_SUPERSEDED_SPAWN_MESSAGE,
+  type HeldPtyExit,
   type RestartSpawnTicket
 } from './pty-daemon-restart-hold'
+import {
+  RESTART_DRAIN_MS,
+  RESTART_PLAN_MS,
+  RESTART_SPAWN_FENCE_MS
+} from '../daemon/restart-duration-bounds'
 import { recordDurableCrashBreadcrumb } from '../crash-reporting/durable-crash-breadcrumb'
 import { ensureLinuxTerminalOrcaCliShimDir } from '../cli/linux-terminal-orca-cli-shim'
 import {
@@ -2389,12 +2395,24 @@ export function rebindLocalProviderListeners(): void {
 // them today's exits). State lives in pty-daemon-restart-hold.ts; the wiring is below and in
 // `registerPtyHandlers` (exit listener, `pty:hasPty`, the local `pty:spawn` fence).
 const restartExitHold = createRestartExitHold()
-let releaseRestartHoldImpl:
-  | ((options: { mode: 'announce'; epoch: number } | { mode: 'exit' }) => Promise<void>)
-  | null = null
+/**
+ * 'announce': the new provider is bound. 'exit': today's exit for every held id. 'handback' (FX-3):
+ * the restart failed before the provider swap; `adopt` returns the held ids to the reinstated adapter
+ * and answers with the ones it declined, which get today's exit.
+ */
+export type RestartHoldRelease =
+  | { mode: 'announce'; epoch: number }
+  | { mode: 'exit' }
+  | { mode: 'handback'; adopt: (held: HeldPtyExit[]) => HeldPtyExit[] }
+let releaseRestartHoldImpl: ((options: RestartHoldRelease) => Promise<void>) | null = null
 
 // Why: three bounds so a wedged restart can never hang spawns or the announcement silently; each writes a breadcrumb.
-const RESTART_TIMEOUT_DEFAULTS = { drainMs: 10_000, fenceMs: 30_000, planMs: 5_000 }
+// The fence wait is DERIVED from the restart's own stage bounds (restart-duration-bounds.ts), so it outlasts the longest legitimate restart.
+const RESTART_TIMEOUT_DEFAULTS = {
+  drainMs: RESTART_DRAIN_MS,
+  fenceMs: RESTART_SPAWN_FENCE_MS,
+  planMs: RESTART_PLAN_MS
+}
 const restartTimeouts = { ...RESTART_TIMEOUT_DEFAULTS }
 const RESTART_STILL_RESTARTING_MESSAGE =
   'The terminal host is still restarting. Try again in a moment.'
@@ -2451,9 +2469,7 @@ async function waitForRestartWindow(
   }
 }
 
-export async function releaseRestartExitHold(
-  options: { mode: 'announce'; epoch: number } | { mode: 'exit' }
-): Promise<void> {
+export async function releaseRestartExitHold(options: RestartHoldRelease): Promise<void> {
   if (releaseRestartHoldImpl) {
     await releaseRestartHoldImpl(options)
     return
@@ -4360,6 +4376,34 @@ export function registerPtyHandlers(
             excludeAfterPlan: released.isLateExit
           }
         )
+        return
+      }
+      if (options.mode === 'handback') {
+        // Why one synchronous block (no await from release to settle): no exit can land between the
+        // currency filter and the adapter taking the ids back, so none is both handed back and exited.
+        const current = released.captured.filter(isCurrentPtyExit)
+        const declined = options.adopt(current)
+        let exited = 0
+        for (const held of declined) {
+          // Why not adopted-and-exited: a declined id's same-id relaunch in flight keeps its state, as in exit mode.
+          if (isLocalSpawnInFlight(held.id)) {
+            continue
+          }
+          const payload = {
+            id: held.id,
+            code: -1,
+            ...(held.incarnationId ? { incarnationId: held.incarnationId } : {})
+          }
+          applyProviderPtyExitState(payload)
+          sendPtyExitToRenderer(payload)
+          exited += 1
+        }
+        recordDurableCrashBreadcrumb('daemon_restart_hold_handed_back', {
+          count: released.captured.length,
+          adopted: current.length - declined.length,
+          exited,
+          stale: released.captured.length - current.length
+        })
         return
       }
       let skippedInFlight = 0

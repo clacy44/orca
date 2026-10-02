@@ -99,9 +99,12 @@ export function createDaemonSessionLossHandler(
     }
     // Audit and plan read state that onPtyExit / clearProviderPtyState tear down, so both come first.
     // Why skippable: the manual restart writes the audit at its own step 1 (one row per death).
-    if (!options?.auditWritten) {
+    // Why per id: a failed restart hands its casualties back already audited (`auditWritten`), so a death never gets two rows.
+    const toAudit = options?.auditWritten ? [] : lost.filter((session) => !session.auditWritten)
+    const handedBack = lost.length - toAudit.length
+    if (toAudit.length > 0) {
       try {
-        deps.notifyDaemonDiedFanout(lost.map(({ id }) => id))
+        deps.notifyDaemonDiedFanout(toAudit.map(({ id }) => id))
       } catch (error) {
         console.error('[daemon] daemon_died audit for lost sessions failed:', error)
       }
@@ -170,6 +173,7 @@ export function createDaemonSessionLossHandler(
       count: lost.length,
       applied: toApply.length,
       notified,
+      ...(!options?.auditWritten && handedBack > 0 ? { handedBack } : {}),
       ...(event.sessions.length > lost.length
         ? { stale: event.sessions.length - lost.length }
         : {}),

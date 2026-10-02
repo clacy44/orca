@@ -641,3 +641,167 @@ describe('DaemonPtyAdapter proactive daemon-loss recovery (R315)', () => {
     })
   })
 })
+
+// FX-3: a restart that fails before the provider swap hands its casualties back to the reinstated
+// adapter, which recovers them through the same single-flight R315 path (one respawn, one inventory).
+describe('DaemonPtyAdapter restart handback (FX-3)', () => {
+  const casualties = [
+    { id: 's1', incarnationId: 'inc-s1' },
+    { id: 's2', incarnationId: 'inc-s2' }
+  ]
+
+  // The restart's own sequence up to the failure: retire, kill every session, the daemon is gone, reinstate.
+  function restartShaped(target: DaemonPtyAdapter): void {
+    seedActive(target, ['s1', 's2'])
+    target.retireForRestart()
+    target.fanoutSyntheticExits(-1)
+    fake.crash()
+    target.reinstateAfterFailedRestart()
+  }
+
+  it('T7: adopt + recover yields exactly one respawn, one inventory and one emit with both ids, incarnations and auditWritten', async () => {
+    const respawn = vi.fn(async () => {
+      order.push('respawn')
+      fake.gone = false
+    })
+    const a = makeAdapter({ isRecoverySuppressed: () => true }, respawn)
+    restartShaped(a)
+    await flush()
+    expect(order).toEqual([])
+
+    expect(a.adoptRestartCasualties(casualties)).toEqual([])
+    expect(a.getActiveSessionIds().sort()).toEqual(['s1', 's2'])
+    a.recoverRestartCasualties()
+    await flush()
+
+    expect(respawn).toHaveBeenCalledTimes(1)
+    expect(order).toEqual(['respawn', 'listSessions', 'emit'])
+    expect(lost).toHaveLength(1)
+    expect(lost[0]?.sessions).toEqual([
+      { id: 's1', incarnationId: 'inc-s1', auditWritten: true },
+      { id: 's2', incarnationId: 'inc-s2', auditWritten: true }
+    ])
+  })
+
+  it('T8: an id the replacement daemon reports alive is not emitted', async () => {
+    const a = makeAdapter({ isRecoverySuppressed: () => true })
+    restartShaped(a)
+    fake.aliveSessionIds = ['s2']
+
+    a.adoptRestartCasualties(casualties)
+    a.recoverRestartCasualties()
+    await flush()
+
+    expect(lost[0]?.sessions.map((session) => session.id)).toEqual(['s1'])
+  })
+
+  it('T9: adoption is refused while the adapter is retired, and the refused entries are handed back to the caller', async () => {
+    const a = makeAdapter()
+    seedActive(a, ['s1', 's2'])
+    a.retireForRestart()
+    a.fanoutSyntheticExits(-1)
+
+    expect(a.adoptRestartCasualties(casualties)).toEqual(casualties)
+    expect(a.getActiveSessionIds()).toEqual([])
+    expect(breadcrumbs.map((b) => b.name)).toContain('daemon_restart_handback_refused')
+  })
+
+  it('T10: with the breaker tripped nothing respawns, a breadcrumb says why, and the ids stay active for the lazy path', async () => {
+    const respawn = vi.fn(async () => {})
+    const a = makeAdapter({ isRecoverySuppressed: () => true }, respawn)
+    restartShaped(a)
+    const now = Date.now()
+    ;(a as unknown as { daemonLossEmitTimes: number[] }).daemonLossEmitTimes = [now, now, now]
+
+    a.adoptRestartCasualties(casualties)
+    a.recoverRestartCasualties()
+    await flush()
+
+    expect(respawn).not.toHaveBeenCalled()
+    expect(lost).toEqual([])
+    expect(breadcrumbs).toContainEqual({
+      name: 'daemon_loss_recovery_suppressed',
+      data: expect.objectContaining({ cause: 'restart_handback' })
+    })
+    expect(a.getActiveSessionIds().sort()).toEqual(['s1', 's2'])
+    expect(() => a.write('s1', 'typed')).toThrow(PtyWriteUnavailableError)
+  })
+
+  describe('T11: awaitRespawnQuiesce', () => {
+    const internals = (target: DaemonPtyAdapter) =>
+      target as unknown as { respawnPromise: Promise<void> | null }
+
+    it('is true when nothing is in flight', async () => {
+      const a = makeAdapter()
+      await expect(a.awaitRespawnQuiesce(50)).resolves.toBe(true)
+    })
+
+    it.each(['resolves', 'rejects'] as const)(
+      'waits for an in-flight respawn that %s',
+      async (how) => {
+        const a = makeAdapter()
+        let settle!: () => void
+        internals(a).respawnPromise = new Promise<void>((resolve, reject) => {
+          settle = () => (how === 'resolves' ? resolve() : reject(new Error('respawn failed')))
+        })
+        let result: boolean | null = null
+        const waiting = a.awaitRespawnQuiesce(10_000).then((value) => {
+          result = value
+        })
+        await flush()
+        expect(result).toBeNull()
+
+        settle()
+        await waiting
+
+        expect(result).toBe(true)
+      }
+    )
+
+    it('is false at the timeout while a respawn is still in flight', async () => {
+      vi.useFakeTimers()
+      const a = makeAdapter()
+      internals(a).respawnPromise = new Promise<void>(() => {})
+      const waiting = a.awaitRespawnQuiesce(30_000)
+
+      await vi.advanceTimersByTimeAsync(30_000)
+
+      await expect(waiting).resolves.toBe(false)
+    })
+
+    it('starts no new respawn once retired', async () => {
+      const respawn = vi.fn(async () => {})
+      const a = makeAdapter({}, respawn)
+      a.retireForRestart()
+      const gone = Object.assign(new Error('connect ENOENT'), {
+        code: 'ENOENT',
+        syscall: 'connect'
+      })
+
+      await expect(
+        (
+          a as unknown as { withDaemonRetry: (fn: () => Promise<void>) => Promise<void> }
+        ).withDaemonRetry(async () => {
+          throw gone
+        })
+      ).rejects.toBe(gone)
+
+      expect(respawn).not.toHaveBeenCalled()
+    })
+  })
+
+  it('T12: the casualty mark is cleared on attach and on teardown', async () => {
+    const a = makeAdapter({ isRecoverySuppressed: () => true })
+    restartShaped(a)
+    a.adoptRestartCasualties(casualties)
+    expect(a.isAuditedCasualty('s1')).toBe(true)
+    expect(a.isAuditedCasualty('s2')).toBe(true)
+    fake.gone = false
+
+    await a.attach('s1')
+    a.fanoutSyntheticExits(-1)
+
+    expect(a.isAuditedCasualty('s1')).toBe(false)
+    expect(a.isAuditedCasualty('s2')).toBe(false)
+  })
+})

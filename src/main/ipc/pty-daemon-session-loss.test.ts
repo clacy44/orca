@@ -327,6 +327,32 @@ describe('daemon-session-loss handler: ordering and exit semantics', () => {
     expect(h.order).toEqual(['audit:a', 'plan', 'send', 'exit:a'])
   })
 
+  it('T13: a mixed event audits only the ids without auditWritten, runs plan, notice and exits for all, and counts handedBack', async () => {
+    const h = buildHarness(async (sessions) =>
+      sessions.map(({ id }) => ({ id, paneKey: `t:${id}`, peerOwned: false, reanchor: false }))
+    )
+    await h.handle({
+      epoch: 4,
+      sessions: [{ id: 'a', auditWritten: true }, { id: 'b' }]
+    })
+
+    expect(h.order).toEqual(['audit:b', 'plan', 'send', 'exit:a', 'exit:b'])
+    expect(h.breadcrumbs.find((b) => b.name === 'daemon_sessions_lost')?.data).toMatchObject({
+      count: 2,
+      applied: 2,
+      handedBack: 1
+    })
+  })
+
+  it('T13: an event whose ids are all auditWritten writes no audit row', async () => {
+    const h = buildHarness(async (sessions) =>
+      sessions.map(({ id }) => ({ id, paneKey: `t:${id}`, peerOwned: false, reanchor: false }))
+    )
+    await h.handle({ epoch: 4, sessions: [{ id: 'a', auditWritten: true }] })
+
+    expect(h.order).toEqual(['plan', 'send', 'exit:a'])
+  })
+
   it('puts the per-call cause in the breadcrumb, and omits it when not given', async () => {
     const h = buildHarness(async (sessions) =>
       sessions.map(({ id }) => ({ id, paneKey: `t:${id}`, peerOwned: false, reanchor: false }))

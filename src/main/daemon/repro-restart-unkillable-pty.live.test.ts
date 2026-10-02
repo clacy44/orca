@@ -4,8 +4,11 @@
 //     pnpm exec vitest run --config config/vitest.config.ts --maxWorkers=1 <this file>
 // Needs a built entry (default out/main/daemon-entry.js). Windows pipe semantics are SIMULATED by a
 // listen() preload; only the main-side invariant "predecessor is dead when step 3 returns" is proven.
+// The FX-3 phase drives the REAL runRestartDaemon/launcher/adapter against real daemons; only the
+// pty.ts boundary (hold + session-loss handler wiring) is a harness built from the real pure modules.
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import { fork, type ChildProcess } from 'node:child_process'
+import type * as NodeChildProcess from 'node:child_process'
 import {
   closeSync,
   existsSync,
@@ -18,19 +21,37 @@ import {
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { PROTOCOL_VERSION } from './types'
 import { DaemonClient } from './client'
 import { getDaemonPidPath, getDaemonSocketPath, getDaemonTokenPath } from './daemon-spawner'
 
-const { breadcrumbs } = vi.hoisted(() => ({
-  breadcrumbs: [] as { name: string; data: Record<string, unknown> | undefined }[]
+type LiveLaunch = { index: number; label: string; pid: number | undefined }
+const { breadcrumbs, liveCtx } = vi.hoisted(() => ({
+  breadcrumbs: [] as { name: string; data: Record<string, unknown> | undefined }[],
+  liveCtx: {
+    userData: '/nonexistent-live-repro-userdata',
+    appPath: '/nonexistent-live-repro-app',
+    // Set by the FX-3 phase: rewrites the launcher's own fork() options so the daemon runs under Electron-as-node.
+    interceptFork: null as
+      | null
+      | ((index: number, opts: Record<string, unknown>) => Record<string, unknown>),
+    launches: [] as LiveLaunch[],
+    // The pty.ts boundary harness records what main would have told the window.
+    notices: [] as { epoch: number; sessions: { id: string }[] }[],
+    rendererExits: [] as string[],
+    mainExits: [] as string[],
+    audits: [] as string[][],
+    handBacks: [] as string[][],
+    incarnations: new Map<string, string>(),
+    onNotice: null as null | ((ids: string[]) => void)
+  }
 }))
 vi.mock('electron', () => ({
   app: {
     isPackaged: false,
-    getPath: () => '/nonexistent-live-repro-userdata',
-    getAppPath: () => '/nonexistent-live-repro-app',
+    getPath: () => liveCtx.userData,
+    getAppPath: () => liveCtx.appPath,
     getVersion: () => '0.0.0-live-repro'
   }
 }))
@@ -39,6 +60,142 @@ vi.mock('../crash-reporting/durable-crash-breadcrumb', () => ({
     breadcrumbs.push({ name, data })
   }
 }))
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof NodeChildProcess>()
+  return {
+    ...actual,
+    fork: ((entry: string, args: string[], opts: Record<string, unknown>) => {
+      const index = liveCtx.launches.length
+      const child = actual.fork(
+        entry,
+        args,
+        (liveCtx.interceptFork ? liveCtx.interceptFork(index, opts) : opts) as never
+      )
+      if (liveCtx.interceptFork) {
+        liveCtx.launches.push({
+          index,
+          label: ['A', 'B', 'C'][index] ?? `L${index}`,
+          pid: child.pid
+        })
+      }
+      return child
+    }) as typeof actual.fork
+  }
+})
+// The pty.ts boundary: the REAL restart hold and the REAL session-loss handler, wired the way pty.ts wires them.
+vi.mock('../ipc/pty', async () => {
+  const { createRestartExitHold } = await import('../ipc/pty-daemon-restart-hold')
+  const { createDaemonSessionLossHandler } = await import('../ipc/pty-daemon-session-loss')
+  type Held = { id: string; incarnationId?: string }
+  type Provider = {
+    onExit: (
+      cb: (payload: { id: string; code: number; incarnationId?: string }) => void
+    ) => () => void
+    onSessionsLostToDaemonDeath?: (cb: (event: never) => void) => () => void
+  }
+  const hold = createRestartExitHold()
+  let provider: Provider | null = null
+  let unsubs: (() => void)[] = []
+  const isCurrent = ({ id, incarnationId }: Held): boolean => {
+    const current = liveCtx.incarnations.get(id)
+    return !current || incarnationId === current
+  }
+  const handleLost = createDaemonSessionLossHandler({
+    isCurrentPtyExit: isCurrent,
+    isSpawnInFlight: () => false,
+    notifyDaemonDiedFanout: (ids) => liveCtx.audits.push([...ids]),
+    planRecovery: async (sessions) =>
+      sessions.map(({ id }) => ({ id, paneKey: `tab:${id}`, peerOwned: false, reanchor: true })),
+    applyProviderPtyExitState: ({ id }) => {
+      liveCtx.mainExits.push(id)
+      liveCtx.incarnations.delete(id)
+    },
+    sendExitToRenderer: ({ id }) => liveCtx.rendererExits.push(id),
+    sendToRenderer: (payload) => {
+      liveCtx.notices.push(payload)
+      const ids = payload.sessions.map(({ id }) => id)
+      // Why async: the renderer relaunches after its remount, never inside main's notice block.
+      setTimeout(() => liveCtx.onNotice?.(ids), 0)
+      return true
+    },
+    recordBreadcrumb: (name, data) => breadcrumbs.push({ name, data })
+  })
+  const unbind = (): void => {
+    for (const unsub of unsubs) {
+      unsub()
+    }
+    unsubs = []
+  }
+  const bind = (): void => {
+    unbind()
+    if (!provider) {
+      return
+    }
+    unsubs.push(
+      provider.onExit((payload) => {
+        if (hold.captureIfHeld(payload)) {
+          return
+        }
+        liveCtx.rendererExits.push(payload.id)
+      })
+    )
+    const unsubLost = provider.onSessionsLostToDaemonDeath?.((event) => void handleLost(event))
+    if (unsubLost) {
+      unsubs.push(unsubLost)
+    }
+  }
+  const release = async (
+    options:
+      | { mode: 'announce'; epoch: number }
+      | { mode: 'exit' }
+      | { mode: 'handback'; adopt: (held: Held[]) => Held[] }
+  ): Promise<void> => {
+    const released = hold.release()
+    if (!released) {
+      return
+    }
+    try {
+      if (options.mode === 'announce') {
+        await handleLost(
+          { epoch: options.epoch, sessions: released.captured },
+          {
+            auditWritten: true,
+            cause: 'manual_restart',
+            exitUnnotified: true,
+            excludeAfterPlan: released.isLateExit
+          }
+        )
+        return
+      }
+      const exiting =
+        options.mode === 'handback'
+          ? options.adopt(released.captured.filter(isCurrent))
+          : released.captured.filter(isCurrent)
+      if (options.mode === 'handback') {
+        liveCtx.handBacks.push(released.captured.map(({ id }) => id))
+      }
+      for (const { id } of exiting) {
+        liveCtx.mainExits.push(id)
+        liveCtx.incarnations.delete(id)
+        liveCtx.rendererExits.push(id)
+      }
+    } finally {
+      released.settle()
+    }
+  }
+  return {
+    getLocalPtyProvider: () => provider,
+    setLocalPtyProvider: (next: Provider) => {
+      provider = next
+    },
+    unbindLocalProviderListeners: unbind,
+    rebindLocalProviderListeners: bind,
+    beginRestartExitHold: (ids: Iterable<string>) => hold.begin(ids),
+    releaseRestartExitHold: release,
+    closeRestartSpawnFence: () => hold.closeFence(),
+    awaitRestartSpawnDrain: async () => {}
+  }
+})
 
 const HERE = import.meta.dirname
 const LIVE = process.env.ORCA_LIVE_REPRO === '1' && process.platform === 'linux'
@@ -76,14 +233,14 @@ process.exit = function () { process.stderr.write('repro-swallowed-exit\\n') }
 setTimeout(() => { clearInterval(keepAlive); realExit(0) }, 60000).unref()
 `
 
-// Models a Windows named pipe still held by the predecessor: listen() fails while its pid is alive.
+// Models a Windows named pipe still held by the predecessor: listen() fails while its pid is alive (always, when none is named).
 const REFUSE_BIND_PRELOAD = `
 const net = require('node:net')
 const realListen = net.Server.prototype.listen
 net.Server.prototype.listen = function (...args) {
-  const predecessor = Number(process.env.ORCA_REPRO_PREDECESSOR_PID)
-  let alive = false
-  try { process.kill(predecessor, 0); alive = true } catch {}
+  const raw = process.env.ORCA_REPRO_PREDECESSOR_PID
+  let alive = !raw
+  if (raw) { try { process.kill(Number(raw), 0); alive = true } catch {} }
   if (alive) {
     const where = typeof args[0] === 'string' ? args[0] : 'endpoint'
     const error = Object.assign(new Error('listen EADDRINUSE: address already in use ' + where), {
@@ -155,10 +312,10 @@ describe.runIf(LIVE)('LIVE: restart step 3 vs a daemon whose PTY will not die', 
     }
   })
 
-  function makeScratch(): string {
+  function makeScratch(subdir = ''): string {
     // Why a short dir: the AF_UNIX socket path must fit sun_path; fall back to tmpdir when the base is too long.
     const base = process.env.ORCA_LIVE_REPRO_SCRATCH ?? tmpdir()
-    const probe = join(base, 'l-XXXXXX', `daemon-v${PROTOCOL_VERSION}.sock`)
+    const probe = join(base, 'l-XXXXXX', subdir, `daemon-v${PROTOCOL_VERSION}.sock`)
     const root = probe.length <= 104 ? base : tmpdir()
     return mkdtempSync(join(root, 'l-'))
   }
@@ -385,4 +542,171 @@ describe.runIf(LIVE)('LIVE: restart step 3 vs a daemon whose PTY will not die', 
       `replacement daemon B did not reach ready; stderr: ${result.stderrB}`
     ).toBe('ready')
   }, 150_000)
+
+  it('FX-3: a restart that fails after step 3 hands the held agent back; once a healthy daemon is confirmed it is announced once, not exited', async () => {
+    scratch = makeScratch('daemon')
+    scratches.push(scratch)
+    breadcrumbs.length = 0
+    Object.assign(liveCtx, {
+      notices: [],
+      rendererExits: [],
+      mainExits: [],
+      audits: [],
+      handBacks: []
+    })
+    liveCtx.launches.length = 0
+    liveCtx.incarnations.clear()
+    liveCtx.userData = scratch
+    liveCtx.appPath = dirname(daemonEntry())
+    mkdirSync(join(scratch, 'home'), { recursive: true })
+    const unkillable = join(scratch, 'unkillable.cjs')
+    const refuseBind = join(scratch, 'refuse-bind.cjs')
+    writeFileSync(unkillable, UNKILLABLE_PRELOAD)
+    writeFileSync(refuseBind, REFUSE_BIND_PRELOAD)
+    const preloadFor = (index: number): string =>
+      index === 0 ? `--require ${unkillable}` : index === 1 ? `--require ${refuseBind}` : ''
+    // Launch A runs the unkillable PTY, launch B (step 4) fails once with EADDRINUSE, later launches are healthy.
+    const predecessorAliveAtFork: Record<number, boolean> = {}
+    liveCtx.interceptFork = (index, opts) => {
+      const first = liveCtx.launches[0]?.pid
+      predecessorAliveAtFork[index] = first !== undefined && isAlive(first)
+      return {
+        ...opts,
+        execPath: electronBinary(),
+        execArgv: ['--max-old-space-size=3072'],
+        env: {
+          ...Object.fromEntries(
+            Object.entries(opts.env as Record<string, string>).filter(
+              ([key]) => !key.startsWith('VITEST')
+            )
+          ),
+          HOME: join(scratch, 'home'),
+          NODE_OPTIONS: preloadFor(index)
+        }
+      }
+    }
+    const daemonLogPath = join(scratch, 'logs', 'daemon.log')
+    const {
+      getDaemonProvider,
+      restartDaemon,
+      setDaemonDiedFanoutHandler,
+      shutdownDaemon,
+      initDaemonPtyProvider
+    } = await import('./daemon-init')
+    setDaemonDiedFanoutHandler((ids) => liveCtx.audits.push([...ids]))
+    const spawnChair = async (): Promise<string | undefined> => {
+      const provider = getDaemonProvider() as unknown as {
+        spawn: (opts: Record<string, unknown>) => Promise<{ id: string; incarnationId?: string }>
+      }
+      const result = await provider.spawn({
+        cols: 80,
+        rows: 24,
+        cwd: scratch,
+        sessionId: 'live-repro-chair',
+        env: { SHELL: '/bin/bash', ORCA_REPRO_UNKILLABLE: '1' }
+      })
+      if (result.incarnationId) {
+        liveCtx.incarnations.set(result.id, result.incarnationId)
+      }
+      return result.incarnationId
+    }
+    let relaunches = 0
+    liveCtx.onNotice = (ids) => {
+      relaunches += ids.length
+      void spawnChair().catch((error) => note(`[live-repro] relaunch failed: ${String(error)}`))
+    }
+
+    try {
+      await initDaemonPtyProvider()
+      const first = await spawnChair()
+      note(`[live-repro] FX-3: A pid=${liveCtx.launches[0]?.pid} chair incarnation=${first}`)
+      expect(isAlive(liveCtx.launches[0]?.pid ?? -1)).toBe(true)
+
+      const restart = await restartDaemon().then(
+        () => ({ ok: true as const, message: '' }),
+        (error: Error) => ({ ok: false as const, message: error.message })
+      )
+      const logLines = (): { pid: number; event: string; ts: string }[] =>
+        readLog(daemonLogPath)
+          .split('\n')
+          .filter((line) => line.startsWith('{'))
+          .map((line) => JSON.parse(line) as { pid: number; event: string; ts: string })
+      const pidA = liveCtx.launches[0]?.pid
+      const deadline = Date.now() + 60_000
+      while (
+        Date.now() < deadline &&
+        liveCtx.notices.length === 0 &&
+        liveCtx.rendererExits.length === 0
+      ) {
+        await new Promise((r) => setTimeout(r, 200))
+      }
+      await new Promise((r) => setTimeout(r, 1_500))
+      const lines = logLines()
+      const pidC = liveCtx.launches[2]?.pid
+      note(
+        `[live-repro] FX-3: restart ${JSON.stringify(restart).slice(0, 220)}\n` +
+          `launches=${JSON.stringify(liveCtx.launches)} predecessorAliveAtFork=${JSON.stringify(predecessorAliveAtFork)}\n` +
+          `notices=${JSON.stringify(liveCtx.notices)} rendererExits=${JSON.stringify(liveCtx.rendererExits)} handBacks=${JSON.stringify(liveCtx.handBacks)}\n` +
+          `audits=${JSON.stringify(liveCtx.audits)} relaunches=${relaunches}\n` +
+          `predecessor stages=${JSON.stringify(breadcrumbs.filter((b) => b.name === 'daemon_restart_predecessor').map((b) => b.data?.stage))}\n` +
+          `daemon_sessions_lost=${JSON.stringify(breadcrumbs.filter((b) => b.name === 'daemon_sessions_lost').map((b) => b.data))}\n` +
+          `daemon.log (relevant):\n${lines
+            .filter((l) =>
+              /shutdown|dispose|startup|session-created|daemon-log-closed/.test(l.event)
+            )
+            .map((l) => JSON.stringify(l))
+            .join('\n')}`
+      )
+
+      // Positive controls: without both injections the run is VOID, never a pass.
+      if (!lines.some((l) => l.pid === pidA && l.event === 'shutdown-dispose-failed')) {
+        throw new Error(
+          'VOID RUN: daemon A never logged shutdown-dispose-failed; the unkillable-PTY injection did not take.'
+        )
+      }
+      if (!/EADDRINUSE/.test(restart.message)) {
+        throw new Error(
+          `VOID RUN: the injected first replacement failure (EADDRINUSE) did not surface; restart said: ${restart.message}`
+        )
+      }
+
+      expect(restart.ok).toBe(false)
+      // The replacement launched only after the predecessor was gone (FX-1 gate), and the healthy one started later still.
+      expect(predecessorAliveAtFork[1]).toBe(false)
+      const aExit = lines.find((l) => l.pid === pidA && l.event === 'daemon-log-closed')?.ts
+      const cStart = lines.find((l) => l.pid === pidC && l.event === 'startup')?.ts
+      expect(aExit, 'daemon A closed its log').toBeDefined()
+      expect(cStart, 'a healthy replacement daemon started after the failed restart').toBeDefined()
+      expect(Date.parse(cStart as string)).toBeGreaterThanOrEqual(Date.parse(aExit as string))
+      // The held agent is announced once (a notice), never exited, and its death is audited once.
+      expect(liveCtx.rendererExits, 'the held pane was exited instead of announced').toEqual([])
+      expect(liveCtx.notices).toHaveLength(1)
+      expect(liveCtx.notices[0]?.sessions.map(({ id }) => id)).toEqual(['live-repro-chair'])
+      expect(liveCtx.audits).toEqual([['live-repro-chair']])
+      expect(breadcrumbs.filter((b) => b.name === 'daemon_sessions_lost')).toHaveLength(1)
+      // One relaunch, served by the healthy daemon.
+      await new Promise((r) => setTimeout(r, 2_000))
+      expect(relaunches).toBe(1)
+      const provider = getDaemonProvider() as unknown as {
+        listProcesses: () => Promise<{ id: string }[]>
+      }
+      expect((await provider.listProcesses()).map(({ id }) => id)).toContain('live-repro-chair')
+    } finally {
+      liveCtx.interceptFork = null
+      liveCtx.onNotice = null
+      setDaemonDiedFanoutHandler(null)
+      await shutdownDaemon().catch((error) => note(`[live-repro] shutdownDaemon: ${String(error)}`))
+      for (const launch of liveCtx.launches) {
+        if (launch.pid) {
+          owned.push(launch.pid)
+        }
+      }
+      for (const line of readLog(daemonLogPath).split('\n')) {
+        const match = line.match(/"pid":(\d+)[^\n]*"event":"session-created"/)
+        if (match) {
+          owned.push(Number(match[1]))
+        }
+      }
+    }
+  }, 240_000)
 })
