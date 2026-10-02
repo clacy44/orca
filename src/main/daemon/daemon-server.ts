@@ -181,6 +181,7 @@ export class DaemonServer {
   private initialAdoptionDeadlineMs: number | null = null
   private retirementRequested = false
   private shutdownPromise: Promise<void> | null = null
+  private rpcShutdownDisposeFailed = false
   private ordinaryShutdownServerClose: Promise<void> | null = null
   private pendingShutdownReplies = new Map<string, PendingShutdownReply>()
   private initialAdoptionTimeoutMs: number
@@ -552,9 +553,18 @@ export class DaemonServer {
   }
 
   private async finishOrdinaryShutdown(serverClose: Promise<void>): Promise<void> {
-    this.unlinkOwnedEndpointArtifacts()
-    await this.disposeDaemonResources()
+    await this.releaseResourcesKeepingPidRecordUntilDisposed()
     await serverClose
+  }
+
+  private async releaseResourcesKeepingPidRecordUntilDisposed(): Promise<void> {
+    this.unlinkOwnedTokenFile()
+    try {
+      await this.disposeDaemonResources()
+    } finally {
+      // Why after dispose: while PTYs are still being reaped the record is the only way a launcher can find and kill this process.
+      this.unlinkOwnedPidRecord()
+    }
   }
 
   private async finishRpcShutdown(serverClose: Promise<void>): Promise<void> {
@@ -563,14 +573,22 @@ export class DaemonServer {
   }
 
   private unlinkOwnedEndpointArtifacts(): void {
+    this.unlinkOwnedTokenFile()
+    this.unlinkOwnedPidRecord()
+  }
+
+  private unlinkOwnedTokenFile(): void {
     // Ownership-checked so a late replacement's token or PID record is never removed.
     unlinkOwnedDaemonTokenFile(this.tokenPath, this.token)
-    if (this.pidPath && this.launchNonce) {
-      unlinkOwnedDaemonPidFile(this.pidPath, process.pid, this.launchNonce)
-    }
     // The endpoint is deliberately left: fencing its removal against a replacement that published
     // meanwhile was this component's largest source of defects, and a dead entry costs nothing.
     this.ownedSocketIdentity = null
+  }
+
+  private unlinkOwnedPidRecord(): void {
+    if (this.pidPath && this.launchNonce) {
+      unlinkOwnedDaemonPidFile(this.pidPath, process.pid, this.launchNonce)
+    }
   }
 
   private startEndpointOwnershipWatch(): void {
@@ -676,6 +694,11 @@ export class DaemonServer {
     }
     this.transientFactRelay.dispose()
     this.cancelAllPendingPtySpawnPreparations()
+    if (this.rpcShutdownDisposeFailed) {
+      // Why: the retry below can block a second full exit timeout; held pipe instances would keep the endpoint name unpublishable meanwhile.
+      this.log.log('shutdown-clients-released-before-dispose-retry')
+      this.destroyClientConnections()
+    }
     try {
       await this.host.dispose()
     } catch (err) {
@@ -687,7 +710,10 @@ export class DaemonServer {
     this.streamDataBatcher.clear()
     this.historySeedTransfers.dispose()
     this.pendingShutdownReplies.clear()
+    this.destroyClientConnections()
+  }
 
+  private destroyClientConnections(): void {
     for (const [, client] of this.clients) {
       client.controlSocket.destroy()
       client.streamSocket?.destroy()
@@ -796,8 +822,7 @@ export class DaemonServer {
   }
 
   private async finishIdleShutdown(serverClose: Promise<void>): Promise<void> {
-    this.unlinkOwnedEndpointArtifacts()
-    await this.disposeDaemonResources()
+    await this.releaseResourcesKeepingPidRecordUntilDisposed()
     await serverClose
     this.onIdleShutdown()
   }
@@ -1574,6 +1599,7 @@ export class DaemonServer {
             await this.host.dispose()
           } catch (err) {
             // Why: shutdown must always self-terminate; failed owners stay retryable for the follow-up shutdown() below.
+            this.rpcShutdownDisposeFailed = true
             this.log.log('shutdown-dispose-failed', {
               error: err instanceof Error ? err.message : String(err)
             })

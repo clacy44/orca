@@ -114,7 +114,8 @@ type PtyProbeOptions = { signal?: AbortSignal }
 export type PtySessionsLostToDaemonDeathEvent = {
   /** Monotonic per adapter; with an id it names one death, so a reused pty id is a new death. */
   epoch: number
-  sessions: { id: string; incarnationId?: string }[]
+  /** `auditWritten`: a failed restart handed this id back; its `daemon_died` audit row already exists. */
+  sessions: { id: string; incarnationId?: string; auditWritten?: true }[]
   /** Milliseconds from the unplanned transport loss to this announcement (diagnostics only). */
   sinceDisconnectMs?: number
 }

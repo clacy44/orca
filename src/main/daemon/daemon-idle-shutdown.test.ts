@@ -194,6 +194,35 @@ describe('current daemon lifecycle retirement', () => {
     }
   )
 
+  it.skipIf(process.platform === 'win32')(
+    'keeps its PID record until the dispose finishes, like the shutdown RPC path',
+    async () => {
+      const launchNonce = 'launch-idle-dispose'
+      writeFileSync(
+        pidPath,
+        serializeDaemonPidFile({ pid: process.pid, startedAtMs: null, launchNonce })
+      )
+      await startServer({ launchNonce })
+      const disposeGate = Promise.withResolvers<void>()
+      const dispose = vi.fn(() => disposeGate.promise)
+      ;(server as unknown as { host: { dispose: () => Promise<void> } }).host.dispose = dispose
+      const client = new DaemonClient({ socketPath, tokenPath })
+      await client.ensureConnected()
+      client.disconnect()
+      try {
+        await waitFor(() => dispose.mock.calls.length === 1)
+
+        expect(existsSync(tokenPath)).toBe(false)
+        expect(existsSync(pidPath)).toBe(true)
+        expect(onIdleShutdown).not.toHaveBeenCalled()
+      } finally {
+        disposeGate.resolve()
+      }
+      await waitFor(() => onIdleShutdown.mock.calls.length === 1)
+      expect(existsSync(pidPath)).toBe(false)
+    }
+  )
+
   it('retires a fresh daemon that is never adopted by a full client pair', async () => {
     await startServer()
 

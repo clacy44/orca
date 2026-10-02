@@ -1,6 +1,6 @@
-// R326 repair (train 10z.7): the kill-path exclusion (F2), the fence bound (F3), un-recovered ids
-// getting today's exit (F5), the kill-mark clear on a same-id respawn (F7) and no capture after
-// release (F8). The race items live in pty-daemon-restart-race.test.ts.
+// FX-3 (train 10z.8): a restart that fails before the provider swap hands its held ids back as an
+// unannounced crash instead of closing their panes; the reinstated adapter then recovers them (R315).
+// Copies the kill-paths harness; the provider mock also captures its sessions-lost listener.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdirSync as realMkdirSync } from 'node:fs'
 import { join } from 'node:path'
@@ -213,6 +213,7 @@ import {
 import { makePaneKey } from '../../shared/stable-pane-id'
 import {
   beginRestartExitHold,
+  closeRestartSpawnFence,
   _setRestartTimeoutsForTest,
   getPaneKeyForPtyId,
   rebindLocalProviderListeners,
@@ -238,12 +239,14 @@ type GateOptions = {
   gateFor?: (callIndex: number) => Promise<void> | undefined
 }
 
+type LostSession = { id: string; incarnationId?: string; auditWritten?: true }
+
 const HOST_ID = 'local'
 const SESSION_ID = 'sess-crash-gate'
 const FIRST_INCARNATION = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1'
 const SECOND_INCARNATION = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2'
 
-describe('R326 repair: restart kill paths (pty.ts wiring)', () => {
+describe('FX-3: failed restart hands casualties back (pty.ts wiring)', () => {
   const handlers = new Map<string, (_event: unknown, args: unknown) => unknown>()
   const mainWindow = {
     isDestroyed: () => false,
@@ -449,6 +452,7 @@ describe('R326 repair: restart kill paths (pty.ts wiring)', () => {
   ) {
     let calls = 0
     // Why a set: pty.ts's kill helper subscribes its own short-lived exit listener beside the bound one.
+    const lostListeners = new Set<(event: { epoch: number; sessions: LostSession[] }) => void>()
     const exitListeners = new Set<
       (payload: { id: string; code: number; incarnationId?: string }) => void
     >()
@@ -490,12 +494,24 @@ describe('R326 repair: restart kill paths (pty.ts wiring)', () => {
           }
         }
       ),
-      onSessionsLostToDaemonDeath: vi.fn(() => () => {}),
+      onSessionsLostToDaemonDeath: vi.fn(
+        (callback: (event: { epoch: number; sessions: LostSession[] }) => void) => {
+          lostListeners.add(callback)
+          return () => {
+            lostListeners.delete(callback)
+          }
+        }
+      ),
       hasPty: vi.fn((id: string) => alive.has(id)),
       listProcesses: vi.fn(async () => []),
       attach: vi.fn(),
       getDefaultShell: vi.fn(),
       getProfiles: vi.fn(),
+      fireLost: (event: { epoch: number; sessions: LostSession[] }) => {
+        for (const listener of lostListeners) {
+          listener(event)
+        }
+      },
       fireExit: (payload: { id: string; code: number; incarnationId?: string }) => {
         for (const listener of exitListeners) {
           listener(payload)
@@ -517,12 +533,6 @@ describe('R326 repair: restart kill paths (pty.ts wiring)', () => {
     )
     setDaemonDiedFanoutHandler(auditSpy)
     return { runtime, db, provider, auditSpy }
-  }
-
-  // Mirrors the restart's step 6 + 7: swap the provider, rebind the listeners to it.
-  function swapProvider(provider: ReturnType<typeof createProvider>): void {
-    setLocalPtyProvider(provider as never)
-    rebindLocalProviderListeners()
   }
 
   const spawnArgs = (tabId: string, leafId: string) => ({
@@ -570,208 +580,192 @@ describe('R326 repair: restart kill paths (pty.ts wiring)', () => {
     _setRestartTimeoutsForTest()
   })
 
-  describe('F2: an id with its own shutdown in flight is left out of the hold', () => {
-    it("an id not held gets today's exit once (renderer pty:exit) and no notice", async () => {
-      const { runtime, provider } = setUp([{ id: 'pty-k', incarnationId: FIRST_INCARNATION }])
+  const flush = async (): Promise<void> => {
+    for (let i = 0; i < 20; i += 1) {
+      await Promise.resolve()
+    }
+  }
+  const second = (value: string): string => value.replace('cccc', 'eeee').replace('dddd', 'ffff')
+
+  // The failed restart's synchronous block: hold, the fanout's exit, then the handback release.
+  async function handBack(
+    provider: ReturnType<typeof createProvider>,
+    ids: string[],
+    adopt: (
+      held: { id: string; incarnationId?: string }[]
+    ) => { id: string; incarnationId?: string }[]
+  ): Promise<void> {
+    beginRestartExitHold(ids)
+    for (const id of ids) {
+      provider.fireExit({ id, code: -1, incarnationId: FIRST_INCARNATION })
+    }
+    await releaseRestartExitHold({ mode: 'handback', adopt })
+  }
+
+  describe('FX-3: handback (T14-T18)', () => {
+    it('T14: handback keeps the pane alive: no pty:exit, no main exit state, adopt gets the id with its incarnation, hasPty is null until settle', async () => {
+      const { provider } = setUp([{ id: 'pty-c', incarnationId: FIRST_INCARNATION }])
       await handlers.get('pty:spawn')!(mainWindowIpcEvent, spawnArgs(TAB, LEAF))
+      clearAgentHookPaneStateMock.mockClear()
+      const adopt = vi.fn((_held: { id: string; incarnationId?: string }[]) => [])
+      let duringRelease: unknown
 
-      beginRestartExitHold([])
-      provider.fireExit({ id: 'pty-k', code: -1, incarnationId: FIRST_INCARNATION })
-      swapProvider(createProvider(runtime, []))
-      await releaseRestartExitHold({ mode: 'announce', epoch: 801 })
+      await handBack(provider, ['pty-c'], (held) => {
+        duringRelease = handlers.get('pty:hasPty')!(mainWindowIpcEvent, { id: 'pty-c' })
+        return adopt(held)
+      })
 
-      expect(exitsSent()).toEqual(['pty-k'])
-      expect(noticesSent()).toEqual([])
+      expect(adopt).toHaveBeenCalledWith([{ id: 'pty-c', incarnationId: FIRST_INCARNATION }])
+      expect(exitsSent()).toEqual([])
+      expect(clearAgentHookPaneStateMock).not.toHaveBeenCalled()
+      expect(await duringRelease).toBeNull()
+      expect(await handlers.get('pty:hasPty')!(mainWindowIpcEvent, { id: 'pty-c' })).not.toBeNull()
+      expect(breadcrumbData('daemon_restart_hold_handed_back')).toMatchObject({
+        count: 1,
+        adopted: 1,
+        exited: 0
+      })
     })
 
-    it('hibernation shape: a keepHistory stop in flight at the click ends with a preserveRendererBinding exit and no notice', async () => {
-      const runtime = new OrcaRuntimeService()
-      const setController = vi.spyOn(runtime, 'setPtyController')
-      const db = new OrchestrationDb(':memory:')
-      runtime.getOrchestrationDb = () => db
-      registerPtyHandlers(mainWindow as never, runtime)
-      const controller = setController.mock.calls[0]?.[0] as {
-        markReversibleStops: (ptyIds: readonly string[]) => () => void
-        stopAndWait: (ptyId: string, opts?: { keepHistory?: boolean }) => Promise<boolean>
-      }
-      const provider = createProvider(runtime, [{ id: 'pty-k', incarnationId: FIRST_INCARNATION }])
-      const stopGate = Promise.withResolvers<void>()
-      provider.shutdown.mockImplementation(async (id: string) => {
-        await stopGate.promise
-        provider.alive.delete(id)
-        provider.fireExit({ id, code: 0, incarnationId: FIRST_INCARNATION })
-      })
-      setLocalPtyProvider(provider as never)
-      rebindLocalProviderListeners()
+    it('T14 control: exit mode, the shape 10z.7 shipped, gives the pane its renderer exit', async () => {
+      const { provider } = setUp([{ id: 'pty-c', incarnationId: FIRST_INCARNATION }])
       await handlers.get('pty:spawn')!(mainWindowIpcEvent, spawnArgs(TAB, LEAF))
+      beginRestartExitHold(['pty-c'])
+      provider.fireExit({ id: 'pty-c', code: -1, incarnationId: FIRST_INCARNATION })
 
-      const release = controller.markReversibleStops(['pty-k'])
-      const stopping = controller.stopAndWait('pty-k', { keepHistory: true })
-      await vi.waitFor(() => expect(provider.shutdown).toHaveBeenCalled())
-      beginRestartExitHold([])
-      stopGate.resolve()
-      await stopping
-      release()
       await releaseRestartExitHold({ mode: 'exit' })
 
-      const exits = mainWindow.webContents.send.mock.calls.filter((call) => call[0] === 'pty:exit')
-      expect(exits).toHaveLength(1)
-      expect(exits[0]?.[1]).toMatchObject({ id: 'pty-k', preserveRendererBinding: true })
+      expect(exitsSent()).toEqual(['pty-c'])
+    })
+
+    it('T15: the adapter-announced event (auditWritten) sends the notice before the main exit and writes no second audit row', async () => {
+      const { provider, auditSpy } = setUp([{ id: 'pty-c', incarnationId: FIRST_INCARNATION }])
+      await handlers.get('pty:spawn')!(mainWindowIpcEvent, spawnArgs(TAB, LEAF))
+      await handBack(provider, ['pty-c'], () => [])
+      clearAgentHookPaneStateMock.mockClear()
+      mainWindow.webContents.send.mockClear()
+
+      provider.fireLost({
+        epoch: 5,
+        sessions: [{ id: 'pty-c', incarnationId: FIRST_INCARNATION, auditWritten: true }]
+      })
+      await vi.waitFor(() => expect(noticesSent()).toHaveLength(1))
+
+      expect(noticesSent()[0]).toMatchObject({ epoch: 5, sessions: [{ id: 'pty-c' }] })
+      expect(auditSpy).not.toHaveBeenCalled()
+      expect(exitsSent()).toEqual([])
+      const sendOrder = mainWindow.webContents.send.mock.invocationCallOrder[0]!
+      expect(sendOrder).toBeLessThan(clearAgentHookPaneStateMock.mock.invocationCallOrder[0]!)
+    })
+
+    it("T16: ids the adapter declines get today's exit inside the handback block; adopted ids do not", async () => {
+      const { provider } = setUp([
+        { id: 'pty-c', incarnationId: FIRST_INCARNATION },
+        { id: 'pty-d', incarnationId: FIRST_INCARNATION }
+      ])
+      await handlers.get('pty:spawn')!(mainWindowIpcEvent, spawnArgs(TAB, LEAF))
+      await handlers.get('pty:spawn')!(mainWindowIpcEvent, spawnArgs(second(TAB), second(LEAF)))
+
+      await handBack(provider, ['pty-c', 'pty-d'], (held) =>
+        held.filter(({ id }) => id === 'pty-d')
+      )
+
+      expect(exitsSent()).toEqual(['pty-d'])
+      expect(breadcrumbData('daemon_restart_hold_handed_back')).toMatchObject({
+        count: 2,
+        adopted: 1,
+        exited: 1
+      })
+    })
+
+    it('T17: a reveal-first same-id spawn is served once; the late event is neither noticed nor exited', async () => {
+      const gate = Promise.withResolvers<void>()
+      const { provider } = setUp(
+        [
+          { id: 'pty-c', incarnationId: FIRST_INCARNATION },
+          { id: 'pty-c', incarnationId: SECOND_INCARNATION }
+        ],
+        { gateFor: (callIndex) => (callIndex === 1 ? gate.promise : undefined) }
+      )
+      await handlers.get('pty:spawn')!(mainWindowIpcEvent, spawnArgs(TAB, LEAF))
+      await handBack(provider, ['pty-c'], () => [])
+      expect(exitsSent()).toEqual([])
+      mainWindow.webContents.send.mockClear()
+
+      const reveal = Promise.resolve(
+        handlers.get('pty:spawn')!(mainWindowIpcEvent, sessionSpawnArgs('pty-c'))
+      )
+      await flush()
+      provider.fireLost({
+        epoch: 6,
+        sessions: [{ id: 'pty-c', incarnationId: FIRST_INCARNATION, auditWritten: true }]
+      })
+      await tick(60)
       expect(noticesSent()).toEqual([])
+      expect(exitsSent()).toEqual([])
+
+      gate.resolve()
+      await reveal
+
+      expect(provider.spawn).toHaveBeenCalledTimes(2)
+      expect(noticesSent()).toEqual([])
+      expect(exitsSent()).toEqual([])
+    })
+
+    it('T18: an event from the first recovery that lands after the id moved to a newer incarnation is stale and skipped', async () => {
+      const { provider } = setUp([{ id: 'pty-c', incarnationId: FIRST_INCARNATION }])
+      await handlers.get('pty:spawn')!(mainWindowIpcEvent, spawnArgs(TAB, LEAF))
+      await handBack(provider, ['pty-c'], () => [])
+      expect(exitsSent()).toEqual([])
+      mainWindow.webContents.send.mockClear()
+      restorePtyIncarnation('pty-c', SECOND_INCARNATION)
+
+      provider.fireLost({
+        epoch: 7,
+        sessions: [{ id: 'pty-c', incarnationId: FIRST_INCARNATION, auditWritten: true }]
+      })
+      await tick(60)
+
+      expect(noticesSent()).toEqual([])
+      expect(exitsSent()).toEqual([])
+      expect(breadcrumbData('daemon_sessions_lost')).toMatchObject({ count: 0, stale: 1 })
     })
   })
 
-  describe('F3: bounds', () => {
-    it('a fenced spawn rejects after the fence bound (still restarting), never reaches a provider, and the hold stays', async () => {
-      _setRestartTimeoutsForTest({ fenceMs: 20 })
-      const { provider } = setUp([{ id: 'pty-w', incarnationId: FIRST_INCARNATION }])
-      beginRestartExitHold(['held-1'])
-
-      const outcome = await Promise.race([
-        Promise.resolve(
+  describe('FX-3 (a): the spawn fence outlasts the longest legitimate restart', () => {
+    it('a spawn waiting through a 31 s restart is served, not rejected', async () => {
+      setUp([{ id: 'pty-w', incarnationId: FIRST_INCARNATION }])
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+      let outcome: string
+      try {
+        closeRestartSpawnFence()
+        const spawning = Promise.resolve(
           handlers.get('pty:spawn')!(mainWindowIpcEvent, sessionSpawnArgs('pty-w'))
         ).then(
-          () => 'resolved',
+          () => 'served',
           (error: Error) => error.message
-        ),
-        tick(1_000).then(() => 'hung')
-      ])
+        )
+        await vi.advanceTimersByTimeAsync(31_000)
+        await releaseRestartExitHold({ mode: 'exit' })
+        vi.useRealTimers()
+        outcome = await spawning
+      } finally {
+        vi.useRealTimers()
+      }
 
-      expect(outcome).toMatch(/still restarting/)
-      expect(provider.spawn).not.toHaveBeenCalled()
-      expect(breadcrumbNames()).toContain('daemon_restart_spawn_fence_timeout')
-      expect(await handlers.get('pty:hasPty')!(mainWindowIpcEvent, { id: 'held-1' })).toBeNull()
-    })
-  })
-
-  describe("F5: ids that are not recovered get today's exit on the restart path", () => {
-    it('when the plan fails the held pane still gets its renderer exit (and no notice)', async () => {
-      const { runtime, provider } = setUp([{ id: 'pty-p', incarnationId: FIRST_INCARNATION }])
-      vi.spyOn(console, 'error').mockImplementation(() => {})
-      vi.spyOn(runtime, 'planDaemonLossRecovery').mockRejectedValue(new Error('plan failed'))
-      await handlers.get('pty:spawn')!(mainWindowIpcEvent, spawnArgs(TAB, LEAF))
-
-      beginRestartExitHold(['pty-p'])
-      provider.fireExit({ id: 'pty-p', code: -1, incarnationId: FIRST_INCARNATION })
-      swapProvider(createProvider(runtime, []))
-      await releaseRestartExitHold({ mode: 'announce', epoch: 901 })
-
-      expect(exitsSent()).toEqual(['pty-p'])
-      expect(noticesSent()).toEqual([])
-    })
-  })
-
-  describe("F7: a kill mark does not swallow a same-id respawn's restart exit", () => {
-    async function killWithoutProviderExit(provider: ReturnType<typeof createProvider>) {
-      provider.shutdown.mockImplementation(async (id: string) => {
-        provider.alive.delete(id)
-      })
-      await handlers.get('pty:kill')!(mainWindowIpcEvent, { id: 'pty-r' })
-    }
-
-    it('after a same-id respawn the restart exit is held and announced, not consumed by the stale kill mark', async () => {
-      const { runtime, provider: p1 } = setUp([
-        { id: 'pty-r', incarnationId: FIRST_INCARNATION },
-        { id: 'pty-r', incarnationId: SECOND_INCARNATION }
-      ])
-      await handlers.get('pty:spawn')!(mainWindowIpcEvent, spawnArgs(TAB, LEAF))
-      await killWithoutProviderExit(p1)
-      mainWindow.webContents.send.mockClear()
-      await handlers.get('pty:spawn')!(mainWindowIpcEvent, spawnArgs(TAB, LEAF))
-
-      beginRestartExitHold(['pty-r'])
-      p1.fireExit({ id: 'pty-r', code: -1, incarnationId: SECOND_INCARNATION })
-      swapProvider(createProvider(runtime, []))
-      await releaseRestartExitHold({ mode: 'announce', epoch: 601 })
-
-      expect(noticesSent()).toEqual([
-        { epoch: 601, sessions: [expect.objectContaining({ id: 'pty-r' })] }
-      ])
+      expect(outcome).toBe('served')
+      expect(breadcrumbNames()).not.toContain('daemon_restart_spawn_fence_timeout')
     })
 
-    it('after the respawn a late exit of the OLD incarnation, or one with no incarnation, produces no pty:exit', async () => {
-      const { provider } = setUp([
-        { id: 'pty-r', incarnationId: FIRST_INCARNATION },
-        { id: 'pty-r', incarnationId: SECOND_INCARNATION }
-      ])
-      await handlers.get('pty:spawn')!(mainWindowIpcEvent, spawnArgs(TAB, LEAF))
-      await killWithoutProviderExit(provider)
-      await handlers.get('pty:spawn')!(mainWindowIpcEvent, spawnArgs(TAB, LEAF))
-      mainWindow.webContents.send.mockClear()
+    it('the fence bound is derived from, and exceeds, predecessor wait + quiesce + step 4', async () => {
+      const bounds = await import('../daemon/restart-duration-bounds')
 
-      provider.fireExit({ id: 'pty-r', code: 0, incarnationId: FIRST_INCARNATION })
-      provider.fireExit({ id: 'pty-r', code: 0 })
-
-      expect(exitsSent()).toEqual([])
-    })
-
-    it("a kill with no respawn still consumes the late duplicate exit (today's pin)", async () => {
-      const { provider } = setUp([{ id: 'pty-r', incarnationId: FIRST_INCARNATION }])
-      await handlers.get('pty:spawn')!(mainWindowIpcEvent, spawnArgs(TAB, LEAF))
-      await killWithoutProviderExit(provider)
-      expect(exitsSent()).toEqual(['pty-r'])
-
-      provider.fireExit({ id: 'pty-r', code: 0 })
-
-      expect(exitsSent()).toEqual(['pty-r'])
-    })
-  })
-
-  describe('F8: no capture after release', () => {
-    it("an exit landing during the announcement's plan await is forwarded once and the id is not announced", async () => {
-      const { runtime, provider: p1 } = setUp([{ id: 'pty-h', incarnationId: FIRST_INCARNATION }])
-      await handlers.get('pty:spawn')!(mainWindowIpcEvent, spawnArgs(TAB, LEAF))
-      beginRestartExitHold(['pty-h'])
-      p1.fireExit({ id: 'pty-h', code: -1, incarnationId: FIRST_INCARNATION })
-      const p2 = createProvider(runtime, [])
-      swapProvider(p2)
-
-      const announcing = releaseRestartExitHold({ mode: 'announce', epoch: 1001 })
-      p2.fireExit({ id: 'pty-h', code: 0, incarnationId: FIRST_INCARNATION })
-      await announcing
-
-      expect(exitsSent()).toEqual(['pty-h'])
-      expect(noticesSent()).toEqual([])
-    })
-
-    it('exit mode counts a stale captured incarnation in its breadcrumb', async () => {
-      const { provider } = setUp([{ id: 'pty-x', incarnationId: FIRST_INCARNATION }])
-      await handlers.get('pty:spawn')!(mainWindowIpcEvent, spawnArgs(TAB, LEAF))
-      beginRestartExitHold(['pty-x'])
-      provider.fireExit({ id: 'pty-x', code: -1, incarnationId: FIRST_INCARNATION })
-      restorePtyIncarnation('pty-x', SECOND_INCARNATION)
-
-      await releaseRestartExitHold({ mode: 'exit' })
-
-      expect(breadcrumbData('daemon_restart_hold_exited')).toMatchObject({ count: 1, stale: 1 })
-      expect(exitsSent()).toEqual([])
-    })
-  })
-
-  describe('R331: the restart announcement applies the plan bound', () => {
-    it('a hung plan on the restart path settles within planMs; the held pane gets its exit and the window settles', async () => {
-      _setRestartTimeoutsForTest({ planMs: 50 })
-      vi.spyOn(console, 'warn').mockImplementation(() => {})
-      const { runtime, provider } = setUp([{ id: 'pty-g', incarnationId: FIRST_INCARNATION }])
-      vi.spyOn(runtime, 'planDaemonLossRecovery').mockImplementation(() => new Promise(() => {}))
-      await handlers.get('pty:spawn')!(mainWindowIpcEvent, spawnArgs(TAB, LEAF))
-
-      beginRestartExitHold(['pty-g'])
-      provider.fireExit({ id: 'pty-g', code: -1, incarnationId: FIRST_INCARNATION })
-      swapProvider(createProvider(runtime, []))
-      const outcome = await Promise.race([
-        releaseRestartExitHold({ mode: 'announce', epoch: 1201 }).then(() => 'settled'),
-        tick(2_000).then(() => 'hung')
-      ])
-
-      expect(outcome).toBe('settled')
-      expect(exitsSent()).toEqual(['pty-g'])
-      expect(noticesSent()).toEqual([])
-      expect(breadcrumbData('daemon_sessions_lost')).toMatchObject({
-        planTimedOut: true,
-        cause: 'manual_restart'
-      })
-      expect(await handlers.get('pty:hasPty')!(mainWindowIpcEvent, { id: 'pty-g' })).not.toBeNull()
+      expect(bounds.RESTART_SPAWN_FENCE_MS).toBeGreaterThan(
+        bounds.DAEMON_RPC_SHUTDOWN_PROCESS_EXIT_WAIT_MS +
+          bounds.RESTART_RESPAWN_QUIESCE_MS +
+          bounds.DAEMON_STARTUP_MS
+      )
+      expect(Number.isFinite(bounds.RESTART_SPAWN_FENCE_MS)).toBe(true)
     })
   })
 })
