@@ -28,14 +28,15 @@ import {
   type SystemResolverHealthResult
 } from './types'
 
-const HEALTH_CHECK_TIMEOUT_MS = 3_000
+export const HEALTH_CHECK_TIMEOUT_MS = 3_000
 const PS_IDENTITY_TIMEOUT_MS = 2_000
+export const WINDOWS_PROCESS_IDENTITY_TIMEOUT_MS = 3_000
 const RESOLVER_HEALTH_CHECK_TIMEOUT_MS = 3_000
-const KILL_WAIT_MS = 3_000
+export const KILL_WAIT_MS = 3_000
 const KILL_POLL_MS = 100
 // Why: SIGKILL is delivered on return from an uninterruptible syscall, so confirm the exit
 // rather than assume it — but keep the wait short, it only guards the rare wedged case.
-const SIGKILL_CONFIRM_WAIT_MS = 1_000
+export const SIGKILL_CONFIRM_WAIT_MS = 1_000
 const START_TIME_TOLERANCE_MS = 1_500
 // Why: e2e forces the failed-health preserve path without SIGSTOP races —
 // a stopped daemon also blocks listSessions, so the unhealthy guard cannot
@@ -528,7 +529,7 @@ async function queryWindowsProcessIdentity(pid: number): Promise<WindowsProcessI
       ],
       {
         encoding: 'utf8',
-        timeout: 3_000
+        timeout: WINDOWS_PROCESS_IDENTITY_TIMEOUT_MS
       }
     )
     return parseWindowsProcessIdentityJson(stdout)
@@ -551,9 +552,9 @@ async function queryWindowsProcessIdentity(pid: number): Promise<WindowsProcessI
  * machine blows both — reading that as "not our daemon" is what authorized reclaiming a live
  * daemon's ownership in the first place.
  */
-type DaemonProcessIdentity = 'match' | 'mismatch' | 'unknown'
+export type DaemonProcessIdentity = 'match' | 'mismatch' | 'unknown'
 
-async function inspectDaemonProcessIdentity(
+export async function inspectDaemonProcessIdentity(
   pid: number,
   socketPath: string,
   tokenPath: string,

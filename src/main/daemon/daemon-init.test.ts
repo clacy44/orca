@@ -33,6 +33,7 @@ const {
   parseDaemonPidFileMock,
   replaceDaemonPidFileMock,
   getDaemonCommandLineMock,
+  inspectDaemonProcessIdentityMock,
   unlinkOwnedDaemonPidFileMock,
   launchedStartedAtMs,
   readLaunchedDaemonIdentity,
@@ -112,6 +113,9 @@ const {
   )
   const replaceDaemonPidFileMock = vi.fn(() => true)
   const getDaemonCommandLineMock = vi.fn(async (_pid: number): Promise<string | null> => null)
+  const inspectDaemonProcessIdentityMock = vi.fn(
+    async (..._args: unknown[]): Promise<'match' | 'mismatch' | 'unknown'> => 'match'
+  )
   const unlinkOwnedDaemonPidFileMock = vi.fn(() => true)
   const launchedStartedAtMs = { current: 1_000_000 }
 
@@ -228,6 +232,7 @@ const {
     parseDaemonPidFileMock,
     replaceDaemonPidFileMock,
     getDaemonCommandLineMock,
+    inspectDaemonProcessIdentityMock,
     unlinkOwnedDaemonPidFileMock,
     launchedStartedAtMs,
     readLaunchedDaemonIdentity,
@@ -332,6 +337,7 @@ vi.mock('net', () => ({ connect: netConnectMock }))
 vi.mock('./daemon-health', () => ({
   checkDaemonHealth: checkDaemonHealthMock,
   getDaemonCommandLine: getDaemonCommandLineMock,
+  inspectDaemonProcessIdentity: inspectDaemonProcessIdentityMock,
   getDaemonLaunchIdentity: getDaemonLaunchIdentityMock,
   getMacDaemonSystemResolverHealth: getMacDaemonSystemResolverHealthMock,
   getMacDaemonTccAttributionHealth: getMacDaemonTccAttributionHealthMock,
@@ -600,6 +606,8 @@ async function importFresh() {
   isDaemonStaleForCurrentBundleMock.mockReturnValue(false)
   // mockReset (not mockClear) also drops an unconsumed *Once queue, so a test that bails early
   // can't leak a queued false into the next test's confirmedReplacement gate.
+  inspectDaemonProcessIdentityMock.mockReset()
+  inspectDaemonProcessIdentityMock.mockResolvedValue('match')
   killStaleDaemonMock.mockReset()
   killStaleDaemonMock.mockResolvedValue({
     killed: true,
@@ -677,7 +685,7 @@ function restorePredecessorModel(): void {
   predecessorKillSpy = null
 }
 function modelPredecessorSurvivingShutdown(
-  opts: { diesAfterChecks?: number; endpointStaysUp?: boolean } = {}
+  opts: { diesAfterChecks?: number; endpointStaysUp?: boolean; epermWhileAlive?: boolean } = {}
 ) {
   const state = { shutdownSent: false, alive: true, livenessChecks: 0 }
   probeSocketExistsMock.mockReturnValue(true)
@@ -731,6 +739,9 @@ function modelPredecessorSurvivingShutdown(
       }
       if (!state.alive) {
         throw Object.assign(new Error('kill ESRCH'), { code: 'ESRCH' })
+      }
+      if (opts.epermWhileAlive) {
+        throw Object.assign(new Error('kill EPERM'), { code: 'EPERM' })
       }
     }
     return true
@@ -1179,7 +1190,7 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
       serveEmptyHost()
       return model
     }
-    let modelOptions: { diesAfterChecks?: number } = {}
+    let modelOptions: { diesAfterChecks?: number; epermWhileAlive?: boolean } = {}
     // Why: the predecessor model's client reports a live session; the launcher must see an empty host to reach its kill.
     const serveEmptyHost = (): void => {
       daemonClientMock.mockImplementation(function MockEmptyDaemonClient() {
@@ -1292,6 +1303,70 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('DEGRADED MODE'))
       expect(forkMock).not.toHaveBeenCalled()
       warn.mockRestore()
+    })
+
+    // F1: "killStaleDaemon reported no survivor" is NOT proof the process is gone; only ESRCH or a 'mismatch' verdict is.
+    it.each([
+      ['identity unknown (e.g. a win32 CIM timeout)', {}],
+      ['EPERM on the liveness probe', { epermWhileAlive: true }]
+    ])(
+      'F1: %s with the endpoint proven dead and the pid alive: no fork, and the record is kept',
+      async (_name, model) => {
+        modelOptions = model
+        const mod = await importFresh()
+        await leaveUnprovenPredecessor(mod)
+        checkDaemonHealthMock.mockResolvedValue('rejected')
+        inspectDaemonProcessIdentityMock.mockResolvedValue('unknown')
+        killStaleDaemonMock.mockResolvedValue({ killed: false, liveOwnerSurvived: false })
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+        const launcher = spawnerInstances[0].launcher as Launcher
+
+        const first = launcher('/fake/socket', '/fake/token').catch(() => undefined)
+        await vi.advanceTimersByTimeAsync(30_000)
+        await first
+        const second = launcher('/fake/socket', '/fake/token').catch(() => undefined)
+        await vi.advanceTimersByTimeAsync(30_000)
+        vi.useRealTimers()
+        await second
+
+        expect(forkMock).not.toHaveBeenCalled()
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('DEGRADED MODE'))
+        // Kept: the second launch still carries the stored record into its identity kill.
+        const withRecord = killStaleDaemonMock.mock.calls.filter(
+          (call) => (call as unknown[])[5] === PREDECESSOR_RECORD
+        )
+        expect(withRecord).toHaveLength(2)
+        warn.mockRestore()
+      }
+    )
+
+    it("F2: a stale record whose pid was reused by an unrelated process is 'mismatch': the record is cleared, nothing is killed, and the launcher proceeds", async () => {
+      modelOptions = {}
+      const mod = await importFresh()
+      await leaveUnprovenPredecessor(mod)
+      checkDaemonHealthMock.mockResolvedValue('rejected')
+      inspectDaemonProcessIdentityMock.mockResolvedValue('mismatch')
+      // The endpoint is answered by the CURRENT daemon, so killStaleDaemon reports a survivor; the pid verdict decides, not that.
+      killStaleDaemonMock.mockResolvedValueOnce({ killed: false, liveOwnerSurvived: true })
+      killStaleDaemonMock.mockResolvedValue({ killed: true, liveOwnerSurvived: false })
+      forkMock.mockImplementation(() => readyChild())
+      const launcher = spawnerInstances[0].launcher as Launcher
+
+      const launching = launcher('/fake/socket', '/fake/token')
+      await vi.advanceTimersByTimeAsync(30_000)
+      vi.useRealTimers()
+      await launching
+      await launcher('/fake/socket', '/fake/token')
+
+      expect((killStaleDaemonMock.mock.calls[0] as unknown[] | undefined)?.[5]).toBe(
+        PREDECESSOR_RECORD
+      )
+      expect(
+        killStaleDaemonMock.mock.calls
+          .slice(1)
+          .every((call) => (call as unknown[])[5] === undefined)
+      ).toBe(true)
+      expect(forkMock).toHaveBeenCalled()
     })
 
     it('does nothing extra once step 3 proved the predecessor gone (the stored record is cleared)', async () => {
@@ -1617,6 +1692,42 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
       expect(releaseRestartExitHoldMock.mock.calls).toEqual([
         [{ mode: 'announce', epoch: expect.any(Number) }]
       ])
+    })
+
+    it('F3: a throwing rebind still reinstates, releases (handback) and schedules the recovery, in that order', async () => {
+      const mod = await initWithActive(['pty-1'])
+      const trace: string[] = []
+      rebindLocalProviderListenersMock.mockImplementationOnce(() => {
+        trace.push('rebind')
+        throw new Error('rebind blew up')
+      })
+      adapterInstances[0].reinstateAfterFailedRestart.mockImplementation(() =>
+        trace.push('reinstate')
+      )
+      adapterInstances[0].recoverRestartCasualties.mockImplementation(() => trace.push('recover'))
+      releaseRestartExitHoldMock.mockImplementation(async (options) => {
+        trace.push(`release:${options.mode}`)
+      })
+      ensureRunningOverrides.push(async () => {
+        throw new Error('respawn failed')
+      })
+
+      await expect(mod.restartDaemon()).rejects.toThrow()
+
+      expect(trace).toEqual(['rebind', 'reinstate', 'release:handback', 'recover'])
+    })
+
+    it('F7: a failure before the hold began reinstates and exits (nothing was captured), and never hands back', async () => {
+      const mod = await initWithActive(['pty-1'])
+      awaitRestartSpawnDrainMock.mockRejectedValueOnce(new Error('drain blew up'))
+
+      await expect(mod.restartDaemon()).rejects.toThrow('drain blew up')
+
+      expect(beginRestartExitHoldMock).not.toHaveBeenCalled()
+      expect(adapterInstances[0].reinstateAfterFailedRestart).toHaveBeenCalledTimes(1)
+      expect(adapterInstances[0].recoverRestartCasualties).not.toHaveBeenCalled()
+      expect(adapterInstances[0].adoptRestartCasualties).not.toHaveBeenCalled()
+      expect(releaseRestartExitHoldMock.mock.calls).toEqual([[{ mode: 'exit' }]])
     })
 
     it('T4: the respawn quiesce runs after the retire and before step 3; a pending respawn holds the shutdown RPC back', async () => {

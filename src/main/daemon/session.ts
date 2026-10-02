@@ -655,6 +655,19 @@ export class Session {
     this.dispose()
   }
 
+  /** Dispose route after a Windows tree kill already took the root: wait for the physical exit and release the handle WITHOUT
+   *  signalling the root pid again (node-pty frees that pid as soon as the process exits, so a second kill could hit a stranger). */
+  async waitForExitAndDisposeSubprocess(): Promise<void> {
+    if (this._state !== 'exited' && !this._isTerminating) {
+      this._isTerminating = true
+      this.releaseProducerPause({ resume: true })
+    }
+    if (this._state !== 'exited') {
+      await this.waitForPhysicalExit(IMMEDIATE_KILL_PHYSICAL_EXIT_TIMEOUT_MS)
+    }
+    this.dispose()
+  }
+
   /** Shared teardown for dispose()/forceKillAndDisposeSubprocess(). Does NOT set `_state` — the
    *  caller owns that after capturing pre-flip invariants (see the wasTerminating capture in dispose). */
   #teardownSubprocess(): void {

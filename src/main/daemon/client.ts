@@ -21,9 +21,9 @@ import { addNodePtyRecoveryHint } from './node-pty-error-hints'
 import { isProcessIntegrityLevel } from '../../shared/host-integrity-types'
 import { decodeDaemonResponseError } from './daemon-errors'
 
-const CONNECT_TIMEOUT_MS = 5000
+export const CONNECT_TIMEOUT_MS = 5000
 const CONNECTION_ATTEMPT_WAIT_MS = CONNECT_TIMEOUT_MS * 4
-const REQUEST_TIMEOUT_MS = 30000
+export const REQUEST_TIMEOUT_MS = 30000
 
 export type DaemonClientOptions = {
   socketPath: string

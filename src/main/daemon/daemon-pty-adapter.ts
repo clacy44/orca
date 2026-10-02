@@ -2875,6 +2875,13 @@ export class DaemonPtyAdapter implements IPtyProvider {
   private finishDaemonLossRecovery(aliveSessionIds: Set<string>): void {
     // Why: a casualty is decided by explicit teardown (noteSessionTornDown), not by activeSessionIds,
     // which a concurrent listProcesses prune also empties.
+    // Why: a handed-back id the inventory finds ALIVE never died (the restart failed before killing it), so it is no
+    // casualty and must be writable again, or its first keystroke is rejected and every pane remounts.
+    for (const id of this.deathCandidates.keys()) {
+      if (aliveSessionIds.has(id) && this.auditedCasualtyIds.delete(id)) {
+        this.clearSessionAwaitingDaemonRecovery(id)
+      }
+    }
     const sessions = [...this.deathCandidates]
       .filter(([id]) => !aliveSessionIds.has(id))
       .map(([id, incarnationId]) => ({

@@ -6,6 +6,7 @@ import { shutdownTerminalHostSessions } from './terminal-host-session-shutdown'
 type FakeSession = Session & {
   forceKillAndDisposeSubprocess: ReturnType<typeof vi.fn>
   disposeSubprocess: ReturnType<typeof vi.fn>
+  waitForExitAndDisposeSubprocess: ReturnType<typeof vi.fn>
 }
 
 function fakeSession(pid: number, alive: boolean): FakeSession {
@@ -16,7 +17,10 @@ function fakeSession(pid: number, alive: boolean): FakeSession {
     forceKillAndDisposeSubprocess: vi.fn(async () => {
       session.isAlive = false
     }),
-    disposeSubprocess: vi.fn()
+    disposeSubprocess: vi.fn(),
+    waitForExitAndDisposeSubprocess: vi.fn(async () => {
+      session.isAlive = false
+    })
   }
   return session as unknown as FakeSession
 }
@@ -133,5 +137,84 @@ describe('shutdownTerminalHostSessions: win32 descendant sweep before the root f
 
     expect(session.forceKillAndDisposeSubprocess).toHaveBeenCalledTimes(1)
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('reason=sweep_failed'))
+  })
+
+  describe('F5: no second PID-based kill after the tree kill took the root', () => {
+    const own = {
+      platform: 'win32',
+      verifyTreeKillTarget: async (): Promise<'own'> => 'own'
+    } as const
+    const taskkill = (exitCode: number | null) => vi.fn(async () => ({ exitCode }))
+
+    it('(i) taskkill exit 0 goes straight to the dispose wait, with no PID force-kill, and logs the branch', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const session = fakeSession(50564, true)
+
+      await shutdownTerminalHostSessions(new Map([['s1', session]]), undefined, {
+        ...own,
+        killWindowsTree: taskkill(0)
+      })
+
+      expect(session.forceKillAndDisposeSubprocess).not.toHaveBeenCalled()
+      expect(session.waitForExitAndDisposeSubprocess).toHaveBeenCalledTimes(1)
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('branch=await_exit'))
+    })
+
+    it.each([
+      ['a non-zero taskkill exit', 128],
+      ['a taskkill that never ran to an exit', null]
+    ])('(ii) %s keeps the PID force-kill and logs the branch', async (_name, exitCode) => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const session = fakeSession(50564, true)
+
+      await shutdownTerminalHostSessions(new Map([['s1', session]]), undefined, {
+        ...own,
+        killWindowsTree: taskkill(exitCode)
+      })
+
+      expect(session.forceKillAndDisposeSubprocess).toHaveBeenCalledTimes(1)
+      expect(session.waitForExitAndDisposeSubprocess).not.toHaveBeenCalled()
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('branch=force_kill'))
+    })
+
+    it('a throwing taskkill keeps the PID force-kill', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const session = fakeSession(50564, true)
+
+      await shutdownTerminalHostSessions(new Map([['s1', session]]), undefined, {
+        ...own,
+        killWindowsTree: async () => {
+          throw new Error('boom')
+        }
+      })
+
+      expect(session.forceKillAndDisposeSubprocess).toHaveBeenCalledTimes(1)
+    })
+
+    it('a foreign root never runs taskkill and keeps the PID force-kill', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const session = fakeSession(50564, true)
+      const killWindowsTree = taskkill(0)
+
+      await shutdownTerminalHostSessions(new Map([['s1', session]]), undefined, {
+        platform: 'win32',
+        verifyTreeKillTarget: async (): Promise<'foreign'> => 'foreign',
+        killWindowsTree
+      })
+
+      expect(killWindowsTree).not.toHaveBeenCalled()
+      expect(session.forceKillAndDisposeSubprocess).toHaveBeenCalledTimes(1)
+    })
+
+    it('a custom sweep that reports nothing keeps the PID force-kill', async () => {
+      const session = fakeSession(50564, true)
+
+      await shutdownTerminalHostSessions(new Map([['s1', session]]), undefined, {
+        platform: 'win32',
+        sweep: async () => {}
+      })
+
+      expect(session.forceKillAndDisposeSubprocess).toHaveBeenCalledTimes(1)
+    })
   })
 })

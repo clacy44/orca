@@ -790,6 +790,34 @@ describe('DaemonPtyAdapter restart handback (FX-3)', () => {
     })
   })
 
+  it('F6: an id the handback recovery finds ALIVE has its awaiting-recovery mark cleared: input is accepted and nothing remounts', async () => {
+    const a = makeAdapter({ isRecoverySuppressed: () => true })
+    seedActive(a, ['s1'])
+    // The restart failed before killing anything: the daemon is still there, and so are its sessions.
+    a.retireForRestart()
+    a.fanoutSyntheticExits(-1)
+    a.reinstateAfterFailedRestart()
+    fake.aliveSessionIds = ['s1']
+    // The fake's notify returns nothing; a real connected client reports delivery.
+    ;(fake as unknown as { notify: () => boolean }).notify = () => true
+    const unavailable: string[] = []
+    a.onWriteUnavailable(({ id }) => unavailable.push(id))
+    a.adoptRestartCasualties([{ id: 's1', incarnationId: 'inc-s1' }])
+    const awaiting = (a as unknown as { sessionsAwaitingDaemonRecovery: Set<string> })
+      .sessionsAwaitingDaemonRecovery
+    expect(awaiting.has('s1')).toBe(true)
+
+    a.recoverRestartCasualties()
+    await flush()
+
+    expect(awaiting.has('s1')).toBe(false)
+
+    expect(lost).toEqual([])
+    expect(() => a.write('s1', 'typed')).not.toThrow()
+    expect(unavailable).toEqual([])
+    expect(a.isAuditedCasualty('s1')).toBe(false)
+  })
+
   it('T12: the casualty mark is cleared on attach and on teardown', async () => {
     const a = makeAdapter({ isRecoverySuppressed: () => true })
     restartShaped(a)

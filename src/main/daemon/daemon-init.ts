@@ -21,6 +21,7 @@ import { DAEMON_EXIT_ENDPOINT_OCCUPIED } from './daemon-endpoint-ownership'
 import {
   DAEMON_RPC_SHUTDOWN_PROCESS_EXIT_WAIT_MS,
   DAEMON_SELF_SHUTDOWN_WAIT_MS,
+  DAEMON_STARTUP_MS,
   RESTART_RESPAWN_QUIESCE_MS
 } from './restart-duration-bounds'
 import {
@@ -44,6 +45,7 @@ import {
   getDaemonLaunchIdentity,
   checkDaemonHealth,
   isDaemonStaleForCurrentBundle,
+  inspectDaemonProcessIdentity,
   killStaleDaemon,
   parseDaemonPidFile,
   type MacDaemonTccAttributionHealth,
@@ -1096,7 +1098,7 @@ function createOutOfProcessLauncher(
 
         timer = setTimeout(() => {
           void fail(new Error('Daemon startup timed out'))
-        }, 10000)
+        }, DAEMON_STARTUP_MS)
 
         child.on('message', onReadyMessage)
         child.on('error', onStartupError)
@@ -1631,21 +1633,25 @@ async function runRestartDaemon(): Promise<RestartDaemonResult> {
         await releaseRestartExitHold({ mode: 'exit' })
       } else {
         // Why this order (O1-O4): do NOT tidy.
-        // O1 rebind first: the recovery's emit must find the crash binding on the provider that is still authoritative.
-        rebindLocalProviderListeners()
-        // O2 reinstate before the kick: a retired adapter's withDaemonRetry rethrows instead of respawning.
-        currentOnly.reinstateAfterFailedRestart()
-        // O3 one synchronous block (release, currency filter, adopt, declined exits, settle; no await inside): no exit can land between release and settle.
-        await releaseRestartExitHold({
-          mode: 'handback',
-          adopt: (held) => {
-            const adoptable = held.filter(({ id }) => adapterOwnedIds.has(id))
-            const refused = currentOnly.adoptRestartCasualties(adoptable)
-            return [...refused, ...held.filter(({ id }) => !adapterOwnedIds.has(id))]
-          }
-        })
-        // O4 kick only after the window settled: relaunches the recovery triggers must find the spawn fence open.
-        currentOnly.recoverRestartCasualties()
+        try {
+          // O1 rebind first: the recovery's emit must find the crash binding on the provider that is still authoritative.
+          rebindLocalProviderListeners()
+        } finally {
+          // Why finally: a throwing rebind must still reinstate and settle the window, or fenced spawns hang until the next press.
+          // O2 reinstate before the kick: a retired adapter's withDaemonRetry rethrows instead of respawning.
+          currentOnly.reinstateAfterFailedRestart()
+          // O3 one synchronous block (release, currency filter, adopt, declined exits, settle; no await inside): no exit can land between release and settle.
+          await releaseRestartExitHold({
+            mode: 'handback',
+            adopt: (held) => {
+              const adoptable = held.filter(({ id }) => adapterOwnedIds.has(id))
+              const refused = currentOnly.adoptRestartCasualties(adoptable)
+              return [...refused, ...held.filter(({ id }) => !adapterOwnedIds.has(id))]
+            }
+          })
+          // O4 kick only after the window settled: relaunches the recovery triggers must find the spawn fence open.
+          currentOnly.recoverRestartCasualties()
+        }
       }
     }
   }
@@ -1843,9 +1849,23 @@ async function settleUnprovenPredecessor(opts: {
     undefined,
     record
   )
-  if (killOutcome.liveOwnerSurvived) {
-    recordPredecessorStage('survived', { pid })
-    return 'survived'
+  // Why PID evidence only: "killStaleDaemon reported no survivor" also describes a LIVE process whose identity could not be
+  // read (a win32 CIM timeout, EPERM) behind a dead endpoint, and "survivor" can describe the endpoint's NEW owner while the
+  // recorded pid was recycled. The record is cleared only on proof of exit (ESRCH) or a 'mismatch' verdict; anything else keeps it.
+  if (isProcessAlive(pid)) {
+    const verdict = await inspectDaemonProcessIdentity(
+      pid,
+      opts.socketPath,
+      opts.tokenPath,
+      record.startedAtMs
+    )
+    if (verdict !== 'mismatch') {
+      recordPredecessorStage('survived', { pid, identity: verdict })
+      return 'survived'
+    }
+    recordPredecessorStage('pid_reused', { pid })
+    unprovenPredecessor = null
+    return 'gone'
   }
   recordPredecessorStage('killed', { pid, killed: killOutcome.killed })
   unprovenPredecessor = null
