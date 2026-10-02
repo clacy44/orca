@@ -53,7 +53,12 @@ describe('D-30a arm H: the sweep arms hostReanchor on a dead manifest chair only
 
   function seed(
     db: Database.Database,
-    opts: { paneKey?: string; generation?: string; processIncarnation?: string | null } = {}
+    opts: {
+      paneKey?: string
+      generation?: string
+      processIncarnation?: string | null
+      agentType?: string
+    } = {}
   ): string {
     const paneKey = opts.paneKey ?? PANE
     insertAgent(db, {
@@ -66,7 +71,7 @@ describe('D-30a arm H: the sweep arms hostReanchor on a dead manifest chair only
     recordLaunch(db, {
       hostId: HOST_ID,
       paneKey,
-      agentType: 'claude',
+      agentType: opts.agentType ?? 'claude',
       sessionId: `sess-${paneKey}`,
       launchGeneration: opts.generation ?? PRIOR_GEN,
       executionHostId: EXEC_HOST_ID,
@@ -362,6 +367,93 @@ describe('D-30a arm H: the sweep arms hostReanchor on a dead manifest chair only
     )
     expect(outcome.kind).toBe('layer1')
     expect(internalArg(ensure).hostReanchor).toBe(true)
+  })
+
+  it('(n) the leaf persisted ptyId is a different pty, live in the round with no stamped paneKey: relaunched with no flag and no note', async () => {
+    const db = rawDb()
+    const paneKey = seed(db)
+    const ensure = ensureMock(paneKey)
+    const outcome = await runOne(
+      baseDeps(orchestrationDb!, {
+        ensureAgentSession: ensure,
+        isManifestChairPane: async () => true,
+        getPersistedPtyIdForLeaf: () => 'pty-other'
+      }),
+      paneKey,
+      emptyInventory({ allLivePtyIds: new Set(['pty-other']) })
+    )
+    expect(outcome.kind).toBe('layer1')
+    expect(ensure).toHaveBeenCalledTimes(1)
+    expect('hostReanchor' in internalArg(ensure)).toBe(false)
+    expect(reanchorNotes(db)).toHaveLength(0)
+  })
+
+  it('(n2) the leaf persisted ptyId is not live in the round: still armed', async () => {
+    const db = rawDb()
+    const paneKey = seed(db)
+    const ensure = ensureMock(paneKey)
+    await runOne(
+      baseDeps(orchestrationDb!, {
+        ensureAgentSession: ensure,
+        isManifestChairPane: async () => true,
+        getPersistedPtyIdForLeaf: () => 'pty-gone'
+      }),
+      paneKey,
+      emptyInventory({ allLivePtyIds: new Set(['pty-other']) })
+    )
+    expect(internalArg(ensure).hostReanchor).toBe(true)
+  })
+
+  it.each([true, false])(
+    '(o) the sweep ensureAgentSession call is pinned in full (armed=%s)',
+    async (armed) => {
+      const db = rawDb()
+      const paneKey = seed(db)
+      db.prepare(
+        `UPDATE agent_launch_sessions SET pref_model = 'claude-opus-4-8', pref_effort = 'max' WHERE pane_key = ?`
+      ).run(paneKey)
+      const launchRow = orchestrationDb!.newestLaunchForPane(HOST_ID, paneKey)!
+      const ensure = ensureMock(paneKey)
+      await runOne(
+        baseDeps(orchestrationDb!, {
+          ensureAgentSession: ensure,
+          isManifestChairPane: async () => armed
+        }),
+        paneKey
+      )
+      const ticket = JSON.stringify({
+        predecessorPaneKey: paneKey,
+        sessionId: `sess-${paneKey}`,
+        executionHostId: EXEC_HOST_ID,
+        launchGeneration: LAUNCH_GEN,
+        launchSeq: launchRow.seq
+      })
+      expect(ensure).toHaveBeenCalledTimes(1)
+      expect(ensure.mock.calls[0]).toEqual([
+        {
+          kind: 'explicit',
+          worktree: 'id:wt-1',
+          agent: 'claude',
+          providerSession: { key: 'session_id', id: `sess-${paneKey}` },
+          presentation: 'background',
+          placement: { tabId: 'tab1', leafId: '00000000-0000-4000-8000-0000000c0001' },
+          launchPreferences: { model: 'claude-opus-4-8', effort: 'max' }
+        },
+        {},
+        {
+          restoreProvenance: { kind: 'host-restore', ticket },
+          ...(armed ? { hostReanchor: true } : {})
+        }
+      ])
+    }
+  )
+
+  it('(o2) the request agent is the launch row agent type', async () => {
+    const db = rawDb()
+    const paneKey = seed(db, { agentType: 'codex' })
+    const ensure = ensureMock(paneKey)
+    await runOne(baseDeps(orchestrationDb!, { ensureAgentSession: ensure }), paneKey)
+    expect(ensure.mock.calls[0]![0]).toMatchObject({ agent: 'codex' })
   })
 
   it('(e) chair whose agent identity is still in the inventory: skipped_daemon_survived, ensureAgentSession never called', async () => {

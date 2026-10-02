@@ -19,6 +19,7 @@ import type {
 } from '../runtime/orchestration/restore-sweep-decision'
 import type { SweepOccupant } from '../runtime/orchestration/restore-sweep-evidence'
 import type { RestoreTicketId } from '../runtime/restore-ticket-registry'
+import { parsePaneKey } from '../../shared/stable-pane-id'
 import type { RestoreSweepDeps } from './restore-sweep-types'
 
 /** True iff the sweep's own verdict is "this chair's agent process is gone": a real identity absent from
@@ -47,6 +48,18 @@ export async function sweepReanchorEligible(
     return false
   }
   try {
+    // Why: the leaf's persisted ptyId live in the round may be the chair, whether or not it carries a stamped paneKey.
+    const parsed = parsePaneKey(paneKey)
+    const persistedPtyId = parsed
+      ? deps.getPersistedPtyIdForLeaf(
+          parsed.tabId,
+          parsed.leafId,
+          deps.getOrchestrationCompatibilityHostId()
+        )
+      : undefined
+    if (persistedPtyId !== undefined && inventory.allLivePtyIds.has(persistedPtyId)) {
+      return false
+    }
     // Why: R315 withholds the re-anchor from a peer-owned pane (daemon-loss-chair-verdict.ts).
     if (deps.getOrchestrationDb().findPeerOwnedAttachmentForPaneKey(paneKey) !== undefined) {
       return false
