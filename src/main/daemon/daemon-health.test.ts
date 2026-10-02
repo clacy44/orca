@@ -529,6 +529,87 @@ describe('killStaleDaemon ownership decisions', () => {
   })
 
   it.skipIf(process.platform === 'win32')(
+    'kills a pre-captured owner by identity after its pid record was already unlinked',
+    async () => {
+      const child = spawn(
+        process.execPath,
+        [
+          '-e',
+          "console.log('ready'); setInterval(() => {}, 1000)",
+          'daemon-entry',
+          socketPath,
+          tokenPath
+        ],
+        { stdio: ['ignore', 'pipe', 'ignore'] }
+      )
+      await new Promise<void>((resolve, reject) => {
+        child.once('error', reject)
+        child.stdout?.once('data', () => resolve())
+      })
+      const childPid = child.pid as number
+      const childExited = new Promise<void>((resolve) => child.once('exit', () => resolve()))
+      const capturedOwner = {
+        pid: childPid,
+        startedAtMs: null,
+        entryPath: null,
+        appVersion: null,
+        launchNonce: 'daemon-a',
+        linuxStartTicks: null,
+        bootId: null,
+        spawnerExecPath: null
+      }
+
+      try {
+        expect(existsSync(getDaemonPidPath(dir))).toBe(false)
+        await expect(
+          killStaleDaemon(dir, socketPath, tokenPath, undefined, undefined, capturedOwner)
+        ).resolves.toEqual({ killed: true, liveOwnerSurvived: false })
+        await childExited
+      } finally {
+        try {
+          process.kill(childPid, 'SIGKILL')
+        } catch {
+          // Already gone.
+        }
+        await childExited
+      }
+    }
+  )
+
+  it.skipIf(process.platform === 'win32')(
+    'never signals a pre-captured owner whose pid now belongs to an unrelated process',
+    async () => {
+      const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true)
+      try {
+        await expect(
+          killStaleDaemon(
+            dir,
+            socketPath,
+            tokenPath,
+            undefined,
+            { probeEndpoint: async () => 'missing' },
+            {
+              pid: process.pid,
+              startedAtMs: null,
+              entryPath: null,
+              appVersion: null,
+              launchNonce: 'daemon-a',
+              linuxStartTicks: null,
+              bootId: null,
+              spawnerExecPath: null
+            }
+          )
+        ).resolves.toMatchObject({ killed: false, liveOwnerSurvived: false })
+        expect(
+          killSpy.mock.calls.filter(([, sig]) => sig === 'SIGTERM' || sig === 'SIGKILL')
+        ).toEqual([])
+      } finally {
+        killSpy.mockRestore()
+      }
+    }
+  )
+
+  it.skipIf(process.platform === 'win32')(
     "leaves a replacement's pid record after killing the recorded owner",
     async () => {
       const child = spawn(

@@ -885,7 +885,10 @@ export async function killStaleDaemon(
   socketPath: string,
   tokenPath: string,
   protocolVersion = PROTOCOL_VERSION,
-  testHooks?: StaleDaemonKillTestHooks
+  testHooks?: StaleDaemonKillTestHooks,
+  // Why: a daemon that was told to shut down may unlink its own record while still alive, so the
+  // caller reads it before the shutdown and passes it back; the identity checks below still apply.
+  capturedOwner?: ParsedDaemonPid | null
 ): Promise<StaleDaemonKillOutcome> {
   const probeEndpoint = testHooks?.probeEndpoint ?? probeSocketConnect
   const pidPath = getDaemonPidPath(runtimeDir, protocolVersion)
@@ -896,7 +899,7 @@ export async function killStaleDaemon(
   // by the time we get there.
   let recordedOwner: ParsedDaemonPid | null = null
   try {
-    const parsedPid = parseDaemonPidFile(readFileSync(pidPath, 'utf8'))
+    const parsedPid = capturedOwner ?? parseDaemonPidFile(readFileSync(pidPath, 'utf8'))
     recordedOwner = parsedPid
     const identity = parsedPid
       ? await inspectDaemonProcessIdentity(

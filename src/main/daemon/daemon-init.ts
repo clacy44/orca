@@ -41,7 +41,8 @@ import {
   isDaemonStaleForCurrentBundle,
   killStaleDaemon,
   parseDaemonPidFile,
-  type MacDaemonTccAttributionHealth
+  type MacDaemonTccAttributionHealth,
+  type ParsedDaemonPid
 } from './daemon-health'
 import {
   collectPinnedDaemonVersions,
@@ -98,6 +99,10 @@ function logDaemonMilestone(event: string, details: Record<string, unknown> = {}
 // Why: extra hello+listSessions probes (~5s each) giving a wedged-but-connectable daemon ~60s grace to answer and keep its live sessions before a permanent wedge (#8689) is replaced; raise only alongside the fail-open cap.
 export const WEDGED_DAEMON_GRACE_RETRIES = 11
 const DAEMON_SELF_SHUTDOWN_WAIT_MS = 5_000
+// Why: after `shutdown` the daemon closes its listener and may drop its PID record while it is still
+// disposing an unkillable PTY (two 8 s waits), so "endpoint gone" is not "process gone".
+const DAEMON_RPC_SHUTDOWN_PROCESS_EXIT_WAIT_MS = 20_000
+const DAEMON_PROCESS_EXIT_POLL_MS = 100
 // R117 FIX 4: the daemon fork previously ran at V8's unset default (~4GB on a 64-bit host) — the
 // field cliff (two OOM deaths, diag-r117-2026-09-08.md). Pinning it moves the cliff to a
 // predictable point far above SOCKET_WRITE_CEILING_BYTES (64MB, daemon-stream-data-batcher.ts) on
@@ -1637,6 +1642,8 @@ export async function cleanupDaemonForProtocol(
     return { cleaned: false, killedCount: 0 }
   }
 
+  // Why before the RPC: the daemon may unlink its PID record while still alive, leaving no owner to find afterwards.
+  const predecessor = readDaemonPidRecord(pidPath)
   const client = new DaemonClient({ socketPath, tokenPath, protocolVersion })
   let killedCount = 0
   let didRequestShutdown = false
@@ -1674,6 +1681,13 @@ export async function cleanupDaemonForProtocol(
       // Never fork a replacement while the old incarnation may still own the endpoint or be disposing terminal children.
       throw new Error('Timed out waiting for daemon self-shutdown')
     }
+    await confirmPredecessorProcessGone({
+      predecessor,
+      runtimeDir,
+      socketPath,
+      tokenPath,
+      protocolVersion
+    })
     return { cleaned: true, killedCount }
   }
 
@@ -1695,6 +1709,81 @@ async function waitForDaemonEndpointExit(socketPath: string): Promise<boolean> {
     await new Promise((resolve) => setTimeout(resolve, 50))
   }
   return !(await probeSocket(socketPath))
+}
+
+function readDaemonPidRecord(pidPath: string): ParsedDaemonPid | null {
+  try {
+    return parseDaemonPidFile(readFileSync(pidPath, 'utf8'))
+  } catch {
+    return null
+  }
+}
+
+// Why: only ESRCH proves exit; EPERM means the process exists under another user.
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException | null)?.code !== 'ESRCH'
+  }
+}
+
+async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (isProcessAlive(pid)) {
+    if (Date.now() >= deadline) {
+      return false
+    }
+    await new Promise((resolve) => setTimeout(resolve, DAEMON_PROCESS_EXIT_POLL_MS))
+  }
+  return true
+}
+
+function recordPredecessorStage(stage: string, data: Record<string, string | number | boolean>) {
+  console.warn(`[daemon] Restart predecessor: stage=${stage}`)
+  recordDurableCrashBreadcrumb('daemon_restart_predecessor', { stage, ...data })
+}
+
+// Why: step 4 must never fork a replacement beside a predecessor that is still alive and disposing.
+async function confirmPredecessorProcessGone(opts: {
+  predecessor: ParsedDaemonPid | null
+  runtimeDir: string
+  socketPath: string
+  tokenPath: string
+  protocolVersion: number
+}): Promise<void> {
+  const { predecessor } = opts
+  if (!predecessor) {
+    recordPredecessorStage('unverified', { reason: 'no_pid_record' })
+    return
+  }
+  const { pid } = predecessor
+  if (!isProcessAlive(pid)) {
+    return
+  }
+  const waitStartedAt = Date.now()
+  recordPredecessorStage('waiting', { pid, timeoutMs: DAEMON_RPC_SHUTDOWN_PROCESS_EXIT_WAIT_MS })
+  if (await waitForProcessExit(pid, DAEMON_RPC_SHUTDOWN_PROCESS_EXIT_WAIT_MS)) {
+    recordPredecessorStage('exited', { pid, waitedMs: Date.now() - waitStartedAt })
+    return
+  }
+  recordPredecessorStage('escalating', { pid, waitedMs: Date.now() - waitStartedAt })
+  const killOutcome = await killStaleDaemon(
+    opts.runtimeDir,
+    opts.socketPath,
+    opts.tokenPath,
+    opts.protocolVersion,
+    undefined,
+    predecessor
+  )
+  if (killOutcome.liveOwnerSurvived) {
+    recordPredecessorStage('survived', { pid })
+    throw new DaemonEndpointOwnershipError(
+      'Daemon cleanup aborted: the existing daemon could not be confirmed stopped'
+    )
+  }
+  recordPredecessorStage('killed', { pid, killed: killOutcome.killed })
 }
 
 function legacyDaemonProcessMayBeAlive(runtimeDir: string, protocolVersion: number): boolean {

@@ -747,4 +747,31 @@ describe('R326 repair: restart kill paths (pty.ts wiring)', () => {
       expect(exitsSent()).toEqual([])
     })
   })
+
+  describe('R331: the restart announcement applies the plan bound', () => {
+    it('a hung plan on the restart path settles within planMs; the held pane gets its exit and the window settles', async () => {
+      _setRestartTimeoutsForTest({ planMs: 50 })
+      vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const { runtime, provider } = setUp([{ id: 'pty-g', incarnationId: FIRST_INCARNATION }])
+      vi.spyOn(runtime, 'planDaemonLossRecovery').mockImplementation(() => new Promise(() => {}))
+      await handlers.get('pty:spawn')!(mainWindowIpcEvent, spawnArgs(TAB, LEAF))
+
+      beginRestartExitHold(['pty-g'])
+      provider.fireExit({ id: 'pty-g', code: -1, incarnationId: FIRST_INCARNATION })
+      swapProvider(createProvider(runtime, []))
+      const outcome = await Promise.race([
+        releaseRestartExitHold({ mode: 'announce', epoch: 1201 }).then(() => 'settled'),
+        tick(2_000).then(() => 'hung')
+      ])
+
+      expect(outcome).toBe('settled')
+      expect(exitsSent()).toEqual(['pty-g'])
+      expect(noticesSent()).toEqual([])
+      expect(breadcrumbData('daemon_sessions_lost')).toMatchObject({
+        planTimedOut: true,
+        cause: 'manual_restart'
+      })
+      expect(await handlers.get('pty:hasPty')!(mainWindowIpcEvent, { id: 'pty-g' })).not.toBeNull()
+    })
+  })
 })
