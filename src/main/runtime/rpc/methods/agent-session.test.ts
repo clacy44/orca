@@ -169,6 +169,27 @@ describe('agent session RPC methods', () => {
     expect(runtime.ensureAgentSession).not.toHaveBeenCalled()
   })
 
+  it('rejects a wire request that names hostReanchor (host-only, never on the wire)', async () => {
+    const runtime = runtimeStub()
+    const dispatcher = new RpcDispatcher({
+      runtime: runtime as unknown as OrcaRuntimeService,
+      methods: AGENT_SESSION_METHODS
+    })
+
+    const response = await dispatcher.dispatch(
+      request('terminal.ensureAgentSession', {
+        kind: 'explicit',
+        worktree: 'id:worktree-1',
+        agent: 'claude',
+        providerSession: { key: 'session_id', id: 'provider-session-1' },
+        hostReanchor: true
+      })
+    )
+
+    expect(response).toMatchObject({ ok: false, error: { code: 'invalid_argument' } })
+    expect(runtime.ensureAgentSession).not.toHaveBeenCalled()
+  })
+
   it('rejects opaque fresh-launch authority and malformed operation IDs', async () => {
     const runtime = runtimeStub()
     const dispatcher = new RpcDispatcher({

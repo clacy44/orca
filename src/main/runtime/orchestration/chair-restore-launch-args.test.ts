@@ -14,6 +14,7 @@ import { _resetRestoreSweepLockForTest } from '../restore-sweep-lock'
 import { runChairsRestore, type ChairsRestoreExecutorDeps } from './chairs-restore-execute'
 import { resolveResumeTranscript } from '../../startup/resolve-resume-transcript'
 import type { ChairsManifest } from './chairs-manifest'
+import { DAEMON_DEATH_REANCHOR_PROMPT } from '../../../shared/daemon-death-reanchor-prompt'
 
 vi.mock('electron', () => ({
   BrowserWindow: { fromId: vi.fn(() => null) },
@@ -168,5 +169,88 @@ describe('S10-22a Wave 2: chairs restore launches with manifest launchArgs', () 
     const autocompactIndex = seenCommands[0].indexOf('--autocompact')
     expect(hostDefaultIndex).toBeGreaterThan(-1)
     expect(autocompactIndex).toBeGreaterThan(hostDefaultIndex)
+  })
+
+  // D-30a / Ruling 36 (T5): `orca chairs restore` is human-initiated and stays prompt-free.
+  it('a chairs restore never passes hostReanchor to ensureAgentSession and its command carries no re-anchor prompt', async () => {
+    db = new OrchestrationDb(':memory:')
+    tempHome = await mkdtemp(join(tmpdir(), 'orca-chairs-no-reanchor-'))
+    process.env.HOME = tempHome
+    const projectDir = join(tempHome, '.claude', 'projects', 'proj')
+    await mkdir(projectDir, { recursive: true })
+    await writeFile(
+      join(projectDir, 'sess-no-reanchor.jsonl'),
+      `${JSON.stringify({ type: 'user', message: { role: 'user', content: 'hi' } })}\n`
+    )
+
+    const runtime = new OrcaRuntimeService({
+      getSettings: () => ({
+        disabledTuiAgents: [],
+        agentCmdOverrides: {},
+        agentDefaultArgs: {},
+        agentDefaultEnv: {}
+      }),
+      getWorkspaceSession: () => ({ tabsByWorktree: {} }),
+      getAllWorktreeMeta: () => ({}),
+      getRepos: () => []
+    } as never)
+    runtime.setOrchestrationDb(db)
+    stubLaunchScope(runtime)
+
+    const seenCommands: string[] = []
+    runtime.setPtyController({
+      spawn: async (opts) => {
+        seenCommands.push((opts as { command: string }).command)
+        const id = randomUUID()
+        const admission = (opts as { launchAdmission?: { kind: string } }).launchAdmission
+        if (admission && admission.kind === 'host-resume') {
+          const hostResume = admission as unknown as {
+            sessionId: string
+            predecessorPaneKey: string | null
+            executionHostId: string
+            launchGeneration: string
+            evidence?: 'sweep_record' | 'host_restore'
+          }
+          const { tabId, leafId } = opts as { tabId: string; leafId: string }
+          db.recordLaunch({
+            hostId: runtime.getOrchestrationCompatibilityHostId(),
+            paneKey: `${tabId}:${leafId}`,
+            agentType: 'claude',
+            sessionId: hostResume.sessionId,
+            launchGeneration: hostResume.launchGeneration,
+            executionHostId: hostResume.executionHostId,
+            evidence: hostResume.evidence ?? 'sweep_record',
+            ...(hostResume.predecessorPaneKey
+              ? { supersedePaneKey: hostResume.predecessorPaneKey }
+              : {})
+          })
+        }
+        return { id, isReattach: false }
+      },
+      write: () => true,
+      kill: () => true,
+      getForegroundProcess: async () => null
+    })
+
+    const ensureSpy = vi.spyOn(runtime, 'ensureAgentSession')
+    const manifest: ChairsManifest = {
+      version: 1,
+      chairs: [
+        {
+          name: 'chair-no-reanchor',
+          worktree: 'id:wt-1',
+          agent: 'claude',
+          conversationId: 'sess-no-reanchor'
+        }
+      ]
+    }
+    const summary = await runChairsRestore(manifest, buildDeps(runtime, db))
+    expect(summary.rows[0]).toMatchObject({ kind: 'launch', ok: true })
+    expect(ensureSpy).toHaveBeenCalledTimes(1)
+    const internal = ensureSpy.mock.calls[0]![2] as object
+    expect(internal).toMatchObject({ restoreProvenance: { kind: 'host-restore' } })
+    expect('hostReanchor' in internal).toBe(false)
+    expect(seenCommands).toHaveLength(1)
+    expect(seenCommands[0]).not.toContain(DAEMON_DEATH_REANCHOR_PROMPT)
   })
 })

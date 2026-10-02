@@ -16,11 +16,19 @@ import {
 } from './tui-agent-startup-shell'
 
 describe('DAEMON_DEATH_REANCHOR_PROMPT', () => {
-  it('holds the fixed text and stays within [A-Za-z .-]', () => {
+  it('holds the fixed text on one line and stays within [A-Za-z .-]', () => {
     expect(DAEMON_DEATH_REANCHOR_PROMPT).toBe(
-      'Orca relaunched this session because its terminal host process died. Run your re-anchor ritual now. Then check your ledger for subagents or background tasks that were running when the host died and resume any that did not finish.'
+      'Orca relaunched this session because the process running it ended when its terminal host died or when Orca or the machine restarted. Treat any tool call or subagent or background shell that was in flight as not finished. Run your re-anchor ritual now. Then check your ledger for that work and resume what did not finish.'
     )
+    expect(DAEMON_DEATH_REANCHOR_PROMPT).not.toContain('\n')
     expect(DAEMON_DEATH_REANCHOR_PROMPT_CHARSET.test(DAEMON_DEATH_REANCHOR_PROMPT)).toBe(true)
+  })
+
+  it('names the restart and the in-flight work', () => {
+    expect(DAEMON_DEATH_REANCHOR_PROMPT).toContain('terminal host died')
+    expect(DAEMON_DEATH_REANCHOR_PROMPT).toContain('Orca or the machine restarted')
+    expect(DAEMON_DEATH_REANCHOR_PROMPT).toContain('in flight as not finished')
+    expect(DAEMON_DEATH_REANCHOR_PROMPT).toContain('re-anchor ritual')
   })
 
   it('has no quote, expansion or operator character in any shell family', () => {

@@ -15,6 +15,7 @@ import { extractOscTitleScanTail } from '../../shared/osc-title-scan-tail'
 import { isBareAgentNameTitle, isLaunchCommandEchoTitle } from '../../shared/shell-authored-title'
 import { planWorktreeSortOrderUpdates } from '../../shared/worktree/sort-order-update'
 import { isArtifactSharingEnabled } from '../../shared/artifact-sharing-gate'
+import { DAEMON_DEATH_REANCHOR_PROMPT } from '../../shared/daemon-death-reanchor-prompt'
 import { MobileSessionTerminalMaterializationLedger } from './mobile-session-terminal-materialization-ledger'
 import { sortDirEntries } from '../../shared/file-name-sort'
 import { isServerDriveListRequest, listWindowsDrives } from './windows-drive-listing'
@@ -28515,7 +28516,7 @@ export class OrcaRuntimeService {
   async ensureAgentSession(
     request: RuntimeEnsureAgentSessionRequest,
     caller: RuntimeAgentSessionRpcCaller = {},
-    internal?: { restoreProvenance?: TerminalRestoreProvenance }
+    internal?: { restoreProvenance?: TerminalRestoreProvenance; hostReanchor?: true }
   ): Promise<RuntimeEnsureAgentSessionResult> {
     if (request.kind === 'automatic') {
       // Legacy renderer sleep records are migration evidence, not host authority.
@@ -28624,6 +28625,12 @@ export class OrcaRuntimeService {
       agentEnv: laneScoped.agentEnv,
       ompResumeFilePath: request.ompResumeFilePath,
       sessionOptions: this.toAgentSessionOptions(launchPreferences),
+      // Why: host-only (INV-P-021); a chair relaunched by the startup sweep resumes unattended (D-30a).
+      ...(internal?.hostReanchor === true &&
+      internal.restoreProvenance?.kind === 'host-restore' &&
+      request.agent === 'claude'
+        ? { resumePrompt: DAEMON_DEATH_REANCHOR_PROMPT }
+        : {}),
       platform,
       shell,
       isRemote

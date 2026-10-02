@@ -38,7 +38,7 @@ const ALLOWLISTED_FILES = new Set([
 ])
 
 const FORBIDDEN_FIELD_RE =
-  /['"]?\b(launchAdmission|sequencedAgentLine|restoreProvenance)\b['"]?\s*[?]?\s*:/
+  /['"]?\b(launchAdmission|sequencedAgentLine|restoreProvenance|hostReanchor)\b['"]?\s*[?]?\s*:/
 
 function listSourceFiles(dir: string): string[] {
   if (!existsSync(dir)) {
@@ -202,5 +202,19 @@ describe('S10-21a C12, D-R105: the brace matcher is not fooled by a brace inside
     const bodies = zodSchemaBodies(source)
     expect(bodies).toHaveLength(1)
     expect(bodies[0]).toContain('launchAdmission')
+  })
+})
+
+describe('D-30a, Ruling 36: hostReanchor is a non-wire, in-process-only field', () => {
+  it('the fence regex names hostReanchor, so a zod schema carrying it is an offense', () => {
+    const source = `
+      const schema = z.strictObject({
+        agent: z.string(),
+        hostReanchor: z.literal(true).optional()
+      })
+    `
+    const bodies = zodSchemaBodies(source)
+    expect(bodies).toHaveLength(1)
+    expect(bodies[0]!.match(FORBIDDEN_FIELD_RE)?.[1]).toBe('hostReanchor')
   })
 })

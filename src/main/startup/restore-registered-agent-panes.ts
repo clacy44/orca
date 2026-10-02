@@ -35,14 +35,10 @@
 // [C7b, Addendum 22(v)] Before minting, if the pane's newest admission audit (any generation) is
 // UNRECORDED and at least as new as the row's own `recorded_at`, the row is superseded — Layer 3,
 // audited, never resumed over a newer unrecorded conversation.
-import {
-  launchPreferencesFromRow,
-  type AgentLaunchSessionRow
-} from '../runtime/orchestration/agent-launch-sessions'
+import type { AgentLaunchSessionRow } from '../runtime/orchestration/agent-launch-sessions'
 import { resolveIncumbentDeath } from '../runtime/incumbent-death'
 import type { OrchestrationDb } from '../runtime/orchestration/db'
 import { LOCAL_EXECUTION_HOST_ID } from '../../shared/execution-host'
-import type { ResumableTuiAgent } from '../../shared/agent-session-resume'
 import type { RuntimeEnsureAgentSessionResult } from '../../shared/agent-session-host-authority'
 import { parsePaneKey } from '../../shared/stable-pane-id'
 import { acquireRestoreSweepLock, releaseRestoreSweepLock } from '../runtime/restore-sweep-lock'
@@ -60,6 +56,7 @@ import { recordDesktopMaterialize } from './restore-sweep-desktop-materialize-qu
 import { restoreSweepDeferralFamily } from './restore-sweep-deferral-family'
 import { notifyPaneBestEffort } from './restore-sweep-pane-notice'
 import { applyResumePreflight } from './restore-sweep-resume-preflight-arm'
+import { ensureRestoredAgentSession, sweepReanchorEligible } from './restore-sweep-reanchor'
 import {
   auditSweepSkip,
   auditLayer3,
@@ -210,6 +207,14 @@ export async function restoreOneRegisteredPane(
   if (preflightOutcome) {
     return preflightOutcome
   }
+  const armed = await sweepReanchorEligible(
+    deps,
+    launchRow,
+    occupant,
+    occupantLiveness,
+    early,
+    inventory
+  )
   const ticket = deps.mintRestoreTicket({
     predecessorPaneKey: launchRow.pane_key,
     sessionId: launchRow.session_id,
@@ -219,25 +224,20 @@ export async function restoreOneRegisteredPane(
   })
   let created: RuntimeEnsureAgentSessionResult
   try {
-    created = await deps.ensureAgentSession(
-      {
-        kind: 'explicit',
-        worktree: `id:${worktreeId}`,
-        agent: launchRow.agent_type as ResumableTuiAgent,
-        providerSession: { key: 'session_id', id: launchRow.session_id },
-        presentation: 'background',
-        placement: offerPlacement ? { tabId: parsed.tabId, leafId: parsed.leafId } : undefined,
-        launchPreferences: launchPreferencesFromRow(launchRow)
-      },
-      {},
-      { restoreProvenance: { kind: 'host-restore', ticket } }
+    created = await ensureRestoredAgentSession(
+      deps,
+      agentId,
+      launchRow,
+      worktreeId,
+      offerPlacement ? parsed : undefined,
+      ticket,
+      armed
     )
   } catch (err) {
     const reasonCode = `ensure_agent_session_failed: ${err instanceof Error ? err.message : String(err)}`
     auditLayer3(db, hostId, launchRow.pane_key, agentId, reasonCode)
     return { kind: 'layer3', reasonCode }
   }
-  const newPaneKey = created.terminal.paneKey ?? launchRow.pane_key
   const newTerminalHandle = created.terminal.handle
   const newProcessIncarnation = deps.getTerminalProcessIncarnation(newTerminalHandle)
   const result = db.rebindRestoredPane({
@@ -248,7 +248,7 @@ export async function restoreOneRegisteredPane(
       launchGeneration: currentGeneration,
       launchSeq: launchRow.seq
     },
-    newPaneKey,
+    newPaneKey: created.terminal.paneKey ?? launchRow.pane_key,
     newTerminalHandle,
     hostId,
     executionHostId: created.terminal.executionHostId ?? launchRow.execution_host_id,
