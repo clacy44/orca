@@ -627,6 +627,41 @@ describe('FX-3: failed restart hands casualties back (pty.ts wiring)', () => {
       })
     })
 
+    it.each([
+      ['queueMicrotask', (fn: () => void) => queueMicrotask(fn)],
+      ['setTimeout 0', (fn: () => void) => void setTimeout(fn, 0)]
+    ])(
+      'O3 synchrony: an exit queued (%s) before the handback release never reaches the renderer before adopt',
+      async (_label, queueExit) => {
+        const { provider } = setUp([{ id: 'pty-c', incarnationId: FIRST_INCARNATION }])
+        await handlers.get('pty:spawn')!(mainWindowIpcEvent, spawnArgs(TAB, LEAF))
+        const adopted: string[] = []
+        let exitsInsideAdopt: string[] | undefined
+        let queuedExitFired = false
+        beginRestartExitHold(['pty-c'])
+        provider.fireExit({ id: 'pty-c', code: -1, incarnationId: FIRST_INCARNATION })
+        queueExit(() => {
+          queuedExitFired = true
+          provider.fireExit({ id: 'pty-c', code: -1, incarnationId: FIRST_INCARNATION })
+        })
+
+        await releaseRestartExitHold({
+          mode: 'handback',
+          adopt: (held) => {
+            exitsInsideAdopt = exitsSent()
+            adopted.push(...held.map(({ id }) => id))
+            return []
+          }
+        })
+        await tick()
+
+        expect(exitsInsideAdopt).toEqual([])
+        expect(adopted).toEqual(['pty-c'])
+        // Positive control: the queued exit did fire, so the inside-adopt check is not vacuous. Where a post-settle exit is routed is not pinned here.
+        expect(queuedExitFired).toBe(true)
+      }
+    )
+
     it('T14 control: exit mode, the shape 10z.7 shipped, gives the pane its renderer exit', async () => {
       const { provider } = setUp([{ id: 'pty-c', incarnationId: FIRST_INCARNATION }])
       await handlers.get('pty:spawn')!(mainWindowIpcEvent, spawnArgs(TAB, LEAF))

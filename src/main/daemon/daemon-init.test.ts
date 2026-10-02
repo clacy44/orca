@@ -1783,6 +1783,38 @@ describe('daemon-init: runRestartDaemon (7-step sequence)', () => {
       expect(trace).toEqual(['rebind', 'reinstate', 'release:handback', 'recover'])
     })
 
+    it.each([
+      ['queueMicrotask', (fn: () => void) => queueMicrotask(fn)],
+      ['setTimeout 0', (fn: () => void) => void setTimeout(fn, 0)]
+    ])(
+      'O3 adjacency: nothing queued by reinstate (%s) runs before the handback release starts',
+      async (_label, queueMarker) => {
+        const mod = await initWithActive(['pty-1'])
+        let marker = false
+        let markerAtRelease: boolean | undefined
+        adapterInstances[0].reinstateAfterFailedRestart.mockImplementation(() =>
+          queueMarker(() => {
+            marker = true
+          })
+        )
+        releaseRestartExitHoldMock.mockImplementation(async (options) => {
+          if (options.mode === 'handback') {
+            markerAtRelease = marker
+          }
+        })
+        ensureRunningOverrides.push(async () => {
+          throw new Error('respawn failed')
+        })
+
+        await expect(mod.restartDaemon()).rejects.toThrow('respawn failed')
+
+        expect(markerAtRelease).toBe(false)
+        // Positive control: the queued marker does run once the restart has yielded.
+        await new Promise((resolve) => setTimeout(resolve, 5))
+        expect(marker).toBe(true)
+      }
+    )
+
     it('N4: a throwing handback rebind never replaces the restart failure the user sees; it is logged, recorded and attached as cause', async () => {
       const mod = await initWithActive(['pty-1'])
       const error = vi.spyOn(console, 'error').mockImplementation(() => {})
