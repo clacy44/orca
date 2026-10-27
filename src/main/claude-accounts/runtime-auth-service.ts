@@ -31,7 +31,7 @@ import { parseWslUncPath } from '../../shared/wsl-paths'
 import { resolveLocalAccountRuntimeTarget } from '../../shared/local-account-runtime'
 import { getDefaultWslDistro, getWslHome, toWindowsWslPath } from '../wsl'
 import { buildEncodedWslBashCommand } from '../wsl-bash-command'
-import { hasLiveClaudePtys } from './live-pty-gate'
+import { hasLiveClaudePtys, hasLiveClaudePtysForAccount } from './live-pty-gate'
 import { isOauthTokenExpiring, refreshClaudeOauthCredentials } from './oauth-refresh'
 import { ClaudeRuntimePathResolver } from './runtime-paths'
 import {
@@ -65,6 +65,19 @@ export type ClaudeRuntimeAuthPreparation = {
   managedRefreshDeferredByLivePty?: boolean
   provenance: string
 }
+
+/**
+ * What the inactive-account usage fetch may do with a managed account's credentials.
+ *
+ * `skip`: the account became active (or was removed) — the caller must drop its fetch, the
+ * active-account path owns the credentials now. `missing`: nothing usable is stored.
+ * `ready`: use `credentialsJson`; `deferred` means the access token is still expiring but a
+ * live Claude terminal may hold the single-use refresh token, so no refresh was attempted.
+ */
+export type ClaudeInactiveUsageCredentials =
+  | { status: 'skip' }
+  | { status: 'missing' }
+  | { status: 'ready'; credentialsJson: string; deferred: boolean }
 
 type ClaudeSystemDefaultSnapshot = {
   credentialsJson: string | null
@@ -170,6 +183,44 @@ export class ClaudeRuntimeAuthService {
     await this.serializeMutation(() =>
       this.doSyncForCurrentSelection(target ?? this.getDefaultAccountSelectionTarget())
     )
+  }
+
+  /**
+   * Credentials for a NON-active managed account's usage fetch, refreshing an expiring token
+   * safely. Runs inside the same mutation queue as the active-account sync so the single-use
+   * refresh token is never rotated by two paths at once, and defers while a live Claude
+   * terminal may hold it. The rotated token is written back before this resolves, so an
+   * aborted usage fetch afterwards cannot lose it.
+   */
+  async prepareInactiveCredentialsForUsage(
+    accountId: string
+  ): Promise<ClaudeInactiveUsageCredentials> {
+    return this.serializeMutation(async () => {
+      const settings = this.store.getSettings()
+      const selection = normalizeClaudeRuntimeSelection(settings)
+      const selectedIds = new Set<string | null>([selection.host, ...Object.values(selection.wsl)])
+      if (selectedIds.has(accountId)) {
+        return { status: 'skip' }
+      }
+      const account = settings.claudeManagedAccounts.find((entry) => entry.id === accountId)
+      if (!account) {
+        return { status: 'skip' }
+      }
+      // Why: re-read inside the lock — a sync or switch-in may have rotated the token since the
+      // caller last looked, and refreshing a stale copy would burn the rotated refresh token.
+      const credentialsJson = await this.readManagedCredentials(account)
+      if (!credentialsJson || !this.isValidCredentialsJsonObject(credentialsJson)) {
+        return { status: 'missing' }
+      }
+      if (!isOauthTokenExpiring(credentialsJson)) {
+        return { status: 'ready', credentialsJson, deferred: false }
+      }
+      if (hasLiveClaudePtysForAccount(accountId)) {
+        return { status: 'ready', credentialsJson, deferred: true }
+      }
+      const refreshed = await this.refreshManagedAccountTokenIfNeeded(account, credentialsJson)
+      return { status: 'ready', credentialsJson: refreshed ?? credentialsJson, deferred: false }
+    })
   }
 
   async forceMaterializeCurrentSelectionForRollback(): Promise<void> {

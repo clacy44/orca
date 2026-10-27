@@ -2730,6 +2730,11 @@ void app.whenReady().then(async () => {
         wslLinuxAuthPath: account.wslLinuxAuthPath
       }))
   })
+  // Why: the only sanctioned way to refresh a non-active account's token for a usage fetch — it
+  // serializes with the active-account sync and defers while a live Claude terminal holds it.
+  rateLimits.setInactiveClaudeCredentialsPreparer((accountId) =>
+    claudeRuntimeAuth!.prepareInactiveCredentialsForUsage(accountId)
+  )
   rateLimits.setInactiveCodexAccountsResolver(() => {
     const settings = store!.getSettings()
     const activeIds = new Set(

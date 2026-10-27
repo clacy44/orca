@@ -1406,20 +1406,20 @@ describe('fetchClaudeRateLimits', () => {
     })
     mkdirSync(ownedAuthPath, { recursive: true })
     writeFileSync(join(ownedAuthPath, '.orca-managed-claude-auth'), 'account-1\n', 'utf-8')
+    const refreshedCredentialsJson = JSON.stringify({
+      claudeAiOauth: {
+        accessToken: 'fresh-access',
+        refreshToken: 'fresh-refresh',
+        expiresAt: Date.now() + 3_600_000
+      }
+    })
     vi.mocked(readManagedClaudeKeychainCredentials).mockResolvedValueOnce(staleCredentialsJson)
     netFetchMock.mockResolvedValueOnce(
       new Response(
         JSON.stringify({
-          access_token: 'fresh-access',
-          expires_in: 3600,
-          refresh_token: 'fresh-refresh'
+          five_hour: { utilization: 12 },
+          seven_day: { utilization: 34 }
         }),
-        { status: 200 }
-      )
-    )
-    netFetchMock.mockResolvedValueOnce(
-      new Response(
-        JSON.stringify({ five_hour: { utilization: 12 }, seven_day: { utilization: 34 } }),
         {
           status: 200
         }
@@ -1452,21 +1452,30 @@ describe('fetchClaudeRateLimits', () => {
 
     const result = await fetchManagedAccountUsage(
       { id: 'account-1', managedAuthPath: ownedAuthPath },
-      { allowUsagePanelSupplement: true }
+      {
+        allowUsagePanelSupplement: true,
+        // Why: the refresh itself now happens only inside the runtime-auth-service callback.
+        prepareCredentials: async () => ({
+          status: 'ready',
+          credentialsJson: refreshedCredentialsJson,
+          deferred: false
+        })
+      }
     )
 
     const stagedCredentialsJson = vi.mocked(writeActiveClaudeKeychainCredentials).mock.calls[0]?.[0]
-    expect(result.fableWeekly).toMatchObject({ usedPercent: 58, resetDescription: '3d' })
+    expect(result.fableWeekly).toMatchObject({
+      usedPercent: 58,
+      resetDescription: '3d'
+    })
     expect(JSON.parse(stagedCredentialsJson ?? '{}')).toMatchObject({
       claudeAiOauth: {
         accessToken: 'fresh-access',
         refreshToken: 'fresh-refresh'
       }
     })
-    expect(writeManagedClaudeKeychainCredentials).toHaveBeenCalledWith(
-      'account-1',
-      stagedCredentialsJson
-    )
+    // The fetcher no longer persists rotations itself; the callback owns the write-back.
+    expect(writeManagedClaudeKeychainCredentials).not.toHaveBeenCalled()
   })
 
   it('does not merge macOS inactive Fable preview when usage windows belong to another account', async () => {
@@ -1517,55 +1526,176 @@ describe('fetchClaudeRateLimits', () => {
     expect(result.fableWeekly).toBeNull()
   })
 
-  it('refreshes and persists an expiring inactive account before fetching usage', async () => {
-    setPlatform('linux')
-    tempDir = mkdtempSync(join(tmpdir(), 'orca-claude-fetcher-'))
-    appGetPathMock.mockReturnValue(tempDir)
-    const ownedAuthPath = join(tempDir, 'claude-accounts', 'account-1', 'auth')
-    mkdirSync(ownedAuthPath, { recursive: true })
-    writeFileSync(join(ownedAuthPath, '.orca-managed-claude-auth'), 'account-1\n', 'utf-8')
-    const credentialsPath = join(ownedAuthPath, '.credentials.json')
-    writeFileSync(
-      credentialsPath,
-      JSON.stringify({
-        claudeAiOauth: {
-          accessToken: 'stale-access',
-          refreshToken: 'stale-refresh',
-          expiresAt: Date.now() - 60_000
-        }
-      }),
-      'utf-8'
-    )
+  describe('inactive managed account refresh and errors', () => {
+    function setupLinuxAccount(credentials: Record<string, unknown>): {
+      authPath: string
+      credentialsPath: string
+    } {
+      setPlatform('linux')
+      tempDir = mkdtempSync(join(tmpdir(), 'orca-claude-fetcher-'))
+      appGetPathMock.mockReturnValue(tempDir)
+      const authPath = join(tempDir, 'claude-accounts', 'account-1', 'auth')
+      mkdirSync(authPath, { recursive: true })
+      writeFileSync(join(authPath, '.orca-managed-claude-auth'), 'account-1\n', 'utf-8')
+      const credentialsPath = join(authPath, '.credentials.json')
+      writeFileSync(credentialsPath, JSON.stringify({ claudeAiOauth: credentials }), 'utf-8')
+      return { authPath, credentialsPath }
+    }
 
-    // First net.fetch call is the OAuth refresh (token endpoint); second is the
-    // usage fetch with the refreshed access token.
-    netFetchMock.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        access_token: 'fresh-access',
-        expires_in: 3600,
-        refresh_token: 'fresh-refresh'
+    const expiredCredentials = {
+      accessToken: 'stale-access',
+      refreshToken: 'stale-refresh',
+      expiresAt: Date.now() - 60_000
+    }
+
+    it('uses the credentials the prepare callback returns for an expiring inactive account', async () => {
+      const { authPath, credentialsPath } = setupLinuxAccount(expiredCredentials)
+      const prepareCredentials = vi.fn(async () => ({
+        status: 'ready' as const,
+        credentialsJson: JSON.stringify({
+          claudeAiOauth: {
+            accessToken: 'fresh-access',
+            refreshToken: 'fresh-refresh',
+            expiresAt: Date.now() + 3_600_000
+          }
+        }),
+        deferred: false
+      }))
+      netFetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          five_hour: { utilization: 12 },
+          seven_day: { utilization: 34 }
+        })
       })
-    })
-    netFetchMock.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ five_hour: { utilization: 12 }, seven_day: { utilization: 34 } })
+
+      const result = await fetchManagedAccountUsage(
+        { id: 'account-1', managedAuthPath: authPath },
+        { prepareCredentials }
+      )
+
+      expect(result.status).toBe('ok')
+      expect(prepareCredentials).toHaveBeenCalledWith('account-1')
+      // Refresh happens only via the callback: the token endpoint is never contacted here and the
+      // fetcher does not write managed storage itself.
+      expect(netFetchMock.mock.calls.some(([url]) => String(url).includes('/v1/oauth/token'))).toBe(
+        false
+      )
+      expect(JSON.parse(readFileSync(credentialsPath, 'utf-8')).claudeAiOauth.accessToken).toBe(
+        'stale-access'
+      )
+      const usageCall = netFetchMock.mock.calls.find(([url]) =>
+        String(url).includes('/api/oauth/usage')
+      )
+      expect(usageCall?.[1]?.headers?.Authorization).toBe('Bearer fresh-access')
     })
 
-    const result = await fetchManagedAccountUsage({
-      id: 'account-1',
-      managedAuthPath: ownedAuthPath
+    it('never refreshes an expiring inactive token when no prepare callback is supplied', async () => {
+      const { authPath } = setupLinuxAccount(expiredCredentials)
+      netFetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          five_hour: { utilization: 12 },
+          seven_day: { utilization: 34 }
+        })
+      })
+
+      await fetchManagedAccountUsage({
+        id: 'account-1',
+        managedAuthPath: authPath
+      })
+
+      expect(netFetchMock).toHaveBeenCalledTimes(1)
+      expect(String(netFetchMock.mock.calls[0]?.[0])).toContain('/api/oauth/usage')
     })
 
-    expect(result.status).toBe('ok')
-    // Rotated token persisted back to managed storage.
-    const persisted = JSON.parse(readFileSync(credentialsPath, 'utf-8'))
-    expect(persisted.claudeAiOauth.accessToken).toBe('fresh-access')
-    expect(persisted.claudeAiOauth.refreshToken).toBe('fresh-refresh')
-    // Usage fetch used the fresh access token.
-    const usageCall = netFetchMock.mock.calls.find(([url]) =>
-      String(url).includes('/api/oauth/usage')
-    )
-    expect(usageCall?.[1]?.headers?.Authorization).toBe('Bearer fresh-access')
+    it('returns a rate-limited result with retryAtMs on 429 instead of throwing', async () => {
+      const { authPath } = setupLinuxAccount({
+        accessToken: 'good',
+        expiresAt: Date.now() + 3_600_000
+      })
+      netFetchMock.mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: { message: 'rate limited' } }), {
+          status: 429,
+          headers: { 'retry-after': '120' }
+        })
+      )
+      const before = Date.now()
+
+      const result = await fetchManagedAccountUsage({
+        id: 'account-1',
+        managedAuthPath: authPath
+      })
+
+      expect(result.status).toBe('error')
+      expect(result.usageMetadata?.failureKind).toBe('rate-limited')
+      expect(result.usageMetadata?.retryAtMs).toBeGreaterThanOrEqual(before + 120_000)
+      expect(result.usageMetadata?.retryAtMs).toBeLessThanOrEqual(Date.now() + 120_000)
+    })
+
+    it('classifies a 401 as stale-token when nothing deferred the refresh', async () => {
+      const { authPath } = setupLinuxAccount({
+        accessToken: 'good',
+        expiresAt: Date.now() + 3_600_000
+      })
+      netFetchMock.mockResolvedValueOnce(new Response('{}', { status: 401 }))
+
+      const result = await fetchManagedAccountUsage({
+        id: 'account-1',
+        managedAuthPath: authPath
+      })
+
+      expect(result.status).toBe('error')
+      expect(result.usageMetadata?.failureKind).toBe('stale-token')
+      expect(result.usageMetadata?.deferredByLiveClaudeSession).toBeUndefined()
+    })
+
+    it('reports the live-session deferral on a 401 when the callback deferred the refresh', async () => {
+      const { authPath } = setupLinuxAccount(expiredCredentials)
+      const prepareCredentials = vi.fn(async () => ({
+        status: 'ready' as const,
+        credentialsJson: JSON.stringify({ claudeAiOauth: expiredCredentials }),
+        deferred: true
+      }))
+      netFetchMock.mockResolvedValueOnce(new Response('{}', { status: 401 }))
+
+      const result = await fetchManagedAccountUsage(
+        { id: 'account-1', managedAuthPath: authPath },
+        { prepareCredentials }
+      )
+
+      expect(result.status).toBe('error')
+      expect(result.usageMetadata?.failureKind).toBe('deferred-by-live-session')
+      expect(result.usageMetadata?.deferredByLiveClaudeSession).toBe(true)
+      // The deferral made no refresh call of its own.
+      expect(netFetchMock.mock.calls.some(([url]) => String(url).includes('/v1/oauth/token'))).toBe(
+        false
+      )
+    })
+
+    it('drops the fetch when the callback says the account became active', async () => {
+      const { authPath } = setupLinuxAccount(expiredCredentials)
+
+      const result = await fetchManagedAccountUsage(
+        { id: 'account-1', managedAuthPath: authPath },
+        { prepareCredentials: async () => ({ status: 'skip' }) }
+      )
+
+      expect(result.status).toBe('error')
+      expect(netFetchMock).not.toHaveBeenCalled()
+    })
+
+    it('marks missing credentials with the missing-credentials failure kind', async () => {
+      const { authPath } = setupLinuxAccount({ refreshToken: 'only-refresh' })
+      writeFileSync(join(authPath, '.credentials.json'), 'null', 'utf-8')
+
+      const result = await fetchManagedAccountUsage({
+        id: 'account-1',
+        managedAuthPath: authPath
+      })
+
+      expect(result.error).toBe('No credentials')
+      expect(result.usageMetadata?.failureKind).toBe('missing-credentials')
+    })
   })
 })

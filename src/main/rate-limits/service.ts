@@ -12,7 +12,12 @@ import type { InactiveClaudeAccountInfo } from './claude-fetcher'
 import { mapClaudeUsageWindow } from './claude-usage-window'
 import type { ClaudeStatusLineRateLimits } from '../../shared/claude-statusline-rate-limits'
 import { consumeCodexRateLimitResetCredit, fetchCodexRateLimits } from './codex-fetcher'
-import type { ClaudeRuntimeAuthPreparation } from '../claude-accounts/runtime-auth-service'
+import type {
+  ClaudeInactiveUsageCredentials,
+  ClaudeRuntimeAuthPreparation
+} from '../claude-accounts/runtime-auth-service'
+import { classifyClaudeOAuthUsageError } from './claude-usage-error-classification'
+import { OAuthUsageError } from './claude-oauth-usage-error'
 import type { NetworkProxySettings } from '../../shared/network-proxy'
 import {
   normalizeClaudeAccountSelectionTarget,
@@ -103,6 +108,9 @@ const INACTIVE_FETCH_DEBOUNCE_MS = 60 * 1000 // 60 seconds — debounce fetch-on
 // account's live credential home; pace them out instead of bursting every
 // account the moment the switcher opens.
 const INACTIVE_CODEX_PROBE_STAGGER_MS = 2_000
+// Why: each inactive Claude fetch may refresh a token and hits the same tight usage-endpoint
+// budget; pace them out instead of bursting every saved account at once.
+const INACTIVE_CLAUDE_FETCH_STAGGER_MS = 2_000
 const DEFERRED_STARTUP_ACTIVE_REFRESH_MS = 1000
 
 // Why: inactive account arrays are derived from provider caches on demand in getState()/pushToRenderer().
@@ -240,10 +248,15 @@ export class RateLimitService {
   private geminiCliOAuthEnabledResolver: GeminiCliOAuthEnabledResolver | null = null
   private inactiveClaudeAccountsResolver: (() => InactiveClaudeAccountInfo[]) | null = null
   private inactiveCodexAccountsResolver: (() => InactiveCodexAccountInfo[]) | null = null
+  private inactiveClaudeCredentialsPreparer:
+    | ((accountId: string) => Promise<ClaudeInactiveUsageCredentials>)
+    | null = null
   private networkProxySettingsResolver: (() => NetworkProxySettings) | null = null
   private inactiveClaudeCache = new Map<string, ProviderRateLimits>()
   private inactiveCodexCache = new Map<string, ProviderRateLimits>()
   private inactiveClaudeFetching = new Set<string>()
+  // Why: accounts whose last fetch was deferred behind a live Claude terminal; refetched on drain.
+  private inactiveClaudeDeferredIds = new Set<string>()
   private inactiveCodexFetching = new Set<string>()
   private lastInactiveClaudeFetchAt = 0
   private inactiveClaudeAccountsGeneration = 0
@@ -338,6 +351,12 @@ export class RateLimitService {
   setInactiveClaudeAccountsResolver(resolver: () => InactiveClaudeAccountInfo[]): void {
     this.inactiveClaudeAccountsResolver = resolver
     this.inactiveClaudeAccountsGeneration += 1
+  }
+
+  setInactiveClaudeCredentialsPreparer(
+    preparer: (accountId: string) => Promise<ClaudeInactiveUsageCredentials>
+  ): void {
+    this.inactiveClaudeCredentialsPreparer = preparer
   }
 
   setInactiveCodexAccountsResolver(resolver: () => InactiveCodexAccountInfo[]): void {
@@ -585,22 +604,37 @@ export class RateLimitService {
     // Why: "Waiting for Claude session" can only recover once no live claude
     // owns the credentials. Refetch on the last PTY exit instead of leaving
     // the stale terminal error up until the failure backoff elapses.
-    if (!this.state.claude?.usageMetadata?.deferredByLiveClaudeSession) {
-      return
+    if (this.state.claude?.usageMetadata?.deferredByLiveClaudeSession) {
+      this.activeFailureStreakByProvider.claude = 0
+      await this.fetchClaudeOnly({ force: true })
     }
-    this.activeFailureStreakByProvider.claude = 0
-    await this.fetchClaudeOnly({ force: true })
+    // Why: inactive accounts deferred behind the same terminals recover the same way, without
+    // waiting for the next poll or the open debounce.
+    if (this.inactiveClaudeDeferredIds.size > 0) {
+      await this.fetchInactiveClaudeAccountsOnOpen({
+        onlyAccountIds: new Set(this.inactiveClaudeDeferredIds)
+      })
+    }
   }
 
-  async fetchInactiveClaudeAccountsOnOpen(): Promise<void> {
-    if (Date.now() - this.lastInactiveClaudeFetchAt < INACTIVE_FETCH_DEBOUNCE_MS) {
+  async fetchInactiveClaudeAccountsOnOpen(options?: {
+    // Why: a drain-triggered refetch targets only the deferred accounts and bypasses the open debounce.
+    onlyAccountIds?: ReadonlySet<string>
+  }): Promise<void> {
+    const onlyAccountIds = options?.onlyAccountIds
+    if (
+      !onlyAccountIds &&
+      Date.now() - this.lastInactiveClaudeFetchAt < INACTIVE_FETCH_DEBOUNCE_MS
+    ) {
       return
     }
     this.pruneInactiveClaudeState()
     if (this.inactiveClaudeFetching.size > 0) {
       return
     }
-    const accounts = this.inactiveClaudeAccountsResolver?.() ?? []
+    const accounts = (this.inactiveClaudeAccountsResolver?.() ?? []).filter(
+      (account) => !onlyAccountIds || onlyAccountIds.has(account.id)
+    )
     if (accounts.length === 0) {
       return
     }
@@ -613,6 +647,7 @@ export class RateLimitService {
     }
     this.pushToRenderer()
 
+    let staggerNextFetch = false
     try {
       for (const account of accounts) {
         if (
@@ -627,10 +662,39 @@ export class RateLimitService {
           this.pushToRenderer()
           continue
         }
+        const cachedBeforeFetch = this.inactiveClaudeCache.get(account.id) ?? null
+        // Why: hitting the usage endpoint before its Retry-After expires burns the budget for
+        // nothing, and a recent ok snapshot needs no refetch (same floor as the active account).
+        if (
+          this.isRetryAfterActive(cachedBeforeFetch) ||
+          this.isFreshOkInactiveSnapshot(cachedBeforeFetch)
+        ) {
+          this.inactiveClaudeFetching.delete(account.id)
+          this.pushToRenderer()
+          continue
+        }
+        if (staggerNextFetch) {
+          await delayUnlessAborted(INACTIVE_CLAUDE_FETCH_STAGGER_MS, signal)
+          // Why: the account set can change while the stagger delay runs.
+          if (
+            signal.aborted ||
+            fetchGeneration !== this.inactiveClaudeAccountsGeneration ||
+            !this.isCurrentInactiveClaudeAccount(account.id)
+          ) {
+            this.inactiveClaudeFetching.delete(account.id)
+            if (!this.isCurrentInactiveClaudeAccount(account.id)) {
+              this.inactiveClaudeCache.delete(account.id)
+            }
+            this.pushToRenderer()
+            continue
+          }
+        }
+        staggerNextFetch = true
         try {
           const fresh = await fetchManagedAccountUsage(account, {
             allowUsagePanelSupplement: this.shouldAllowClaudeUsagePanelSupplement(),
             networkProxySettings: this.networkProxySettingsResolver?.(),
+            prepareCredentials: this.inactiveClaudeCredentialsPreparer ?? undefined,
             signal
           })
           if (
@@ -647,6 +711,11 @@ export class RateLimitService {
           }
           const cached = this.inactiveClaudeCache.get(account.id) ?? null
           this.inactiveClaudeCache.set(account.id, this.applyStalePolicy(fresh, cached))
+          if (fresh.usageMetadata?.failureKind === 'deferred-by-live-session') {
+            this.inactiveClaudeDeferredIds.add(account.id)
+          } else {
+            this.inactiveClaudeDeferredIds.delete(account.id)
+          }
         } catch (error) {
           // Why: per-account try/catch keeps one Keychain/network error from aborting the remaining accounts in the batch.
           if (
@@ -663,6 +732,7 @@ export class RateLimitService {
             // cached snapshot still shows (with an error) instead of the row
             // vanishing — loud degradation instead of a silent blank.
             const cachedOnError = this.inactiveClaudeCache.get(account.id) ?? null
+            const retryAfterMs = error instanceof OAuthUsageError ? error.retryAfterMs : null
             const errorSnapshot: ProviderRateLimits = {
               provider: 'claude',
               session: null,
@@ -670,7 +740,11 @@ export class RateLimitService {
               fableWeekly: null,
               updatedAt: Date.now(),
               error: error instanceof Error ? error.message : String(error),
-              status: 'error'
+              status: 'error',
+              usageMetadata: {
+                failureKind: classifyClaudeOAuthUsageError(error).failureKind,
+                ...(retryAfterMs ? { retryAtMs: Date.now() + retryAfterMs } : {})
+              }
             }
             this.inactiveClaudeCache.set(
               account.id,
@@ -682,7 +756,11 @@ export class RateLimitService {
         this.pushToRenderer()
       }
 
-      if (!signal.aborted && fetchGeneration === this.inactiveClaudeAccountsGeneration) {
+      if (
+        !onlyAccountIds &&
+        !signal.aborted &&
+        fetchGeneration === this.inactiveClaudeAccountsGeneration
+      ) {
         this.lastInactiveClaudeFetchAt = Date.now()
       }
     } finally {
@@ -792,7 +870,12 @@ export class RateLimitService {
     this.inactiveClaudeAccountsGeneration += 1
     this.inactiveClaudeCache.delete(accountId)
     this.inactiveClaudeFetching.delete(accountId)
+    this.inactiveClaudeDeferredIds.delete(accountId)
     this.pushToRenderer()
+  }
+
+  private isFreshOkInactiveSnapshot(limits: ProviderRateLimits | null): boolean {
+    return Boolean(limits?.status === 'ok' && Date.now() - limits.updatedAt < MIN_REFETCH_MS)
   }
 
   private isCurrentInactiveClaudeAccount(accountId: string): boolean {
@@ -819,6 +902,11 @@ export class RateLimitService {
     for (const accountId of this.inactiveClaudeFetching) {
       if (!currentIds.has(accountId)) {
         this.inactiveClaudeFetching.delete(accountId)
+      }
+    }
+    for (const accountId of this.inactiveClaudeDeferredIds) {
+      if (!currentIds.has(accountId)) {
+        this.inactiveClaudeDeferredIds.delete(accountId)
       }
     }
   }

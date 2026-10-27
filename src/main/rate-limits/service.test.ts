@@ -2,10 +2,11 @@
 stale-data handling, account-switch generation, and OpenCode config-change
 semantics covered in service.ts, which already carries the same pragma.
 Keeping them in one file makes the ordering contract reviewable as a unit. */
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { EventEmitter } from 'node:events'
 import type { ProviderRateLimits } from '../../shared/rate-limit-types'
 import { RateLimitService } from './service'
+import { OAuthUsageError } from './claude-oauth-usage-error'
 import { fetchClaudeRateLimits, fetchManagedAccountUsage } from './claude-fetcher'
 import { consumeCodexRateLimitResetCredit, fetchCodexRateLimits } from './codex-fetcher'
 import { fetchGeminiRateLimits } from './gemini-usage-fetcher'
@@ -2510,5 +2511,217 @@ describe('RateLimitService', () => {
 
       expect(fetchClaudeRateLimits).not.toHaveBeenCalled()
     })
+  })
+})
+
+describe('RateLimitService inactive Claude account fetch policy', () => {
+  const accountA = { id: 'account-a', managedAuthPath: '/tmp/account-a/auth' }
+  const accountB = { id: 'account-b', managedAuthPath: '/tmp/account-b/auth' }
+
+  function resetOpenDebounce(service: RateLimitService): void {
+    ;(service as unknown as { lastInactiveClaudeFetchAt: number }).lastInactiveClaudeFetchAt = 0
+  }
+
+  function rateLimited(retryAtMs: number): ProviderRateLimits {
+    return {
+      ...errorProvider('claude', 'Too many requests'),
+      usageMetadata: { failureKind: 'rate-limited', retryAtMs }
+    }
+  }
+
+  function deferredByLiveSession(): ProviderRateLimits {
+    return {
+      ...errorProvider('claude', 'Claude usage refresh is waiting for the live Claude terminal'),
+      usageMetadata: { failureKind: 'deferred-by-live-session', deferredByLiveClaudeSession: true }
+    }
+  }
+
+  function snapshotFor(
+    service: RateLimitService,
+    accountId: string
+  ): ProviderRateLimits | null | undefined {
+    return service.getState().inactiveClaudeAccounts.find((entry) => entry.accountId === accountId)
+      ?.rateLimits
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(fetchManagedAccountUsage).mockReset()
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'))
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('hands the fetcher the injected credentials preparer', async () => {
+    const service = new RateLimitService()
+    const preparer = vi.fn()
+    service.setInactiveClaudeAccountsResolver(() => [accountA])
+    service.setInactiveClaudeCredentialsPreparer(preparer)
+    vi.mocked(fetchManagedAccountUsage).mockResolvedValue(okProvider('claude', 10))
+
+    await service.fetchInactiveClaudeAccountsOnOpen()
+
+    expect(fetchManagedAccountUsage).toHaveBeenCalledWith(
+      accountA,
+      expect.objectContaining({ prepareCredentials: preparer })
+    )
+  })
+
+  it('skips an account whose cached Retry-After window is still active', async () => {
+    const service = new RateLimitService()
+    service.setInactiveClaudeAccountsResolver(() => [accountA])
+    vi.mocked(fetchManagedAccountUsage).mockResolvedValue(rateLimited(Date.now() + 10 * 60_000))
+
+    await service.fetchInactiveClaudeAccountsOnOpen()
+    expect(fetchManagedAccountUsage).toHaveBeenCalledTimes(1)
+
+    resetOpenDebounce(service)
+    await vi.advanceTimersByTimeAsync(5 * 60_000)
+    await service.fetchInactiveClaudeAccountsOnOpen()
+    expect(fetchManagedAccountUsage).toHaveBeenCalledTimes(1)
+    expect(service.getState().inactiveClaudeAccounts[0]?.isFetching).toBe(false)
+
+    // Once Retry-After has elapsed the account is fetched again.
+    resetOpenDebounce(service)
+    await vi.advanceTimersByTimeAsync(6 * 60_000)
+    await service.fetchInactiveClaudeAccountsOnOpen()
+    expect(fetchManagedAccountUsage).toHaveBeenCalledTimes(2)
+  })
+
+  it('still fetches the other accounts when one is inside its Retry-After window', async () => {
+    const service = new RateLimitService()
+    service.setInactiveClaudeAccountsResolver(() => [accountA, accountB])
+    vi.mocked(fetchManagedAccountUsage).mockImplementation(async (account) =>
+      account.id === 'account-a' ? rateLimited(Date.now() + 60 * 60_000) : okProvider('claude', 5)
+    )
+    const first = service.fetchInactiveClaudeAccountsOnOpen()
+    await vi.advanceTimersByTimeAsync(2_000)
+    await first
+    expect(fetchManagedAccountUsage).toHaveBeenCalledTimes(2)
+
+    resetOpenDebounce(service)
+    await vi.advanceTimersByTimeAsync(10 * 60_000)
+    const second = service.fetchInactiveClaudeAccountsOnOpen()
+    await vi.advanceTimersByTimeAsync(2_000)
+    await second
+
+    // A is gated by Retry-After; B's 5 minute freshness has lapsed.
+    const secondRoundIds = vi
+      .mocked(fetchManagedAccountUsage)
+      .mock.calls.slice(2)
+      .map(([account]) => account.id)
+    expect(secondRoundIds).toEqual(['account-b'])
+  })
+
+  it('skips an account whose ok snapshot is fresher than five minutes', async () => {
+    const service = new RateLimitService()
+    service.setInactiveClaudeAccountsResolver(() => [accountA])
+    vi.mocked(fetchManagedAccountUsage).mockImplementation(async () => okProvider('claude', 10))
+
+    await service.fetchInactiveClaudeAccountsOnOpen()
+    expect(fetchManagedAccountUsage).toHaveBeenCalledTimes(1)
+
+    resetOpenDebounce(service)
+    await vi.advanceTimersByTimeAsync(4 * 60_000)
+    await service.fetchInactiveClaudeAccountsOnOpen()
+    expect(fetchManagedAccountUsage).toHaveBeenCalledTimes(1)
+    // The kept snapshot is still served.
+    expect(snapshotFor(service, 'account-a')?.session?.usedPercent).toBe(10)
+
+    resetOpenDebounce(service)
+    await vi.advanceTimersByTimeAsync(2 * 60_000)
+    await service.fetchInactiveClaudeAccountsOnOpen()
+    expect(fetchManagedAccountUsage).toHaveBeenCalledTimes(2)
+  })
+
+  it('staggers account fetches about two seconds apart', async () => {
+    const service = new RateLimitService()
+    service.setInactiveClaudeAccountsResolver(() => [accountA, accountB])
+    vi.mocked(fetchManagedAccountUsage).mockImplementation(async () => okProvider('claude', 10))
+
+    const batch = service.fetchInactiveClaudeAccountsOnOpen()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fetchManagedAccountUsage).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(1_900)
+    expect(fetchManagedAccountUsage).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(200)
+    expect(fetchManagedAccountUsage).toHaveBeenCalledTimes(2)
+    await batch
+  })
+
+  it('does not stagger past an account it skipped', async () => {
+    const service = new RateLimitService()
+    service.setInactiveClaudeAccountsResolver(() => [accountA, accountB])
+    vi.mocked(fetchManagedAccountUsage).mockImplementation(async (account) =>
+      account.id === 'account-a' ? rateLimited(Date.now() + 60 * 60_000) : okProvider('claude', 5)
+    )
+    const first = service.fetchInactiveClaudeAccountsOnOpen()
+    await vi.advanceTimersByTimeAsync(2_000)
+    await first
+    vi.mocked(fetchManagedAccountUsage).mockClear()
+
+    resetOpenDebounce(service)
+    await vi.advanceTimersByTimeAsync(6 * 60_000)
+    await service.fetchInactiveClaudeAccountsOnOpen()
+
+    // Only B is fetched, so there is no pending stagger timer to wait out.
+    expect(fetchManagedAccountUsage).toHaveBeenCalledTimes(1)
+  })
+
+  it('gives a thrown error a failureKind, and retryAtMs from a thrown 429', async () => {
+    const service = new RateLimitService()
+    service.setInactiveClaudeAccountsResolver(() => [accountA, accountB])
+    vi.mocked(fetchManagedAccountUsage).mockImplementation(async (account) => {
+      if (account.id === 'account-a') {
+        throw new OAuthUsageError('Too many requests', 429, true, 120_000)
+      }
+      throw new Error('keychain locked')
+    })
+
+    const batch = service.fetchInactiveClaudeAccountsOnOpen()
+    await vi.advanceTimersByTimeAsync(2_000)
+    await batch
+
+    expect(snapshotFor(service, 'account-a')?.usageMetadata).toEqual({
+      failureKind: 'rate-limited',
+      retryAtMs: Date.now() + 120_000 - 2_000
+    })
+    expect(snapshotFor(service, 'account-b')?.usageMetadata?.failureKind).toBe('unknown')
+    expect(snapshotFor(service, 'account-b')?.usageMetadata?.retryAtMs).toBeUndefined()
+  })
+
+  it('refetches only the deferred accounts when the last live Claude pty drains', async () => {
+    const service = new RateLimitService()
+    service.setInactiveClaudeAccountsResolver(() => [accountA, accountB])
+    vi.mocked(fetchManagedAccountUsage).mockImplementation(async (account) =>
+      account.id === 'account-a' ? deferredByLiveSession() : okProvider('claude', 5)
+    )
+    const first = service.fetchInactiveClaudeAccountsOnOpen()
+    await vi.advanceTimersByTimeAsync(2_000)
+    await first
+    expect(snapshotFor(service, 'account-a')?.usageMetadata?.failureKind).toBe(
+      'deferred-by-live-session'
+    )
+    vi.mocked(fetchManagedAccountUsage).mockClear()
+    vi.mocked(fetchManagedAccountUsage).mockImplementation(async () => okProvider('claude', 42))
+
+    // Inside the 60 s open debounce: the drain refetch must not be gated by it.
+    await service.refreshAfterClaudeLivePtysDrained()
+
+    expect(vi.mocked(fetchManagedAccountUsage).mock.calls.map(([account]) => account.id)).toEqual([
+      'account-a'
+    ])
+    expect(snapshotFor(service, 'account-a')?.status).toBe('ok')
+    expect(snapshotFor(service, 'account-a')?.session?.usedPercent).toBe(42)
+
+    // Recovered: a second drain has nothing left to refetch.
+    vi.mocked(fetchManagedAccountUsage).mockClear()
+    await service.refreshAfterClaudeLivePtysDrained()
+    expect(fetchManagedAccountUsage).not.toHaveBeenCalled()
   })
 })

@@ -19,6 +19,12 @@ export const SHARED_CLAUDE_LANE_KEY = 'host'
 // pinned to a lane or to the shared one, and L1 forbids a lane's account also being the shared
 // one, so a shared-lane `claude` defers nobody's lane.
 const lanePrincipalIdByPtyId = new Map<string, string>()
+// Why: which managed Claude account each SPAWNED pty was launched under; `null` records a launch
+// that is known to hold no managed account (system default, lane). A live pty ABSENT from this map
+// is of unknown account — seeded from persistence, or a synthetic probe id — and
+// `hasLiveClaudePtysForAccount` treats it as possibly holding any account (persistence stores
+// the lane, not the account, so a surviving CLI would otherwise look harmless after a restart).
+const accountIdByPtyId = new Map<string, string | null>()
 // Why: ids restored from persistence at startup, not yet confirmed against the
 // daemon. They keep the OAuth refresh gate closed so an early managed refresh
 // cannot rotate the single-use refresh token out from under a Claude CLI that
@@ -116,6 +122,7 @@ export function confirmSeededClaudeLivePtys(aliveSessionIds: readonly string[]):
     if (!alive.has(sessionId)) {
       liveClaudePtyIds.delete(sessionId)
       lanePrincipalIdByPtyId.delete(sessionId)
+      accountIdByPtyId.delete(sessionId)
       persistence?.removeClaudeLivePtySessionId(sessionId)
     }
   }
@@ -124,11 +131,22 @@ export function confirmSeededClaudeLivePtys(aliveSessionIds: readonly string[]):
 }
 
 /** The lane is required, not optional: an omitted one silently deferred every lane's rotation. */
-export function markClaudePtySpawned(ptyId: string, lanePrincipalId: string | null): void {
+export function markClaudePtySpawned(
+  ptyId: string,
+  lanePrincipalId: string | null,
+  // Why optional-but-load-bearing: omitting it records NO attribution, which defers every
+  // account's inactive refresh (safe); pass `null` only when the launch holds no managed account.
+  accountId?: string | null
+): void {
   liveClaudePtyIds.add(ptyId)
   seededUnconfirmedPtyIds.delete(ptyId)
   const laneId = lanePrincipalId || SHARED_CLAUDE_LANE_KEY
   lanePrincipalIdByPtyId.set(ptyId, laneId)
+  if (accountId === undefined) {
+    accountIdByPtyId.delete(ptyId)
+  } else {
+    accountIdByPtyId.set(ptyId, accountId)
+  }
   persistence?.addClaudeLivePtySessionId(ptyId, laneId)
 }
 
@@ -149,6 +167,7 @@ export function markEphemeralClaudePtyExited(ptyId: string): void {
   ephemeralPtyIds.delete(ptyId)
   liveClaudePtyIds.delete(ptyId)
   lanePrincipalIdByPtyId.delete(ptyId)
+  accountIdByPtyId.delete(ptyId)
   notifyDrainedOnTransition(hadLivePtys)
 }
 
@@ -161,6 +180,7 @@ export function markClaudePtyExited(ptyId: string): void {
   const hadLivePtys = liveClaudePtyIds.size > 0
   liveClaudePtyIds.delete(ptyId)
   lanePrincipalIdByPtyId.delete(ptyId)
+  accountIdByPtyId.delete(ptyId)
   seededUnconfirmedPtyIds.delete(ptyId)
   persistence?.removeClaudeLivePtySessionId(ptyId)
   notifyDrainedOnTransition(hadLivePtys)
@@ -204,6 +224,37 @@ export function hasUnattributedLiveClaudePtys(): boolean {
     }
   }
   return false
+}
+
+/**
+ * Whether a live `claude` may be holding THIS managed account's single-use refresh token.
+ *
+ * True when a live pty was launched under the account, or when any live pty is unattributed
+ * (no lane, or no recorded account — e.g. a seeded id): over-deferring costs a delayed refresh,
+ * under-deferring revokes a token out from under a running CLI. When unsure, defer.
+ */
+export function hasLiveClaudePtysForAccount(accountId: string): boolean {
+  for (const ptyId of liveClaudePtyIds) {
+    if (!accountIdByPtyId.has(ptyId) || accountIdByPtyId.get(ptyId) === accountId) {
+      return true
+    }
+  }
+  return hasUnattributedLiveClaudePtys()
+}
+
+/**
+ * The managed account id a launch provenance names (`managed:<id>[:…]`), else null.
+ *
+ * `system`, `wsl:<distro>:system` and `lane:<label>` provenances name no managed account.
+ */
+export function parseManagedAccountIdFromProvenance(
+  provenance: string | null | undefined
+): string | null {
+  if (!provenance || !provenance.startsWith('managed:')) {
+    return null
+  }
+  const id = provenance.slice('managed:'.length).split(':')[0]
+  return id ? id : null
 }
 
 /** The lane id is required: an omitted one silently gated every lane behind the shared one. */

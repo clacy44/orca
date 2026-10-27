@@ -14,7 +14,10 @@ import type {
 import { parseWslUncPath } from '../../shared/wsl-paths'
 import type { NetworkProxySettings } from '../../shared/network-proxy'
 import { fetchViaPty } from './claude-pty'
-import type { ClaudeRuntimeAuthPreparation } from '../claude-accounts/runtime-auth-service'
+import type {
+  ClaudeInactiveUsageCredentials,
+  ClaudeRuntimeAuthPreparation
+} from '../claude-accounts/runtime-auth-service'
 import {
   deleteActiveClaudeKeychainCredentialsStrict,
   readActiveClaudeKeychainCredentials,
@@ -28,10 +31,7 @@ import {
   resolveOwnedClaudeManagedAuthPath,
   writeClaudeManagedAuthFile
 } from '../claude-accounts/managed-auth-path'
-import {
-  isOauthTokenExpiring,
-  refreshClaudeOauthCredentials
-} from '../claude-accounts/oauth-refresh'
+import { isOauthTokenExpiring } from '../claude-accounts/oauth-refresh'
 import { createOAuthUsageError, OAuthUsageError } from './claude-oauth-usage-error'
 import { mapClaudeUsageWindow, type ClaudeUsageWindowInput } from './claude-usage-window'
 import { withMacTailscaleDnsHint } from '../network/macos-tailscale-dns-diagnostic'
@@ -744,6 +744,12 @@ export type FetchClaudeRateLimitsOptions = {
 }
 
 export type FetchManagedAccountUsageOptions = {
+  /**
+   * The only path that may refresh an inactive account's token: it runs under the runtime auth
+   * service's mutation lock and defers while a live Claude terminal may hold the account.
+   * Without it an expiring token is used as-is and the server decides.
+   */
+  prepareCredentials?: (accountId: string) => Promise<ClaudeInactiveUsageCredentials>
   allowUsagePanelSupplement?: boolean
   networkProxySettings?: NetworkProxySettings
   signal?: AbortSignal
@@ -1178,6 +1184,13 @@ async function fetchManagedUsagePanelSupplement(input: {
   })
 }
 
+function missingManagedCredentialsResult(): ProviderRateLimits {
+  return makeClaudeUsageResult('error', 'No credentials', {
+    attemptedSources: [],
+    failureKind: 'missing-credentials'
+  })
+}
+
 export async function fetchManagedAccountUsage(
   account: InactiveClaudeAccountInfo,
   options: FetchManagedAccountUsageOptions = {}
@@ -1191,47 +1204,63 @@ export async function fetchManagedAccountUsage(
     return abortedClaudeRateLimitResult()
   }
   if (!location || !credentialsJson) {
-    return {
-      provider: 'claude',
-      session: null,
-      weekly: null,
-      updatedAt: Date.now(),
-      error: 'No credentials',
-      status: 'error'
-    }
+    return missingManagedCredentialsResult()
   }
 
-  // Why: refresh+persist an expiring token now so inactive accounts' single-use refresh tokens stay fresh for a later switch-in (persist failure is non-fatal).
-  let token = parseOAuthCredentialsJson(credentialsJson, 'credentials-file').token
-  if (isOauthTokenExpiring(credentialsJson)) {
-    const refreshed = await refreshClaudeOauthCredentials(credentialsJson)
+  // Why: an expiring token is refreshed only through the injected callback — it holds the runtime
+  // auth mutation lock and defers while a live terminal may own the single-use refresh token. The
+  // rotated token is persisted inside the callback, before it resolves, so a later abort of this
+  // fetch cannot lose it.
+  let deferredByLiveClaude = false
+  if (options.prepareCredentials && isOauthTokenExpiring(credentialsJson)) {
+    let prepared: ClaudeInactiveUsageCredentials | null = null
+    try {
+      prepared = await options.prepareCredentials(account.id)
+    } catch (err) {
+      console.warn('[claude-usage] Failed to prepare inactive account credentials:', err)
+    }
     if (options.signal?.aborted) {
       return abortedClaudeRateLimitResult()
     }
-    if (refreshed) {
-      try {
-        await writeManagedCredentialsJson(location, refreshed)
-      } catch {
-        // Keep the refreshed token in memory; next poll refreshes again if the write failed.
-      }
-      credentialsJson = refreshed
-      token = parseOAuthCredentialsJson(refreshed, 'credentials-file').token
+    if (prepared?.status === 'skip') {
+      // The account became active (or was removed); the active path owns its credentials now.
+      return abortedClaudeRateLimitResult()
+    }
+    if (prepared?.status === 'missing') {
+      return missingManagedCredentialsResult()
+    }
+    if (prepared?.status === 'ready') {
+      credentialsJson = prepared.credentialsJson
+      deferredByLiveClaude = prepared.deferred
     }
   }
 
+  const oauthCredentials = parseOAuthCredentialsJson(credentialsJson, 'credentials-file')
+  const token = oauthCredentials.token
   if (!token) {
-    return {
-      provider: 'claude',
-      session: null,
-      weekly: null,
-      updatedAt: Date.now(),
-      error: 'No credentials',
-      status: 'error'
-    }
+    return missingManagedCredentialsResult()
   }
 
   // Why: no PTY fallback for inactive accounts — PTY only supplements after OAuth succeeds.
-  const oauthLimits = await fetchViaOAuth(token, options.signal)
+  const attempts: ClaudeUsageAttemptState = { attemptedSources: ['oauth'] }
+  let oauthLimits: ProviderRateLimits
+  try {
+    oauthLimits = await fetchViaOAuth(token, options.signal)
+  } catch (err) {
+    if (options.signal?.aborted) {
+      return abortedClaudeRateLimitResult()
+    }
+    // Why: a 401 while a live terminal holds the refresh token is the deferral, not a sign-in problem.
+    if (deferredByLiveClaude && err instanceof OAuthUsageError && err.status === 401) {
+      return liveClaudeDeferredResult({ attempts, oauthCredentials })
+    }
+    return errorResultForClassification({
+      error: err,
+      classification: classifyClaudeOAuthUsageError(err),
+      attempts,
+      oauthCredentials
+    })
+  }
   if (options.signal?.aborted) {
     return abortedClaudeRateLimitResult()
   }

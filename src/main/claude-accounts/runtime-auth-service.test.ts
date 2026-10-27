@@ -18,6 +18,7 @@ import { getDefaultSettings } from '../../shared/constants'
 import type { GlobalSettings } from '../../shared/global-settings-types'
 import type { ClaudeManagedAccount } from '../../shared/managed-account-types'
 import { isOauthTokenExpiring, refreshClaudeOauthCredentials } from './oauth-refresh'
+import type { ClaudeRuntimeAuthService } from './runtime-auth-service'
 
 const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')
 const hostPlatform = process.platform
@@ -3914,6 +3915,216 @@ describe('ClaudeRuntimeAuthService', () => {
       vi.mocked(isOauthTokenExpiring).mockReturnValue(false)
       vi.mocked(refreshClaudeOauthCredentials).mockResolvedValue(null)
     }
+  })
+
+  describe('prepareInactiveCredentialsForUsage', () => {
+    const STALE = createClaudeCredentialsJson('two@example.com', 'two-stale', null, 1_000)
+    const REFRESHED = createClaudeCredentialsJson(
+      'two@example.com',
+      'two-refreshed',
+      null,
+      9_999_999_999_999
+    )
+
+    async function setup(
+      options: { activeId?: string | null; storedCredentials?: string } = {}
+    ): Promise<{
+      service: ClaudeRuntimeAuthService
+      store: ReturnType<typeof createStore>
+      managedAuthPath2: string
+    }> {
+      const managedAuthPath1 = createManagedClaudeAuth(
+        testState.userDataDir,
+        'account-1',
+        createClaudeCredentialsJson('one@example.com', 'one-fresh')
+      )
+      const managedAuthPath2 = createManagedClaudeAuth(
+        testState.userDataDir,
+        'account-2',
+        options.storedCredentials ?? STALE
+      )
+      const store = createStore(
+        createSettings({
+          claudeManagedAccounts: [
+            createClaudeAccount('account-1', managedAuthPath1, { email: 'one@example.com' }),
+            createClaudeAccount('account-2', managedAuthPath2, { email: 'two@example.com' })
+          ],
+          activeClaudeManagedAccountId:
+            options.activeId === undefined ? 'account-1' : options.activeId
+        })
+      )
+      // Expiry is judged from the blob itself so a rotated copy reads as fresh.
+      vi.mocked(isOauthTokenExpiring).mockImplementation((json: string) => json.includes('-stale'))
+      vi.mocked(refreshClaudeOauthCredentials).mockResolvedValue(REFRESHED)
+      const { ClaudeRuntimeAuthService } = await import('./runtime-auth-service')
+      const service = new ClaudeRuntimeAuthService(store as never)
+      await service.syncForCurrentSelection()
+      vi.mocked(refreshClaudeOauthCredentials).mockClear()
+      return { service, store, managedAuthPath2 }
+    }
+
+    afterEach(async () => {
+      vi.mocked(isOauthTokenExpiring).mockReset()
+      vi.mocked(isOauthTokenExpiring).mockReturnValue(false)
+      vi.mocked(refreshClaudeOauthCredentials).mockReset()
+      vi.mocked(refreshClaudeOauthCredentials).mockResolvedValue(null)
+      const gate = await import('./live-pty-gate')
+      gate.markClaudePtyExited('inactive-live-pty')
+      gate.markClaudePtyExited('seeded-unattributed-pty')
+      gate.confirmSeededClaudeLivePtys([])
+    })
+
+    it('refreshes an expiring inactive account and persists the rotation', async () => {
+      const { service, managedAuthPath2 } = await setup()
+
+      const result = await service.prepareInactiveCredentialsForUsage('account-2')
+
+      expect(result).toEqual({ status: 'ready', credentialsJson: REFRESHED, deferred: false })
+      expect(refreshClaudeOauthCredentials).toHaveBeenCalledTimes(1)
+      expect(refreshClaudeOauthCredentials).toHaveBeenCalledWith(STALE)
+      expect(readManagedCredentialsForTest('account-2', managedAuthPath2)).toBe(REFRESHED)
+    })
+
+    it('returns stored credentials without refreshing when the token is not expiring', async () => {
+      const fresh = createClaudeCredentialsJson('two@example.com', 'two-fresh')
+      const { service } = await setup({ storedCredentials: fresh })
+
+      const result = await service.prepareInactiveCredentialsForUsage('account-2')
+
+      expect(result).toEqual({ status: 'ready', credentialsJson: fresh, deferred: false })
+      expect(refreshClaudeOauthCredentials).not.toHaveBeenCalled()
+    })
+
+    it('hits the token endpoint exactly once for two concurrent inactive refreshes', async () => {
+      const { service } = await setup()
+      let release: (value: string) => void = () => {}
+      vi.mocked(refreshClaudeOauthCredentials).mockImplementation(
+        () => new Promise<string>((resolve) => (release = resolve))
+      )
+
+      const first = service.prepareInactiveCredentialsForUsage('account-2')
+      const second = service.prepareInactiveCredentialsForUsage('account-2')
+      await vi.waitFor(() => expect(refreshClaudeOauthCredentials).toHaveBeenCalledTimes(1))
+      release(REFRESHED)
+      const results = await Promise.all([first, second])
+
+      expect(refreshClaudeOauthCredentials).toHaveBeenCalledTimes(1)
+      // The second caller re-read inside the lock and saw the already rotated token.
+      expect(results.map((entry) => entry.status)).toEqual(['ready', 'ready'])
+      expect(
+        results.every((entry) => 'credentialsJson' in entry && entry.credentialsJson === REFRESHED)
+      ).toBe(true)
+    })
+
+    it('hits the token endpoint exactly once when the active sync switches into the account mid-refresh', async () => {
+      const { service, store } = await setup()
+      let release: (value: string) => void = () => {}
+      vi.mocked(refreshClaudeOauthCredentials).mockImplementation(
+        () => new Promise<string>((resolve) => (release = resolve))
+      )
+
+      const inactive = service.prepareInactiveCredentialsForUsage('account-2')
+      await vi.waitFor(() => expect(refreshClaudeOauthCredentials).toHaveBeenCalledTimes(1))
+      // The user switches to account-2 while the inactive refresh is in flight: the sync queues
+      // behind it instead of refreshing the same single-use token a second time.
+      store.updateSettings({ activeClaudeManagedAccountId: 'account-2' })
+      const sync = service.syncForCurrentSelection()
+      release(REFRESHED)
+      await Promise.all([inactive, sync])
+
+      expect(refreshClaudeOauthCredentials).toHaveBeenCalledTimes(1)
+      expect(
+        readFileSync(join(testState.fakeHomeDir, '.claude', '.credentials.json'), 'utf-8')
+      ).toBe(REFRESHED)
+    })
+
+    it('returns skip for an account that is now active, without refreshing', async () => {
+      const { service, store } = await setup()
+      store.updateSettings({ activeClaudeManagedAccountId: 'account-2' })
+
+      const result = await service.prepareInactiveCredentialsForUsage('account-2')
+
+      expect(result).toEqual({ status: 'skip' })
+      expect(refreshClaudeOauthCredentials).not.toHaveBeenCalled()
+    })
+
+    it('returns skip when the account is active in a WSL runtime selection', async () => {
+      const { service, store } = await setup()
+      store.updateSettings({
+        activeClaudeManagedAccountIdsByRuntime: { host: 'account-1', wsl: { Ubuntu: 'account-2' } }
+      } as never)
+
+      const result = await service.prepareInactiveCredentialsForUsage('account-2')
+
+      expect(result).toEqual({ status: 'skip' })
+    })
+
+    it('returns skip for an unknown account and missing for an account with no stored credentials', async () => {
+      const { service } = await setup()
+      expect(await service.prepareInactiveCredentialsForUsage('no-such-account')).toEqual({
+        status: 'skip'
+      })
+
+      testState.managedKeychainCredentials.delete('account-2')
+      rmSync(
+        join(testState.userDataDir, 'claude-accounts', 'account-2', 'auth', '.credentials.json'),
+        {
+          force: true
+        }
+      )
+      expect(await service.prepareInactiveCredentialsForUsage('account-2')).toEqual({
+        status: 'missing'
+      })
+      expect(refreshClaudeOauthCredentials).not.toHaveBeenCalled()
+    })
+
+    it('defers without refreshing while a live pty is attributed to the account', async () => {
+      const { service, managedAuthPath2 } = await setup()
+      const { markClaudePtySpawned } = await import('./live-pty-gate')
+      markClaudePtySpawned('inactive-live-pty', null, 'account-2')
+
+      const result = await service.prepareInactiveCredentialsForUsage('account-2')
+
+      expect(result).toEqual({ status: 'ready', credentialsJson: STALE, deferred: true })
+      expect(refreshClaudeOauthCredentials).not.toHaveBeenCalled()
+      expect(readManagedCredentialsForTest('account-2', managedAuthPath2)).toBe(STALE)
+    })
+
+    it('refreshes normally when the live pty is attributed to a different account', async () => {
+      const { service } = await setup()
+      const { markClaudePtySpawned } = await import('./live-pty-gate')
+      markClaudePtySpawned('inactive-live-pty', null, 'account-1')
+
+      const result = await service.prepareInactiveCredentialsForUsage('account-2')
+
+      expect(result).toMatchObject({ status: 'ready', deferred: false })
+      expect(refreshClaudeOauthCredentials).toHaveBeenCalledTimes(1)
+    })
+
+    it('defers without refreshing while an unattributed live pty exists', async () => {
+      const { service } = await setup()
+      const { seedLiveClaudePtysFromPersistence } = await import('./live-pty-gate')
+      seedLiveClaudePtysFromPersistence([{ sessionId: 'seeded-unattributed-pty', laneId: null }])
+
+      const result = await service.prepareInactiveCredentialsForUsage('account-2')
+
+      expect(result).toEqual({ status: 'ready', credentialsJson: STALE, deferred: true })
+      expect(refreshClaudeOauthCredentials).not.toHaveBeenCalled()
+    })
+
+    it('writes the rotated token back even if the usage fetch is aborted afterwards', async () => {
+      const { service, managedAuthPath2 } = await setup()
+      const controller = new AbortController()
+
+      const pending = service.prepareInactiveCredentialsForUsage('account-2')
+      // The caller gives up while the refresh is still in flight; the lock-held section has no
+      // abort path, so the single-use rotation can never be lost between server and disk.
+      controller.abort()
+      await pending
+
+      expect(controller.signal.aborted).toBe(true)
+      expect(readManagedCredentialsForTest('account-2', managedAuthPath2)).toBe(REFRESHED)
+    })
   })
 
   it('adopts a rotated-refresh-token runtime credential on cold-start read-back', async () => {

@@ -6,6 +6,7 @@ import {
   confirmSeededClaudeLivePtys,
   endClaudeAuthSwitch,
   hasLiveClaudePtys,
+  hasLiveClaudePtysForAccount,
   hasLiveClaudePtysInLane,
   hasUnattributedLiveClaudePtys,
   isClaudeAuthSwitchInProgress,
@@ -16,6 +17,7 @@ import {
   markEphemeralClaudePtyExited,
   markEphemeralClaudePtySpawned,
   onLiveClaudePtysDrained,
+  parseManagedAccountIdFromProvenance,
   seedLiveClaudePtysFromPersistence,
   SHARED_CLAUDE_LANE_KEY
 } from './live-pty-gate'
@@ -293,5 +295,72 @@ describe('seeding the gate from persistence', () => {
     confirmSeededClaudeLivePtys([])
 
     expect(hasUnattributedLiveClaudePtys()).toBe(false)
+  })
+})
+
+// Inactive-account usage refresh must not rotate a single-use token a live CLI may hold.
+describe('per-account live pty attribution', () => {
+  afterEach(() => {
+    markClaudePtyExited('account-a-pty')
+    markClaudePtyExited('account-b-pty')
+    markClaudePtyExited('no-account-pty')
+    markClaudePtyExited('unspecified-pty')
+    markClaudePtyExited('seeded-pty-1')
+    confirmSeededClaudeLivePtys([])
+  })
+
+  it('defers only the account a live pty was launched under', () => {
+    markClaudePtySpawned('account-a-pty', null, 'account-a')
+
+    expect(hasLiveClaudePtysForAccount('account-a')).toBe(true)
+    // Negative control: another account's refresh is not blocked by it.
+    expect(hasLiveClaudePtysForAccount('account-b')).toBe(false)
+  })
+
+  it('forgets the attribution when the pty exits', () => {
+    markClaudePtySpawned('account-a-pty', null, 'account-a')
+    markClaudePtySpawned('account-b-pty', null, 'account-b')
+
+    markClaudePtyExited('account-a-pty')
+
+    expect(hasLiveClaudePtysForAccount('account-a')).toBe(false)
+    expect(hasLiveClaudePtysForAccount('account-b')).toBe(true)
+    markClaudePtyExited('account-b-pty')
+    expect(hasLiveClaudePtysForAccount('account-b')).toBe(false)
+  })
+
+  it('does not defer any account for a launch known to hold no managed account', () => {
+    markClaudePtySpawned('no-account-pty', null, null)
+
+    expect(hasLiveClaudePtysForAccount('account-a')).toBe(false)
+  })
+
+  it('defers every account when a launch recorded no attribution', () => {
+    markClaudePtySpawned('unspecified-pty', null)
+
+    expect(hasLiveClaudePtysForAccount('account-a')).toBe(true)
+  })
+
+  it('defers every account for an unattributed seeded pty, even one that names a lane', () => {
+    seedLiveClaudePtysFromPersistence([{ sessionId: 'seeded-pty-1', laneId: null }])
+    expect(hasLiveClaudePtysForAccount('account-a')).toBe(true)
+
+    confirmSeededClaudeLivePtys(['seeded-pty-1'])
+    // Still alive in the daemon and still of unknown account: keep deferring.
+    expect(hasLiveClaudePtysForAccount('account-a')).toBe(true)
+
+    confirmSeededClaudeLivePtys([])
+    markClaudePtyExited('seeded-pty-1')
+    expect(hasLiveClaudePtysForAccount('account-a')).toBe(false)
+  })
+
+  it('parses the managed account id out of a launch provenance', () => {
+    expect(parseManagedAccountIdFromProvenance('managed:abc-123')).toBe('abc-123')
+    expect(parseManagedAccountIdFromProvenance('managed:abc-123:wsl:Ubuntu')).toBe('abc-123')
+    expect(parseManagedAccountIdFromProvenance('system')).toBeNull()
+    expect(parseManagedAccountIdFromProvenance('wsl:Ubuntu:system')).toBeNull()
+    expect(parseManagedAccountIdFromProvenance('lane:opaque')).toBeNull()
+    expect(parseManagedAccountIdFromProvenance('managed:')).toBeNull()
+    expect(parseManagedAccountIdFromProvenance(undefined)).toBeNull()
   })
 })
