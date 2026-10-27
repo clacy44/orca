@@ -98,6 +98,62 @@ describe('startInactiveTokenKeepAlive', () => {
     keepAlive.stop()
   })
 
+  it('stop() during a tick lets the in-flight refresh finish but never starts the next account', async () => {
+    let finishFirst: () => void = () => {}
+    let firstFinished = false
+    const prepare = vi.fn(
+      (id: string) =>
+        new Promise<void>((resolve) => {
+          if (id === 'a') {
+            finishFirst = () => {
+              firstFinished = true
+              resolve()
+            }
+          } else {
+            resolve()
+          }
+        })
+    )
+    const keepAlive = startInactiveTokenKeepAlive({
+      listInactiveAccountIds: () => ['a', 'b'],
+      prepare
+    })
+    await vi.advanceTimersByTimeAsync(FIVE_MINUTES)
+    expect(prepare.mock.calls.map(([id]) => id)).toEqual(['a'])
+
+    keepAlive.stop()
+    finishFirst()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(firstFinished).toBe(true)
+    expect(prepare.mock.calls.map(([id]) => id)).toEqual(['a'])
+  })
+
+  it('starts the second account when no stop arrives mid-tick (positive control)', async () => {
+    let finishFirst: () => void = () => {}
+    const prepare = vi.fn(
+      (id: string) =>
+        new Promise<void>((resolve) => {
+          if (id === 'a') {
+            finishFirst = resolve
+          } else {
+            resolve()
+          }
+        })
+    )
+    const keepAlive = startInactiveTokenKeepAlive({
+      listInactiveAccountIds: () => ['a', 'b'],
+      prepare
+    })
+    await vi.advanceTimersByTimeAsync(FIVE_MINUTES)
+
+    finishFirst()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(prepare.mock.calls.map(([id]) => id)).toEqual(['a', 'b'])
+    keepAlive.stop()
+  })
+
   it('stops ticking after stop(), including the first pass', async () => {
     const prepare = vi.fn(async (_id: string) => undefined)
     const keepAlive = startInactiveTokenKeepAlive({

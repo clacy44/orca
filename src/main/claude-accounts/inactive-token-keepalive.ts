@@ -15,6 +15,7 @@ export function startInactiveTokenKeepAlive(options: {
   firstTickDelayMs?: number
 }): { stop: () => void } {
   let running = false
+  let stopped = false
   const tick = async (): Promise<void> => {
     if (running) {
       return
@@ -22,6 +23,10 @@ export function startInactiveTokenKeepAlive(options: {
     running = true
     try {
       for (const accountId of options.listInactiveAccountIds()) {
+        // Why: a stop (quit) mid-tick must not start the next account's refresh.
+        if (stopped) {
+          break
+        }
         try {
           await options.prepare(accountId)
         } catch (error) {
@@ -45,6 +50,7 @@ export function startInactiveTokenKeepAlive(options: {
   timer.unref?.()
   return {
     stop: () => {
+      stopped = true
       clearTimeout(first)
       clearInterval(timer)
     }
