@@ -9,7 +9,8 @@ function describeAccountFreshness(
   row: ClaudeSwitcherAccountRow,
   hasBars: boolean,
   now: number,
-  formatAge: (ageMs: number) => string
+  formatAge: (ageMs: number) => string,
+  sweepRetryAt: number | null | undefined
 ): string | null {
   if (row.ageMs === null || !row.limits) {
     return null
@@ -38,7 +39,7 @@ function describeAccountFreshness(
     {
       value0: formatAge(row.ageMs),
       value1: formatAge(checkedAgeMs),
-      value2: getProviderUsageStatusLabel(row.limits)
+      value2: getProviderUsageStatusLabel(row.limits, { sweepRetryAt, now })
     }
   )
 }
@@ -54,12 +55,15 @@ export function ClaudeAccountUsageList({
   rows,
   renderUsage,
   formatAge,
-  now
+  now,
+  sweepRetryAt
 }: {
   rows: readonly ClaudeSwitcherAccountRow[]
   renderUsage: (row: ClaudeSwitcherAccountRow) => React.ReactNode
   formatAge: (ageMs: number) => string
   now: number
+  // Main's usage-throttling backoff end; feeds the "next check in N min" copy.
+  sweepRetryAt?: number | null
 }): React.JSX.Element | null {
   if (rows.length === 0) {
     return null
@@ -70,7 +74,7 @@ export function ClaudeAccountUsageList({
         const hasBars = Boolean(
           row.limits?.session || row.limits?.weekly || row.limits?.fableWeekly
         )
-        const caption = describeAccountFreshness(row, hasBars, now, formatAge)
+        const caption = describeAccountFreshness(row, hasBars, now, formatAge, sweepRetryAt)
         return (
           <div
             key={row.id}

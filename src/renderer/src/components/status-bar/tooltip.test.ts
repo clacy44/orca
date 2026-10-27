@@ -192,6 +192,33 @@ describe('provider usage error copy', () => {
     expect(getProviderUsageErrorMessage(p)).toBe('Claude usage is rate limited right now.')
   })
 
+  it('reads a Claude rate-limited failure as throttling, with the next check when known', () => {
+    const now = 1_000_000
+    const p = provider({
+      error: 'Claude usage is rate limited right now.',
+      usageMetadata: { failureKind: 'rate-limited', retryAtMs: now + 5 * 60_000 }
+    })
+
+    expect(getProviderUsageStatusLabel(p, { now })).toBe(
+      'Usage check throttled · next check in 5 min'
+    )
+    expect(getProviderUsageStatusLabel(p, { now, sweepRetryAt: now + 12 * 60_000 })).toBe(
+      'Usage check throttled · next check in 12 min'
+    )
+    expect(getProviderUsageStatusLabel(p, { now: now + 6 * 60_000 })).toBe('Usage check throttled')
+    expect(getProviderUsageErrorMessage(p)).toContain('not this account')
+  })
+
+  it('keeps the Codex rate-limit label unchanged', () => {
+    const p = provider({
+      provider: 'codex',
+      error: 'Codex usage is rate limited.',
+      usageMetadata: { failureKind: 'rate-limited', retryAtMs: Date.now() + 5 * 60_000 }
+    })
+
+    expect(getProviderUsageStatusLabel(p)).toBe('Limited')
+  })
+
   it('lets rate-limit copy win when the detail also mentions auth', () => {
     const p = provider({
       error: 'Rate limit reached while refreshing OAuth access token.'

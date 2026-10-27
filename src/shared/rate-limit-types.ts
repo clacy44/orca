@@ -137,6 +137,11 @@ export type RateLimitState = {
   grokAuthConfigured: boolean
   claudeTarget: RateLimitRuntimeTarget
   codexTarget: RateLimitRuntimeTarget
+  /**
+   * Unix ms before which no inactive Claude account sweep starts (usage-endpoint throttling
+   * backoff), or null when sweeps are allowed. The active account is never held by it.
+   */
+  claudeInactiveSweepRetryAt?: number | null
   inactiveClaudeAccounts: InactiveAccountUsage[]
   inactiveCodexAccounts: InactiveAccountUsage[]
 }

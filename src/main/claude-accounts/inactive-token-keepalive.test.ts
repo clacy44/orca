@@ -1,12 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   INACTIVE_TOKEN_KEEPALIVE_FIRST_TICK_MS,
+  KEEPALIVE_ACCOUNT_SPACING_MS,
   INACTIVE_TOKEN_KEEPALIVE_INTERVAL_MS,
   startInactiveTokenKeepAlive
 } from './inactive-token-keepalive'
 
 const SIX_HOURS = 6 * 60 * 60 * 1000
 const FIVE_MINUTES = 5 * 60 * 1000
+const SPACING = 30_000
 
 describe('startInactiveTokenKeepAlive', () => {
   beforeEach(() => {
@@ -33,13 +35,15 @@ describe('startInactiveTokenKeepAlive', () => {
     expect(prepare).not.toHaveBeenCalled()
 
     await vi.advanceTimersByTimeAsync(1)
+    expect(prepare.mock.calls.map(([id]) => id)).toEqual(['a'])
+    await vi.advanceTimersByTimeAsync(SPACING)
     expect(prepare.mock.calls.map(([id]) => id)).toEqual(['a', 'b'])
 
     // Nothing more until the six hour interval (counted from start) comes round.
-    await vi.advanceTimersByTimeAsync(SIX_HOURS - FIVE_MINUTES - 1)
+    await vi.advanceTimersByTimeAsync(SIX_HOURS - FIVE_MINUTES - SPACING - 1)
     expect(prepare).toHaveBeenCalledTimes(2)
 
-    await vi.advanceTimersByTimeAsync(1)
+    await vi.advanceTimersByTimeAsync(1 + SPACING)
     expect(prepare).toHaveBeenCalledTimes(4)
 
     await vi.advanceTimersByTimeAsync(SIX_HOURS)
@@ -72,7 +76,7 @@ describe('startInactiveTokenKeepAlive', () => {
       prepare
     })
 
-    await vi.advanceTimersByTimeAsync(FIVE_MINUTES)
+    await vi.advanceTimersByTimeAsync(FIVE_MINUTES + SPACING)
 
     expect(prepare.mock.calls.map(([id]) => id)).toEqual(['a', 'b'])
     keepAlive.stop()
@@ -148,10 +152,53 @@ describe('startInactiveTokenKeepAlive', () => {
     await vi.advanceTimersByTimeAsync(FIVE_MINUTES)
 
     finishFirst()
-    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(SPACING)
 
     expect(prepare.mock.calls.map(([id]) => id)).toEqual(['a', 'b'])
     keepAlive.stop()
+  })
+
+  it('spaces token refreshes between accounts by 30 seconds', async () => {
+    expect(KEEPALIVE_ACCOUNT_SPACING_MS).toBe(30_000)
+    const prepare = vi.fn(async (_id: string) => undefined)
+    const keepAlive = startInactiveTokenKeepAlive({
+      listInactiveAccountIds: () => ['a', 'b', 'c'],
+      prepare
+    })
+
+    await vi.advanceTimersByTimeAsync(FIVE_MINUTES)
+    expect(prepare.mock.calls.map(([id]) => id)).toEqual(['a'])
+
+    await vi.advanceTimersByTimeAsync(SPACING - 1)
+    expect(prepare).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(prepare.mock.calls.map(([id]) => id)).toEqual(['a', 'b'])
+
+    await vi.advanceTimersByTimeAsync(SPACING)
+    expect(prepare.mock.calls.map(([id]) => id)).toEqual(['a', 'b', 'c'])
+    keepAlive.stop()
+  })
+
+  it('stop() during the spacing delay ends the tick at once with no further prepare', async () => {
+    const prepare = vi.fn(async (_id: string) => undefined)
+    const keepAlive = startInactiveTokenKeepAlive({
+      listInactiveAccountIds: () => ['a', 'b'],
+      prepare,
+      // Only the first-pass timer: keep the interval out of the way.
+      intervalMs: SIX_HOURS * 10
+    })
+    await vi.advanceTimersByTimeAsync(FIVE_MINUTES)
+    expect(prepare.mock.calls.map(([id]) => id)).toEqual(['a'])
+    // The tick is now parked in its 30 s spacing delay.
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
+
+    keepAlive.stop()
+    await vi.advanceTimersByTimeAsync(0)
+
+    // The delay was cancelled, not waited out: no timer is left and b is never prepared.
+    expect(vi.getTimerCount()).toBe(0)
+    await vi.advanceTimersByTimeAsync(SPACING * 4)
+    expect(prepare.mock.calls.map(([id]) => id)).toEqual(['a'])
   })
 
   it('stops ticking after stop(), including the first pass', async () => {

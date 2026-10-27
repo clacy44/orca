@@ -1,6 +1,8 @@
 export const INACTIVE_TOKEN_KEEPALIVE_INTERVAL_MS = 6 * 60 * 60 * 1000
 // Why: a first pass shortly after launch, so a machine that is rarely on for 6 h still refreshes.
 export const INACTIVE_TOKEN_KEEPALIVE_FIRST_TICK_MS = 5 * 60 * 1000
+// Why: space token refreshes so a tick over many accounts is not a burst against the token endpoint.
+export const KEEPALIVE_ACCOUNT_SPACING_MS = 30_000
 
 /**
  * Keeps non-active accounts' single-use refresh tokens from aging out unused.
@@ -13,20 +15,44 @@ export function startInactiveTokenKeepAlive(options: {
   prepare: (accountId: string) => Promise<unknown>
   intervalMs?: number
   firstTickDelayMs?: number
+  accountSpacingMs?: number
 }): { stop: () => void } {
   let running = false
   let stopped = false
+  // Resolves the pending spacing delay early so stop() (quit) never waits it out.
+  let cancelSpacingDelay: (() => void) | null = null
+  const spacingDelay = (ms: number): Promise<void> =>
+    new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        cancelSpacingDelay = null
+        resolve()
+      }, ms)
+      timer.unref?.()
+      cancelSpacingDelay = () => {
+        clearTimeout(timer)
+        cancelSpacingDelay = null
+        resolve()
+      }
+    })
   const tick = async (): Promise<void> => {
     if (running) {
       return
     }
     running = true
     try {
+      let attempted = 0
       for (const accountId of options.listInactiveAccountIds()) {
         // Why: a stop (quit) mid-tick must not start the next account's refresh.
         if (stopped) {
           break
         }
+        if (attempted > 0) {
+          await spacingDelay(options.accountSpacingMs ?? KEEPALIVE_ACCOUNT_SPACING_MS)
+          if (stopped) {
+            break
+          }
+        }
+        attempted += 1
         try {
           await options.prepare(accountId)
         } catch (error) {
@@ -51,6 +77,7 @@ export function startInactiveTokenKeepAlive(options: {
   return {
     stop: () => {
       stopped = true
+      cancelSpacingDelay?.()
       clearTimeout(first)
       clearInterval(timer)
     }

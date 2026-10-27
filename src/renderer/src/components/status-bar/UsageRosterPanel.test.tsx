@@ -498,7 +498,8 @@ describe('UsageRosterPanel per-account Claude rows', () => {
 
   function renderPanel(
     rows: ReturnType<typeof buildClaudeSwitcherAccountRows>,
-    providers: ProviderRateLimits[]
+    providers: ProviderRateLimits[],
+    sweepRetryAt: number | null = null
   ): string {
     return renderToStaticMarkup(
       <TooltipProvider>
@@ -520,6 +521,7 @@ describe('UsageRosterPanel per-account Claude rows', () => {
                 rows={rows}
                 formatAge={(ageMs) => `${Math.round(ageMs / 60_000)} min ago`}
                 now={NOW}
+                sweepRetryAt={sweepRetryAt}
                 renderUsage={(row) => (
                   <span data-test-usage={row.id}>
                     {row.limits ? `${row.limits.session?.usedPercent}% bars` : 'skeleton'}
@@ -652,5 +654,26 @@ describe('UsageRosterPanel per-account Claude rows', () => {
 
     expect(markup).toContain('checked 4 min ago')
     expect(markup).not.toContain('data ')
+  })
+  it('says the check was throttled, with the next check time, for a rate-limited account', () => {
+    const rows = rowsFor([
+      {
+        accountId: 'acct-b',
+        rateLimits: claudeWith(55, {
+          status: 'error',
+          error: 'Claude usage is rate limited right now.',
+          updatedAt: NOW - 30 * 60_000,
+          usageMetadata: { failureKind: 'rate-limited', lastAttemptAt: NOW - 4 * 60_000 }
+        }),
+        updatedAt: NOW - 30 * 60_000,
+        isFetching: false
+      }
+    ])
+    const markup = renderPanel(rows, [claudeWith(40)], NOW + 3 * 60_000)
+
+    expect(markup).toContain(
+      'data 30 min ago · checked 4 min ago · Usage check throttled · next check in 3 min'
+    )
+    expect(markup).not.toContain('Limited')
   })
 })

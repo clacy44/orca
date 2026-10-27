@@ -2522,6 +2522,16 @@ describe('RateLimitService inactive Claude account fetch policy', () => {
     ;(service as unknown as { lastInactiveClaudeFetchAt: number }).lastInactiveClaudeFetchAt = 0
   }
 
+  function seedInactiveSnapshot(
+    service: RateLimitService,
+    accountId: string,
+    limits: ProviderRateLimits
+  ): void {
+    ;(
+      service as unknown as { inactiveClaudeCache: Map<string, ProviderRateLimits> }
+    ).inactiveClaudeCache.set(accountId, limits)
+  }
+
   function rateLimited(retryAtMs: number): ProviderRateLimits {
     return {
       ...errorProvider('claude', 'Too many requests'),
@@ -2637,26 +2647,14 @@ describe('RateLimitService inactive Claude account fetch policy', () => {
   it('still fetches the other accounts when one is inside its Retry-After window', async () => {
     const service = new RateLimitService()
     service.setInactiveClaudeAccountsResolver(() => [accountA, accountB])
-    vi.mocked(fetchManagedAccountUsage).mockImplementation(async (account) =>
-      account.id === 'account-a' ? rateLimited(Date.now() + 60 * 60_000) : okProvider('claude', 5)
-    )
-    const first = service.fetchInactiveClaudeAccountsOnOpen()
-    await vi.advanceTimersByTimeAsync(2_000)
-    await first
-    expect(fetchManagedAccountUsage).toHaveBeenCalledTimes(2)
+    seedInactiveSnapshot(service, 'account-a', rateLimited(Date.now() + 60 * 60_000))
+    vi.mocked(fetchManagedAccountUsage).mockImplementation(async () => okProvider('claude', 5))
 
-    resetOpenDebounce(service)
-    await vi.advanceTimersByTimeAsync(10 * 60_000)
-    const second = service.fetchInactiveClaudeAccountsOnOpen()
-    await vi.advanceTimersByTimeAsync(2_000)
-    await second
+    await service.fetchInactiveClaudeAccountsOnOpen()
 
-    // A is gated by Retry-After; B's 5 minute freshness has lapsed.
-    const secondRoundIds = vi
-      .mocked(fetchManagedAccountUsage)
-      .mock.calls.slice(2)
-      .map(([account]) => account.id)
-    expect(secondRoundIds).toEqual(['account-b'])
+    expect(vi.mocked(fetchManagedAccountUsage).mock.calls.map(([account]) => account.id)).toEqual([
+      'account-b'
+    ])
   })
 
   it('skips an account whose ok snapshot is fresher than five minutes', async () => {
@@ -2680,7 +2678,7 @@ describe('RateLimitService inactive Claude account fetch policy', () => {
     expect(fetchManagedAccountUsage).toHaveBeenCalledTimes(2)
   })
 
-  it('staggers account fetches about two seconds apart', async () => {
+  it('spaces real network fetches 10 seconds apart', async () => {
     const service = new RateLimitService()
     service.setInactiveClaudeAccountsResolver(() => [accountA, accountB])
     vi.mocked(fetchManagedAccountUsage).mockImplementation(async () => okProvider('claude', 10))
@@ -2689,7 +2687,7 @@ describe('RateLimitService inactive Claude account fetch policy', () => {
     await vi.advanceTimersByTimeAsync(0)
     expect(fetchManagedAccountUsage).toHaveBeenCalledTimes(1)
 
-    await vi.advanceTimersByTimeAsync(1_900)
+    await vi.advanceTimersByTimeAsync(9_900)
     expect(fetchManagedAccountUsage).toHaveBeenCalledTimes(1)
 
     await vi.advanceTimersByTimeAsync(200)
@@ -2697,22 +2695,15 @@ describe('RateLimitService inactive Claude account fetch policy', () => {
     await batch
   })
 
-  it('does not stagger past an account it skipped', async () => {
+  it('does not wait out a spacing delay for an account it skipped', async () => {
     const service = new RateLimitService()
     service.setInactiveClaudeAccountsResolver(() => [accountA, accountB])
-    vi.mocked(fetchManagedAccountUsage).mockImplementation(async (account) =>
-      account.id === 'account-a' ? rateLimited(Date.now() + 60 * 60_000) : okProvider('claude', 5)
-    )
-    const first = service.fetchInactiveClaudeAccountsOnOpen()
-    await vi.advanceTimersByTimeAsync(2_000)
-    await first
-    vi.mocked(fetchManagedAccountUsage).mockClear()
+    seedInactiveSnapshot(service, 'account-a', rateLimited(Date.now() + 60 * 60_000))
+    vi.mocked(fetchManagedAccountUsage).mockImplementation(async () => okProvider('claude', 5))
 
-    resetOpenDebounce(service)
-    await vi.advanceTimersByTimeAsync(6 * 60_000)
+    // A is skipped (Retry-After), so B is the only real fetch and no spacing timer is pending.
     await service.fetchInactiveClaudeAccountsOnOpen()
 
-    // Only B is fetched, so there is no pending stagger timer to wait out.
     expect(fetchManagedAccountUsage).toHaveBeenCalledTimes(1)
   })
 
@@ -2721,22 +2712,22 @@ describe('RateLimitService inactive Claude account fetch policy', () => {
     service.setInactiveClaudeAccountsResolver(() => [accountA, accountB])
     vi.mocked(fetchManagedAccountUsage).mockImplementation(async (account) => {
       if (account.id === 'account-a') {
-        throw new OAuthUsageError('Too many requests', 429, true, 120_000)
+        throw new Error('keychain locked')
       }
-      throw new Error('keychain locked')
+      throw new OAuthUsageError('Too many requests', 429, true, 120_000)
     })
 
     const batch = service.fetchInactiveClaudeAccountsOnOpen()
-    await vi.advanceTimersByTimeAsync(2_000)
+    await vi.advanceTimersByTimeAsync(10_000)
     await batch
 
-    expect(snapshotFor(service, 'account-a')?.usageMetadata).toEqual({
+    expect(snapshotFor(service, 'account-a')?.usageMetadata?.failureKind).toBe('unknown')
+    expect(snapshotFor(service, 'account-a')?.usageMetadata?.retryAtMs).toBeUndefined()
+    expect(snapshotFor(service, 'account-b')?.usageMetadata).toEqual({
       failureKind: 'rate-limited',
-      retryAtMs: Date.now() + 120_000 - 2_000,
-      lastAttemptAt: Date.now() - 2_000
+      retryAtMs: Date.now() + 120_000,
+      lastAttemptAt: Date.now()
     })
-    expect(snapshotFor(service, 'account-b')?.usageMetadata?.failureKind).toBe('unknown')
-    expect(snapshotFor(service, 'account-b')?.usageMetadata?.retryAtMs).toBeUndefined()
   })
 
   it('refetches only the deferred accounts when the last live Claude pty drains', async () => {
@@ -2746,7 +2737,7 @@ describe('RateLimitService inactive Claude account fetch policy', () => {
       account.id === 'account-a' ? deferredByLiveSession() : okProvider('claude', 5)
     )
     const first = service.fetchInactiveClaudeAccountsOnOpen()
-    await vi.advanceTimersByTimeAsync(2_000)
+    await vi.advanceTimersByTimeAsync(10_000)
     await first
     expect(snapshotFor(service, 'account-a')?.usageMetadata?.failureKind).toBe(
       'deferred-by-live-session'
@@ -2812,6 +2803,224 @@ describe('RateLimitService inactive Claude account fetch policy', () => {
     await secondFetch
 
     expect(fetchManagedAccountUsage).toHaveBeenCalledTimes(2)
+  })
+
+  describe('sweep order, pacing and throttling backoff', () => {
+    const MIN = 60_000
+    const accountC = { id: 'account-c', managedAuthPath: '/tmp/account-c/auth' }
+
+    function limitedNoRetryAfter(): ProviderRateLimits {
+      return {
+        ...errorProvider('claude', 'Claude usage is rate limited right now.'),
+        usageMetadata: { failureKind: 'rate-limited' }
+      }
+    }
+
+    function sweepRetryIn(service: RateLimitService): number | null {
+      const at = service.getState().claudeInactiveSweepRetryAt
+      return at ? at - Date.now() : null
+    }
+
+    // Runs one pass to completion, advancing exactly one spacing delay at a time so the clock
+    // stops at the moment the pass finishes.
+    async function runPass(service: RateLimitService): Promise<void> {
+      resetOpenDebounce(service)
+      let done = false
+      const pass = service.fetchInactiveClaudeAccountsOnOpen().then(() => {
+        done = true
+      })
+      await vi.advanceTimersByTimeAsync(0)
+      while (!done) {
+        await vi.advanceTimersByTimeAsync(10_000)
+      }
+      await pass
+    }
+
+    it('fetches never-fetched accounts first, then the stalest data', async () => {
+      const service = new RateLimitService()
+      service.setInactiveClaudeAccountsResolver(() => [accountA, accountB, accountC])
+      // A: data 20 min old. C: data 40 min old. B: never fetched.
+      seedInactiveSnapshot(service, 'account-a', okProvider('claude', 1, Date.now() - 20 * MIN))
+      seedInactiveSnapshot(service, 'account-c', okProvider('claude', 3, Date.now() - 40 * MIN))
+      vi.mocked(fetchManagedAccountUsage).mockImplementation(async () => okProvider('claude', 5))
+
+      await runPass(service)
+
+      expect(vi.mocked(fetchManagedAccountUsage).mock.calls.map(([account]) => account.id)).toEqual(
+        ['account-b', 'account-c', 'account-a']
+      )
+    })
+
+    it('breaks a data-age tie by the oldest attempt', async () => {
+      const service = new RateLimitService()
+      service.setInactiveClaudeAccountsResolver(() => [accountA, accountB])
+      const dataTime = Date.now() - 30 * MIN
+      const withAttempt = (attemptAgoMin: number): ProviderRateLimits => ({
+        ...okProvider('claude', 1, dataTime),
+        usageMetadata: { lastAttemptAt: Date.now() - attemptAgoMin * MIN }
+      })
+      seedInactiveSnapshot(service, 'account-a', withAttempt(2))
+      seedInactiveSnapshot(service, 'account-b', withAttempt(20))
+      vi.mocked(fetchManagedAccountUsage).mockImplementation(async () => okProvider('claude', 5))
+
+      await runPass(service)
+
+      expect(vi.mocked(fetchManagedAccountUsage).mock.calls.map(([account]) => account.id)).toEqual(
+        ['account-b', 'account-a']
+      )
+    })
+
+    it('stops the pass at the first 429 and leaves the unattempted accounts untouched', async () => {
+      const service = new RateLimitService()
+      service.setInactiveClaudeAccountsResolver(() => [accountA, accountB, accountC])
+      const untouched = okProvider('claude', 77, Date.now() - 40 * MIN)
+      seedInactiveSnapshot(service, 'account-c', untouched)
+      vi.mocked(fetchManagedAccountUsage).mockImplementation(async (account) =>
+        account.id === 'account-a' ? okProvider('claude', 5) : limitedNoRetryAfter()
+      )
+
+      await runPass(service)
+
+      // B and A are never fetched, so they lead; A ok, then B hits the limit and C is not tried.
+      expect(vi.mocked(fetchManagedAccountUsage).mock.calls.map(([account]) => account.id)).toEqual(
+        ['account-a', 'account-b']
+      )
+      expect(snapshotFor(service, 'account-c')).toEqual(untouched)
+      expect(snapshotFor(service, 'account-c')?.status).toBe('ok')
+      expect(
+        service.getState().inactiveClaudeAccounts.every((entry) => entry.isFetching === false)
+      ).toBe(true)
+      expect(sweepRetryIn(service)).toBe(2 * MIN)
+    })
+
+    it('reaches different accounts on successive passes', async () => {
+      const service = new RateLimitService()
+      service.setInactiveClaudeAccountsResolver(() => [accountA, accountB, accountC])
+      vi.mocked(fetchManagedAccountUsage).mockImplementation(async (account) =>
+        account.id === 'account-b' ? limitedNoRetryAfter() : okProvider('claude', 5)
+      )
+
+      await runPass(service)
+      const firstPass = vi.mocked(fetchManagedAccountUsage).mock.calls.map(([a]) => a.id)
+      expect(firstPass).toEqual(['account-a', 'account-b'])
+
+      vi.mocked(fetchManagedAccountUsage).mockClear()
+      vi.mocked(fetchManagedAccountUsage).mockImplementation(async () => okProvider('claude', 6))
+      await vi.advanceTimersByTimeAsync(2 * MIN + 1)
+      await runPass(service)
+
+      // C was never reached; it leads, then B (no data), and A's fresh data is skipped.
+      expect(vi.mocked(fetchManagedAccountUsage).mock.calls.map(([a]) => a.id)).toEqual([
+        'account-c',
+        'account-b'
+      ])
+    })
+
+    it('doubles the backoff 2 -> 4 -> 8 and caps at 30 minutes', async () => {
+      const service = new RateLimitService()
+      service.setInactiveClaudeAccountsResolver(() => [accountA])
+      vi.mocked(fetchManagedAccountUsage).mockImplementation(async () => limitedNoRetryAfter())
+      const waits: (number | null)[] = []
+
+      for (let pass = 0; pass < 7; pass += 1) {
+        await runPass(service)
+        waits.push(sweepRetryIn(service))
+        // Wait out the backoff (whatever it is) before the next pass.
+        await vi.advanceTimersByTimeAsync((sweepRetryIn(service) ?? 0) + 1)
+      }
+
+      expect(waits.map((wait) => wait! / MIN)).toEqual([2, 4, 8, 16, 30, 30, 30])
+    })
+
+    it('resets the backoff to 2 minutes after a pass with an ok result', async () => {
+      const service = new RateLimitService()
+      service.setInactiveClaudeAccountsResolver(() => [accountA])
+      vi.mocked(fetchManagedAccountUsage).mockImplementation(async () => limitedNoRetryAfter())
+      for (let pass = 0; pass < 3; pass += 1) {
+        await runPass(service)
+        await vi.advanceTimersByTimeAsync((sweepRetryIn(service) ?? 0) + 1)
+      }
+
+      vi.mocked(fetchManagedAccountUsage).mockImplementation(async () => okProvider('claude', 5))
+      await runPass(service)
+      expect(sweepRetryIn(service)).toBeNull()
+
+      // Past the 5 minute freshness floor, the next limit starts again at 2 minutes.
+      await vi.advanceTimersByTimeAsync(6 * MIN)
+      vi.mocked(fetchManagedAccountUsage).mockImplementation(async () => limitedNoRetryAfter())
+      await runPass(service)
+      expect(sweepRetryIn(service)! / MIN).toBe(2)
+    })
+
+    it('lets a longer Retry-After win over the backoff', async () => {
+      const service = new RateLimitService()
+      service.setInactiveClaudeAccountsResolver(() => [accountA])
+      vi.mocked(fetchManagedAccountUsage).mockImplementation(async () =>
+        rateLimited(Date.now() + 45 * MIN)
+      )
+
+      await runPass(service)
+
+      expect(sweepRetryIn(service)! / MIN).toBe(45)
+      expect(sweepRetryIn(service)!).toBeGreaterThan(30 * MIN)
+    })
+
+    it('keeps the backoff when Retry-After is shorter than it', async () => {
+      const service = new RateLimitService()
+      service.setInactiveClaudeAccountsResolver(() => [accountA])
+      vi.mocked(fetchManagedAccountUsage).mockImplementation(async () =>
+        rateLimited(Date.now() + 30_000)
+      )
+
+      await runPass(service)
+
+      expect(sweepRetryIn(service)! / MIN).toBe(2)
+    })
+
+    it('starts no inactive sweep from any trigger during the backoff, but the active account still fetches', async () => {
+      const service = new RateLimitService()
+      service.setInactiveClaudeAccountsResolver(() => [accountA, accountB])
+      vi.mocked(fetchManagedAccountUsage).mockImplementation(async () => limitedNoRetryAfter())
+      await runPass(service)
+      vi.mocked(fetchManagedAccountUsage).mockClear()
+      expect(sweepRetryIn(service)).not.toBeNull()
+
+      // Panel open / poll tick (debounce long past), drain refetch, and the manual refresh.
+      resetOpenDebounce(service)
+      await service.fetchInactiveClaudeAccountsOnOpen()
+      await service.fetchInactiveClaudeAccountsOnOpen({ onlyAccountIds: new Set(['account-a']) })
+      ;(
+        service as unknown as { inactiveClaudeDeferredIds: Set<string> }
+      ).inactiveClaudeDeferredIds = new Set(['account-a'])
+      await service.refreshAfterClaudeLivePtysDrained()
+      expect(fetchManagedAccountUsage).not.toHaveBeenCalled()
+
+      // The active account path is unaffected.
+      vi.mocked(fetchClaudeRateLimits).mockResolvedValue(okProvider('claude', 9))
+      await service.refreshClaudeForTarget()
+      expect(fetchClaudeRateLimits).toHaveBeenCalled()
+      expect(fetchManagedAccountUsage).not.toHaveBeenCalled()
+
+      // Once the backoff has lapsed the sweep runs again.
+      await vi.advanceTimersByTimeAsync(2 * MIN + 1)
+      resetOpenDebounce(service)
+      const pass = service.fetchInactiveClaudeAccountsOnOpen()
+      await vi.advanceTimersByTimeAsync(60_000)
+      await pass
+      expect(fetchManagedAccountUsage).toHaveBeenCalled()
+    })
+
+    it('exposes no sweep retry time once it has passed', async () => {
+      const service = new RateLimitService()
+      service.setInactiveClaudeAccountsResolver(() => [accountA])
+      vi.mocked(fetchManagedAccountUsage).mockImplementation(async () => limitedNoRetryAfter())
+      await runPass(service)
+      expect(service.getState().claudeInactiveSweepRetryAt).toEqual(expect.any(Number))
+
+      await vi.advanceTimersByTimeAsync(2 * MIN + 1)
+
+      expect(service.getState().claudeInactiveSweepRetryAt).toBeNull()
+    })
   })
 
   describe('keeping the last known numbers through failures (R2)', () => {

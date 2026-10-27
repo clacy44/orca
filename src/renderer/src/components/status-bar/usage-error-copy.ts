@@ -75,7 +75,34 @@ function getDelegatedCliRefreshProvider(
   return p.provider === 'grok' || p.provider === 'kimi' ? p.provider : null
 }
 
-export function getProviderUsageStatusLabel(p: ProviderRateLimits): string {
+export type UsageStatusLabelOptions = {
+  /** Unix ms before which no inactive Claude sweep runs (main's throttling backoff). */
+  sweepRetryAt?: number | null
+  now?: number
+}
+
+// Why: a Claude 429 means the usage endpoint is throttling this client, never that the account
+// is out of quota, so it must not read "Limited".
+function getClaudeThrottledLabel(p: ProviderRateLimits, options: UsageStatusLabelOptions): string {
+  const now = options.now ?? Date.now()
+  const retryAt = Math.max(p.usageMetadata?.retryAtMs ?? 0, options.sweepRetryAt ?? 0)
+  if (retryAt <= now) {
+    return translate(
+      'auto.components.status.bar.tooltip.usageCheckThrottled',
+      'Usage check throttled'
+    )
+  }
+  return translate(
+    'auto.components.status.bar.tooltip.usageCheckThrottledNext',
+    'Usage check throttled · next check in {{value0}} min',
+    { value0: Math.max(1, Math.ceil((retryAt - now) / 60_000)) }
+  )
+}
+
+export function getProviderUsageStatusLabel(
+  p: ProviderRateLimits,
+  options: UsageStatusLabelOptions = {}
+): string {
   const delegatedCliProvider = getDelegatedCliRefreshProvider(p)
   if (delegatedCliProvider === 'grok') {
     return translate('auto.components.status.bar.tooltip.e2c6a4f917', 'Run Grok to refresh')
@@ -101,10 +128,11 @@ export function getProviderUsageStatusLabel(p: ProviderRateLimits): string {
       case 'cli-unavailable':
       case 'usage-unavailable':
         return translate('auto.components.status.bar.tooltip.f8b8dbed85', 'Usage unavailable')
+      case 'rate-limited':
+        return getClaudeThrottledLabel(p, options)
       case 'missing-credentials':
       case 'missing-scope':
       case 'parse':
-      case 'rate-limited':
       case 'server':
       case 'unknown':
       case undefined:
@@ -172,8 +200,12 @@ export function getProviderUsageErrorMessage(p: ProviderRateLimits): string {
           'auto.components.status.bar.tooltip.a7517cccb6',
           'Claude usage is unavailable right now.'
         )
-      case 'missing-credentials':
       case 'rate-limited':
+        return translate(
+          'auto.components.status.bar.tooltip.usageCheckThrottledDetail',
+          'Claude is throttling usage checks, not this account. The last known numbers are shown until the next check.'
+        )
+      case 'missing-credentials':
       case 'unknown':
       case undefined:
         break

@@ -108,9 +108,13 @@ const INACTIVE_FETCH_DEBOUNCE_MS = 60 * 1000 // 60 seconds — debounce fetch-on
 // account's live credential home; pace them out instead of bursting every
 // account the moment the switcher opens.
 const INACTIVE_CODEX_PROBE_STAGGER_MS = 2_000
-// Why: each inactive Claude fetch may refresh a token and hits the same tight usage-endpoint
-// budget; pace them out instead of bursting every saved account at once.
-const INACTIVE_CLAUDE_FETCH_STAGGER_MS = 2_000
+// Why: the usage endpoint throttles per client, not per account, so a burst of per-account
+// fetches trips a 429 for everyone behind the first; space real network fetches well apart.
+const INACTIVE_CLAUDE_FETCH_SPACING_MS = 10_000
+// Why: the first 429 in a sweep means the whole client is throttled, so the sweep stops and the
+// next one waits: 2 min, doubling per consecutive limited sweep, capped at 30 min.
+const INACTIVE_CLAUDE_SWEEP_BACKOFF_MIN_MS = 2 * 60 * 1000
+const INACTIVE_CLAUDE_SWEEP_BACKOFF_MAX_MS = 30 * 60 * 1000
 const DEFERRED_STARTUP_ACTIVE_REFRESH_MS = 1000
 
 // Why: inactive account arrays are derived from provider caches on demand in getState()/pushToRenderer().
@@ -261,6 +265,9 @@ export class RateLimitService {
   private queuedDrainRefetchIds = new Set<string>()
   private inactiveCodexFetching = new Set<string>()
   private lastInactiveClaudeFetchAt = 0
+  // No inactive Claude sweep starts before this time; the active account path ignores it.
+  private claudeInactiveSweepRetryAt = 0
+  private claudeInactiveSweepBackoffMs = INACTIVE_CLAUDE_SWEEP_BACKOFF_MIN_MS
   private inactiveClaudeAccountsGeneration = 0
   private lastInactiveCodexFetchAt = 0
   private inactiveCodexAccountsGeneration = 0
@@ -434,6 +441,8 @@ export class RateLimitService {
       grokAuthConfigured: this.grokAuthConfigured,
       claudeTarget: this.claudeFetchTarget,
       codexTarget: this.codexFetchTarget,
+      claudeInactiveSweepRetryAt:
+        this.claudeInactiveSweepRetryAt > Date.now() ? this.claudeInactiveSweepRetryAt : null,
       inactiveClaudeAccounts: this.buildInactiveArray(
         this.inactiveClaudeCache,
         this.inactiveClaudeFetching
@@ -633,6 +642,11 @@ export class RateLimitService {
     onlyAccountIds?: ReadonlySet<string>
   }): Promise<void> {
     const onlyAccountIds = options?.onlyAccountIds
+    // Why: every trigger (poll, panel open, drain refetch, manual refresh) funnels through here, so
+    // the sweep-level backoff is enforced in exactly one place.
+    if (this.claudeInactiveSweepRetryAt > Date.now()) {
+      return
+    }
     if (
       !onlyAccountIds &&
       Date.now() - this.lastInactiveClaudeFetchAt < INACTIVE_FETCH_DEBOUNCE_MS
@@ -643,8 +657,10 @@ export class RateLimitService {
     if (this.inactiveClaudeFetching.size > 0) {
       return
     }
-    const accounts = (this.inactiveClaudeAccountsResolver?.() ?? []).filter(
-      (account) => !onlyAccountIds || onlyAccountIds.has(account.id)
+    const accounts = this.orderInactiveClaudeAccounts(
+      (this.inactiveClaudeAccountsResolver?.() ?? []).filter(
+        (account) => !onlyAccountIds || onlyAccountIds.has(account.id)
+      )
     )
     if (accounts.length === 0) {
       return
@@ -659,8 +675,15 @@ export class RateLimitService {
     this.pushToRenderer()
 
     let staggerNextFetch = false
+    let sweepStopped = false
     try {
       for (const account of accounts) {
+        // Why: after the first 429 the rest keep their previous snapshot and status untouched.
+        if (sweepStopped) {
+          this.inactiveClaudeFetching.delete(account.id)
+          this.pushToRenderer()
+          continue
+        }
         if (
           signal.aborted ||
           fetchGeneration !== this.inactiveClaudeAccountsGeneration ||
@@ -685,7 +708,7 @@ export class RateLimitService {
           continue
         }
         if (staggerNextFetch) {
-          await delayUnlessAborted(INACTIVE_CLAUDE_FETCH_STAGGER_MS, signal)
+          await delayUnlessAborted(INACTIVE_CLAUDE_FETCH_SPACING_MS, signal)
           // Why: the account set can change while the stagger delay runs.
           if (
             signal.aborted ||
@@ -745,6 +768,13 @@ export class RateLimitService {
           } else {
             this.inactiveClaudeDeferredIds.delete(account.id)
           }
+          if (fresh.status === 'ok') {
+            this.claudeInactiveSweepBackoffMs = INACTIVE_CLAUDE_SWEEP_BACKOFF_MIN_MS
+          }
+          if (fresh.usageMetadata?.failureKind === 'rate-limited') {
+            this.noteInactiveClaudeSweepRateLimited(fresh.usageMetadata.retryAtMs)
+            sweepStopped = true
+          }
         } catch (error) {
           // Why: per-account try/catch keeps one Keychain/network error from aborting the remaining accounts in the batch.
           if (
@@ -779,6 +809,10 @@ export class RateLimitService {
               account.id,
               this.applyStalePolicy(errorSnapshot, cachedOnError, { retainIndefinitely: true })
             )
+            if (errorSnapshot.usageMetadata?.failureKind === 'rate-limited') {
+              this.noteInactiveClaudeSweepRateLimited(errorSnapshot.usageMetadata.retryAtMs)
+              sweepStopped = true
+            }
           }
         }
         this.inactiveClaudeFetching.delete(account.id)
@@ -796,6 +830,37 @@ export class RateLimitService {
       this.finishFetchCycle(controller)
     }
     await this.runQueuedDrainRefetch()
+  }
+
+  /**
+   * Oldest information first, so successive passes reach different accounts: accounts never
+   * successfully fetched lead, then the stalest successful data, ties by oldest attempt.
+   */
+  private orderInactiveClaudeAccounts<T extends { id: string }>(accounts: readonly T[]): T[] {
+    const keyOf = (id: string): [number, number] => {
+      const cached = this.inactiveClaudeCache.get(id)
+      if (!cached) {
+        return [0, 0]
+      }
+      const hasData = Boolean(cached.session || cached.weekly || cached.fableWeekly)
+      return [
+        hasData ? cached.updatedAt : 0,
+        cached.usageMetadata?.lastAttemptAt ?? cached.updatedAt
+      ]
+    }
+    return accounts
+      .map((account, index) => ({ account, index, key: keyOf(account.id) }))
+      .sort((a, b) => a.key[0] - b.key[0] || a.key[1] - b.key[1] || a.index - b.index)
+      .map((entry) => entry.account)
+  }
+
+  private noteInactiveClaudeSweepRateLimited(retryAtMs: number | undefined): void {
+    const backoffMs = this.claudeInactiveSweepBackoffMs
+    this.claudeInactiveSweepRetryAt = Math.max(retryAtMs ?? 0, Date.now() + backoffMs)
+    this.claudeInactiveSweepBackoffMs = Math.min(
+      backoffMs * 2,
+      INACTIVE_CLAUDE_SWEEP_BACKOFF_MAX_MS
+    )
   }
 
   private async runQueuedDrainRefetch(): Promise<void> {

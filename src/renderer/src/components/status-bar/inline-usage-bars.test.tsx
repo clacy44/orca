@@ -211,13 +211,88 @@ describe('InlineUsageBars', () => {
       expect(markup).not.toContain('Sign in to see usage')
     })
 
-    it('labels a rate-limited account as Limited', async () => {
+    it('reads a Claude 429 as a throttled check, never as the account being out of usage', async () => {
       const markup = await render(
         errorLimits('rate-limited', 'Claude usage is rate limited right now.')
       )
 
-      expect(markup).toContain('Limited')
+      expect(markup).toContain('Usage check throttled')
+      expect(markup).not.toContain('Limited')
+      expect(markup).not.toContain('next check in')
       expect(markup).not.toContain('Sign in to see usage')
+    })
+
+    it('adds the next check time from the sweep retry time', async () => {
+      const { InlineUsageBars } = await import('./StatusBar')
+
+      const markup = renderToStaticMarkup(
+        <InlineUsageBars
+          limits={errorLimits('rate-limited')}
+          isFetching={false}
+          sweepRetryAt={Date.now() + 4 * 60_000 + 30_000}
+        />
+      )
+
+      expect(markup).toContain('Usage check throttled · next check in 5 min')
+    })
+
+    it('uses the later of the account Retry-After and the sweep retry time', async () => {
+      const { InlineUsageBars } = await import('./StatusBar')
+      const limits = errorLimits('rate-limited')
+      limits.usageMetadata = {
+        failureKind: 'rate-limited',
+        retryAtMs: Date.now() + 10 * 60_000 - 1_000
+      }
+
+      const markup = renderToStaticMarkup(
+        <InlineUsageBars
+          limits={limits}
+          isFetching={false}
+          sweepRetryAt={Date.now() + 2 * 60_000}
+        />
+      )
+
+      expect(markup).toContain('next check in 10 min')
+    })
+
+    it('drops the next-check text once the retry time has passed', async () => {
+      const { InlineUsageBars } = await import('./StatusBar')
+
+      const markup = renderToStaticMarkup(
+        <InlineUsageBars
+          limits={errorLimits('rate-limited')}
+          isFetching={false}
+          sweepRetryAt={Date.now() - 60_000}
+        />
+      )
+
+      expect(markup).toContain('Usage check throttled')
+      expect(markup).not.toContain('next check in')
+    })
+
+    it('keeps the last known numbers visible for a throttled account', async () => {
+      const { InlineUsageBars } = await import('./StatusBar')
+      const limits = claudeLimits()
+      limits.status = 'error'
+      limits.usageMetadata = { failureKind: 'rate-limited' }
+
+      const markup = renderToStaticMarkup(<InlineUsageBars limits={limits} isFetching={false} />)
+
+      expect(markup).toContain('32% used 5h')
+      expect(markup).not.toContain('Usage check throttled')
+    })
+
+    it('leaves Codex on its original prompt even with a rate-limited kind', async () => {
+      const { InlineUsageBars } = await import('./StatusBar')
+      const codex = errorLimits('rate-limited')
+      codex.provider = 'codex'
+
+      const markup = renderToStaticMarkup(
+        <InlineUsageBars limits={codex} isFetching={false} sweepRetryAt={Date.now() + 60_000} />
+      )
+
+      expect(markup).toContain('Sign in to see usage')
+      expect(markup).not.toContain('throttled')
     })
   })
   describe('windows that reset since the data was fetched', () => {

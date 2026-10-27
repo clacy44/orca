@@ -1046,11 +1046,17 @@ function MiniBar({
 // Compact usage bars for inactive accounts in the switcher.
 export function InlineUsageBars({
   limits,
-  isFetching
+  isFetching,
+  sweepRetryAt
 }: {
   limits: ProviderRateLimits
   isFetching: boolean
+  // Overrides the local store's sweep retry time (a remote-paired roster brings its own).
+  sweepRetryAt?: number | null
 }): React.JSX.Element {
+  const storeSweepRetryAt = useAppStore(
+    (state) => state.rateLimits?.claudeInactiveSweepRetryAt ?? null
+  )
   const display = normalizeUsagePercentageDisplay(
     useAppStore((state) => state.usagePercentageDisplay)
   )
@@ -1159,7 +1165,9 @@ export function InlineUsageBars({
           {limits.provider !== 'claude' ||
           limits.usageMetadata?.failureKind === 'missing-credentials'
             ? translate('auto.components.status.bar.StatusBar.f19a63e7cd', 'Sign in to see usage')
-            : getProviderUsageStatusLabel(limits)}
+            : getProviderUsageStatusLabel(limits, {
+                sweepRetryAt: sweepRetryAt === undefined ? storeSweepRetryAt : sweepRetryAt
+              })}
         </span>
       ) : null}
     </div>
@@ -1284,6 +1292,7 @@ function ClaudeAccountUsageRows({
   const fetchInactiveClaudeAccountUsage = useAppStore((s) => s.fetchInactiveClaudeAccountUsage)
   const inactiveClaudeAccounts = useAppStore((s) => s.rateLimits.inactiveClaudeAccounts)
   const claudeTarget = useAppStore((s) => s.rateLimits.claudeTarget)
+  const localSweepRetryAt = useAppStore((s) => s.rateLimits.claudeInactiveSweepRetryAt ?? null)
   const settings = useAppStore((s) => s.settings)
   const activeRuntimeEnvironmentId = settings?.activeRuntimeEnvironmentId?.trim() || null
   const [remote, setRemote] = useState<{
@@ -1349,14 +1358,24 @@ function ClaudeAccountUsageRows({
     now
   )
 
+  const sweepRetryAt =
+    useRemoteUsage && remote?.rateLimits
+      ? (remote.rateLimits.claudeInactiveSweepRetryAt ?? null)
+      : localSweepRetryAt
+
   return (
     <ClaudeAccountUsageList
       rows={rows}
       formatAge={formatInactiveUsageAge}
       now={now}
+      sweepRetryAt={sweepRetryAt}
       renderUsage={(row) =>
         row.limits ? (
-          <InlineUsageBars limits={row.limits} isFetching={row.isFetching} />
+          <InlineUsageBars
+            limits={row.limits}
+            isFetching={row.isFetching}
+            sweepRetryAt={sweepRetryAt}
+          />
         ) : (
           <InlineUsageSkeleton />
         )
