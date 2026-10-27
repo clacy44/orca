@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import {
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { waitForClaudeCliRefreshLock } from './cli-refresh-lock'
@@ -74,15 +82,29 @@ describe('waitForClaudeCliRefreshLock', () => {
     expect(settled).toBe('timed-out')
   })
 
-  it('also honours the lock beside the real credentials file behind a symlink', async () => {
+  it('honours the lock beside the config directory (<dir>.lock)', async () => {
+    writeLock(`${realpathSync(configDir)}.lock`)
+    let settled: string | null = null
+    const wait = waitForClaudeCliRefreshLock(configDir, { timeoutMs: 1_000 }).then(
+      (result) => (settled = result)
+    )
+
+    await vi.advanceTimersByTimeAsync(500)
+    expect(settled).toBeNull()
+    await vi.advanceTimersByTimeAsync(1_000)
+    await wait
+    expect(settled).toBe('timed-out')
+    rmSync(`${realpathSync(configDir)}.lock`, { force: true })
+  })
+
+  it('locks beside the REAL directory when the config dir is a symlink', async () => {
     const realDir = mkdtempSync(join(tmpdir(), 'orca-cli-lock-real-'))
+    const linkPath = `${realDir}-link`
+    symlinkSync(realDir, linkPath)
     try {
-      const realCredentials = join(realDir, 'creds.json')
-      writeFileSync(realCredentials, '{}')
-      symlinkSync(realCredentials, join(configDir, '.credentials.json'))
-      writeLock(`${realCredentials}.lock`)
+      writeLock(`${realDir}.lock`)
       let settled: string | null = null
-      const wait = waitForClaudeCliRefreshLock(configDir, { timeoutMs: 1_000 }).then(
+      const wait = waitForClaudeCliRefreshLock(linkPath, { timeoutMs: 1_000 }).then(
         (result) => (settled = result)
       )
 
@@ -92,21 +114,18 @@ describe('waitForClaudeCliRefreshLock', () => {
       await wait
       expect(settled).toBe('timed-out')
     } finally {
+      rmSync(`${realDir}.lock`, { force: true })
+      rmSync(linkPath, { force: true })
       rmSync(realDir, { recursive: true, force: true })
     }
   })
 
-  it('does not wait on a lock beside the symlink itself when the real file differs', async () => {
-    const realDir = mkdtempSync(join(tmpdir(), 'orca-cli-lock-real-'))
-    try {
-      const realCredentials = join(realDir, 'creds.json')
-      writeFileSync(realCredentials, '{}')
-      symlinkSync(realCredentials, join(configDir, '.credentials.json'))
-      // A lock beside the link is not the CLI's lock; only the real file's counts.
-      writeLock(join(configDir, '.credentials.json.lock'))
-      await expect(waitForClaudeCliRefreshLock(configDir)).resolves.toBe('clear')
-    } finally {
-      rmSync(realDir, { recursive: true, force: true })
-    }
+  it('ignores a stale <dir>.lock and the old credentials-file lock path', async () => {
+    writeLock(`${realpathSync(configDir)}.lock`, 61_000)
+    // Not where the CLI locks any more.
+    writeLock(join(configDir, '.credentials.json.lock'))
+
+    await expect(waitForClaudeCliRefreshLock(configDir)).resolves.toBe('clear')
+    rmSync(`${realpathSync(configDir)}.lock`, { force: true })
   })
 })

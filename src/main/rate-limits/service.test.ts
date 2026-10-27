@@ -2555,19 +2555,62 @@ describe('RateLimitService inactive Claude account fetch policy', () => {
     vi.useRealTimers()
   })
 
-  it('hands the fetcher the injected credentials preparer', async () => {
+  it('hands the fetcher a credentials preparer that delegates to the injected one', async () => {
     const service = new RateLimitService()
-    const preparer = vi.fn()
+    const prepared = { status: 'missing' as const }
+    const preparer = vi.fn(async () => prepared)
     service.setInactiveClaudeAccountsResolver(() => [accountA])
     service.setInactiveClaudeCredentialsPreparer(preparer)
     vi.mocked(fetchManagedAccountUsage).mockResolvedValue(okProvider('claude', 10))
 
     await service.fetchInactiveClaudeAccountsOnOpen()
 
-    expect(fetchManagedAccountUsage).toHaveBeenCalledWith(
-      accountA,
-      expect.objectContaining({ prepareCredentials: preparer })
-    )
+    const options = vi.mocked(fetchManagedAccountUsage).mock.calls[0]?.[1]
+    expect(options?.prepareCredentials).toEqual(expect.any(Function))
+    await expect(options?.prepareCredentials?.('account-a')).resolves.toBe(prepared)
+    expect(preparer).toHaveBeenCalledWith('account-a')
+  })
+
+  it('leaves the prior snapshot and its status untouched when the preparer says skip', async () => {
+    const service = new RateLimitService()
+    service.setInactiveClaudeAccountsResolver(() => [accountA])
+    service.setInactiveClaudeCredentialsPreparer(async () => ({ status: 'skip' }))
+    vi.mocked(fetchManagedAccountUsage).mockResolvedValueOnce(okProvider('claude', 33))
+    await service.fetchInactiveClaudeAccountsOnOpen()
+    const before = snapshotFor(service, 'account-a')
+
+    // The fetcher reports the skip as an aborted-style error; the service must not cache it.
+    vi.mocked(fetchManagedAccountUsage).mockImplementationOnce(async (_account, options) => {
+      await options?.prepareCredentials?.('account-a')
+      return errorProvider('claude', 'Rate-limit fetch aborted')
+    })
+    resetOpenDebounce(service)
+    await vi.advanceTimersByTimeAsync(6 * 60_000)
+    await service.fetchInactiveClaudeAccountsOnOpen()
+
+    expect(fetchManagedAccountUsage).toHaveBeenCalledTimes(2)
+    const after = snapshotFor(service, 'account-a')
+    expect(after).toEqual(before)
+    expect(after?.status).toBe('ok')
+    expect(service.getState().inactiveClaudeAccounts[0]?.isFetching).toBe(false)
+  })
+
+  it('still caches a genuine failure when the preparer did not skip (positive control)', async () => {
+    const service = new RateLimitService()
+    service.setInactiveClaudeAccountsResolver(() => [accountA])
+    service.setInactiveClaudeCredentialsPreparer(async () => ({ status: 'missing' }))
+    vi.mocked(fetchManagedAccountUsage).mockResolvedValueOnce(okProvider('claude', 33))
+    await service.fetchInactiveClaudeAccountsOnOpen()
+    vi.mocked(fetchManagedAccountUsage).mockImplementationOnce(async (_account, options) => {
+      await options?.prepareCredentials?.('account-a')
+      return errorProvider('claude', 'No credentials')
+    })
+    resetOpenDebounce(service)
+    await vi.advanceTimersByTimeAsync(6 * 60_000)
+
+    await service.fetchInactiveClaudeAccountsOnOpen()
+
+    expect(snapshotFor(service, 'account-a')?.status).toBe('error')
   })
 
   it('skips an account whose cached Retry-After window is still active', async () => {

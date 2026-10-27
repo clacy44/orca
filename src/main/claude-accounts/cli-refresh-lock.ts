@@ -1,7 +1,6 @@
 import { realpathSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
-const CREDENTIALS_FILENAME = '.credentials.json'
 const REFRESH_LOCK_FILENAME = '.oauth_refresh.lock'
 
 export type ClaudeCliRefreshLockWaitOptions = {
@@ -14,12 +13,12 @@ export type ClaudeCliRefreshLockWaitResult = 'clear' | 'timed-out'
 
 function lockPathsFor(configDir: string): string[] {
   const paths = [join(configDir, REFRESH_LOCK_FILENAME)]
-  const credentialsPath = join(configDir, CREDENTIALS_FILENAME)
   try {
-    // Why: the CLI locks the REAL credentials file, so a symlinked file locks beside its target.
-    paths.push(`${realpathSync(credentialsPath)}.lock`)
+    // Why: CLI 2.1.310 locks a sibling of the REAL config directory, so a symlinked dir locks
+    // beside its target.
+    paths.push(`${realpathSync(configDir)}.lock`)
   } catch {
-    paths.push(`${credentialsPath}.lock`)
+    paths.push(`${configDir}.lock`)
   }
   return [...new Set(paths)]
 }
@@ -42,7 +41,7 @@ function hasFreshLock(paths: readonly string[], staleMs: number): boolean {
  * Waits until no Claude CLI is mid-refresh in `configDir`.
  *
  * Before any refresh the CLI re-reads its stored credentials, takes
- * `<configDir>/.oauth_refresh.lock` (stale after 60 s) and saves with a compare-and-swap on the
+ * `<configDir>/.oauth_refresh.lock` (stale after 60 s; CLI 2.1.310 locks `<realpath(configDir)>.lock`) and saves with a compare-and-swap on the
  * refresh token. Reading the runtime credentials back while that lock is held can capture the
  * pre-rotation blob and then overwrite managed storage with a revoked token. A lock still fresh at
  * `timeoutMs` is reported, not waited on forever.

@@ -250,6 +250,80 @@ describe('ClaudeAccountService credential capture', () => {
     expect(runtimeAuth.forceMaterializeCurrentSelectionForRollback).toHaveBeenCalled()
   })
 
+  it('rolls back to the blob as it stood after login, not the pre-login one, when the old token rotated mid-login', async () => {
+    setPlatform('linux')
+    tempDir = CLAUDE_SERVICE_TEST_ROOT
+    rmSync(tempDir, { recursive: true, force: true })
+    const managedAuthPath = join(tempDir, 'claude-accounts', 'account-1', 'auth')
+    mkdirSync(managedAuthPath, { recursive: true })
+    writeFileSync(join(managedAuthPath, '.orca-managed-claude-auth'), 'account-1\n', 'utf-8')
+    writeFileSync(join(managedAuthPath, '.credentials.json'), '{"old":true}\n', 'utf-8')
+    writeFileSync(join(managedAuthPath, 'oauth-account.json'), '{"oldOauth":true}\n', 'utf-8')
+    let settings = {
+      claudeManagedAccounts: [
+        {
+          id: 'account-1',
+          email: 'old@example.com',
+          managedAuthPath,
+          authMethod: 'subscription-oauth',
+          organizationUuid: null,
+          organizationName: null,
+          createdAt: 1,
+          updatedAt: 1,
+          lastAuthenticatedAt: 1
+        }
+      ],
+      activeClaudeManagedAccountId: 'account-1'
+    }
+    const store = {
+      getSettings: vi.fn(() => settings),
+      updateSettings: vi.fn((updates: Partial<typeof settings>) => {
+        settings = { ...settings, ...updates }
+        return settings
+      })
+    }
+    const runtimeAuth = {
+      clearLastWrittenCredentialsJson: vi.fn(),
+      forceMaterializeCurrentSelectionForRollback: vi.fn(async () => {}),
+      syncForCurrentSelection: vi.fn(async () => {
+        throw new Error('materialize failed')
+      })
+    }
+    const rateLimits = { evictInactiveClaudeCache: vi.fn(), refreshForClaudeAccountChange: vi.fn() }
+    const { ClaudeAccountService } = await import('./service')
+    const service = new ClaudeAccountService(
+      store as never,
+      rateLimits as never,
+      runtimeAuth as never
+    )
+    ;(
+      service as unknown as { runClaudeLoginAndCapture(): Promise<unknown> }
+    ).runClaudeLoginAndCapture = vi.fn(async () => {
+      // The old token rotates while the user is still in the browser.
+      writeFileSync(
+        join(managedAuthPath, '.credentials.json'),
+        '{"rotatedDuringLogin":true}\n',
+        'utf-8'
+      )
+      return {
+        credentialsJson: '{"new":true}\n',
+        oauthAccount: { newOauth: true },
+        identity: { email: 'new@example.com', organizationUuid: null, organizationName: null }
+      }
+    })
+
+    await expect(service.reauthenticateAccount('account-1')).rejects.toThrow('materialize failed')
+
+    expect(readFileSync(join(managedAuthPath, '.credentials.json'), 'utf-8')).toBe(
+      '{"rotatedDuringLogin":true}\n'
+    )
+    expect(readFileSync(join(managedAuthPath, 'oauth-account.json'), 'utf-8')).toBe(
+      '{"oldOauth":true}\n'
+    )
+    expect(store.getSettings().claudeManagedAccounts[0].email).toBe('old@example.com')
+    expect(runtimeAuth.forceMaterializeCurrentSelectionForRollback).toHaveBeenCalled()
+  })
+
   it('leaves rotated managed credentials alone when reauth fails after a background refresh', async () => {
     setPlatform('linux')
     tempDir = CLAUDE_SERVICE_TEST_ROOT

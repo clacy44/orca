@@ -1,4 +1,6 @@
 export const INACTIVE_TOKEN_KEEPALIVE_INTERVAL_MS = 6 * 60 * 60 * 1000
+// Why: a first pass shortly after launch, so a machine that is rarely on for 6 h still refreshes.
+export const INACTIVE_TOKEN_KEEPALIVE_FIRST_TICK_MS = 5 * 60 * 1000
 
 /**
  * Keeps non-active accounts' single-use refresh tokens from aging out unused.
@@ -10,6 +12,7 @@ export function startInactiveTokenKeepAlive(options: {
   listInactiveAccountIds: () => readonly string[]
   prepare: (accountId: string) => Promise<unknown>
   intervalMs?: number
+  firstTickDelayMs?: number
 }): { stop: () => void } {
   let running = false
   const tick = async (): Promise<void> => {
@@ -29,11 +32,21 @@ export function startInactiveTokenKeepAlive(options: {
       running = false
     }
   }
+  // Why unref: the keep-alive must never hold the process open on quit.
+  const first = setTimeout(
+    () => void tick(),
+    options.firstTickDelayMs ?? INACTIVE_TOKEN_KEEPALIVE_FIRST_TICK_MS
+  )
+  first.unref?.()
   const timer = setInterval(
     () => void tick(),
     options.intervalMs ?? INACTIVE_TOKEN_KEEPALIVE_INTERVAL_MS
   )
-  // Why: the keep-alive must never hold the process open on quit.
   timer.unref?.()
-  return { stop: () => clearInterval(timer) }
+  return {
+    stop: () => {
+      clearTimeout(first)
+      clearInterval(timer)
+    }
+  }
 }

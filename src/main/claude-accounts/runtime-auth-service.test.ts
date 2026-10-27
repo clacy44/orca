@@ -4284,6 +4284,64 @@ describe('ClaudeRuntimeAuthService', () => {
         expect(readManagedCredentialsForTest('account-2', managedAuthPath2)).toBe(REFRESHED)
       })
 
+      it('never writes the old, already-used blob over the runtime copy after repeated write failures', async () => {
+        const { service, store } = await setup()
+        vi.mocked(writeManagedClaudeKeychainCredentials)
+          .mockRejectedValueOnce(new Error('locked 1'))
+          .mockRejectedValueOnce(new Error('locked 2'))
+          .mockRejectedValueOnce(new Error('locked 3'))
+        vi.spyOn(console, 'warn').mockImplementation(() => {})
+        await service.prepareInactiveCredentialsForUsage('account-2')
+
+        // The user switches to account-2; the flush at the start of this sync fails a third time.
+        // Not expiring, so the sync cannot rescue the runtime copy by refreshing again.
+        vi.mocked(isOauthTokenExpiring).mockReturnValue(false)
+        store.updateSettings({ activeClaudeManagedAccountId: 'account-2' })
+        await service.syncForCurrentSelection()
+
+        const runtimeCredentials = readFileSync(
+          join(testState.fakeHomeDir, '.claude', '.credentials.json'),
+          'utf-8'
+        )
+        expect(runtimeCredentials).toBe(REFRESHED)
+        expect(runtimeCredentials).not.toContain('two-stale-refresh')
+        expect(testState.scopedKeychainCredentials).not.toContain('two-stale-refresh')
+      })
+
+      it('still flushes a second rotation against the original on-disk baseline', async () => {
+        const { service, managedAuthPath2 } = await setup()
+        const REFRESHED_AGAIN = createClaudeCredentialsJson(
+          'two@example.com',
+          'two-refreshed-again',
+          null,
+          9_999_999_999_999
+        )
+        // The first rotation is itself already expiring, so the next call rotates it again.
+        vi.mocked(isOauthTokenExpiring).mockImplementation(
+          (json: string) => json.includes('-stale') || json === REFRESHED
+        )
+        vi.mocked(writeManagedClaudeKeychainCredentials)
+          .mockRejectedValueOnce(new Error('1'))
+          .mockRejectedValueOnce(new Error('2'))
+          .mockRejectedValueOnce(new Error('3 (flush)'))
+          .mockRejectedValueOnce(new Error('4'))
+          .mockRejectedValueOnce(new Error('5'))
+        vi.spyOn(console, 'warn').mockImplementation(() => {})
+        await service.prepareInactiveCredentialsForUsage('account-2')
+        vi.mocked(refreshClaudeOauthCredentials).mockResolvedValue(REFRESHED_AGAIN)
+
+        const second = await service.prepareInactiveCredentialsForUsage('account-2')
+
+        expect(second).toMatchObject({ status: 'ready', credentialsJson: REFRESHED_AGAIN })
+        // The second rotation was refreshed from the first, not from the stale disk blob.
+        expect(refreshClaudeOauthCredentials).toHaveBeenLastCalledWith(REFRESHED)
+        expect(readManagedCredentialsForTest('account-2', managedAuthPath2)).toBe(STALE)
+
+        await service.syncForCurrentSelection()
+
+        expect(readManagedCredentialsForTest('account-2', managedAuthPath2)).toBe(REFRESHED_AGAIN)
+      })
+
       it('drops the pending write when storage changed meanwhile (compare-and-swap)', async () => {
         const { service, managedAuthPath2 } = await setup()
         vi.mocked(writeManagedClaudeKeychainCredentials)
@@ -4306,6 +4364,101 @@ describe('ClaudeRuntimeAuthService', () => {
           REFRESHED
         )
       })
+    })
+  })
+
+  describe('drainMutationQueue (quit)', () => {
+    const STALE_FOR_DRAIN = createClaudeCredentialsJson('two@example.com', 'two-stale', null, 1_000)
+    const REFRESHED_FOR_DRAIN = createClaudeCredentialsJson(
+      'two@example.com',
+      'two-refreshed',
+      null,
+      9_999_999_999_999
+    )
+
+    afterEach(() => {
+      vi.mocked(isOauthTokenExpiring).mockReset()
+      vi.mocked(isOauthTokenExpiring).mockReturnValue(false)
+      vi.mocked(refreshClaudeOauthCredentials).mockReset()
+      vi.mocked(refreshClaudeOauthCredentials).mockResolvedValue(null)
+    })
+
+    async function setupInFlightRefresh(): Promise<{
+      service: ClaudeRuntimeAuthService
+      managedAuthPath2: string
+      release: () => void
+      refresh: Promise<unknown>
+    }> {
+      const path1 = createManagedClaudeAuth(
+        testState.userDataDir,
+        'account-1',
+        createClaudeCredentialsJson('one@example.com', 'one-fresh')
+      )
+      const managedAuthPath2 = createManagedClaudeAuth(
+        testState.userDataDir,
+        'account-2',
+        STALE_FOR_DRAIN
+      )
+      const store = createStore(
+        createSettings({
+          claudeManagedAccounts: [
+            createClaudeAccount('account-1', path1, { email: 'one@example.com' }),
+            createClaudeAccount('account-2', managedAuthPath2, { email: 'two@example.com' })
+          ],
+          activeClaudeManagedAccountId: 'account-1'
+        })
+      )
+      vi.mocked(isOauthTokenExpiring).mockImplementation((json: string) => json.includes('-stale'))
+      let release: () => void = () => {}
+      vi.mocked(refreshClaudeOauthCredentials).mockImplementation(
+        () =>
+          new Promise<string>((resolve) => {
+            release = () => resolve(REFRESHED_FOR_DRAIN)
+          })
+      )
+      const { ClaudeRuntimeAuthService } = await import('./runtime-auth-service')
+      const service = new ClaudeRuntimeAuthService(store as never)
+      await service.syncForCurrentSelection()
+      const refresh = service.prepareInactiveCredentialsForUsage('account-2')
+      await vi.waitFor(() => expect(refreshClaudeOauthCredentials).toHaveBeenCalledTimes(1))
+      return { service, managedAuthPath2, release: () => release(), refresh }
+    }
+
+    it('resolves immediately when nothing is in flight', async () => {
+      const store = createStore(createSettings({}))
+      const { ClaudeRuntimeAuthService } = await import('./runtime-auth-service')
+      const service = new ClaudeRuntimeAuthService(store as never)
+      await service.syncForCurrentSelection()
+
+      await expect(service.drainMutationQueue(5_000)).resolves.toBe('drained')
+    })
+
+    it('waits for an in-flight refresh and its write-back before resolving', async () => {
+      const { service, managedAuthPath2, release, refresh } = await setupInFlightRefresh()
+      let settled: string | null = null
+      const drain = service.drainMutationQueue(5_000).then((result) => (settled = result))
+
+      await new Promise((resolve) => setTimeout(resolve, 30))
+      expect(settled).toBeNull()
+
+      release()
+      await drain
+      await refresh
+
+      expect(settled).toBe('drained')
+      expect(readManagedCredentialsForTest('account-2', managedAuthPath2)).toBe(REFRESHED_FOR_DRAIN)
+    })
+
+    it('gives up after the bound instead of blocking quit', async () => {
+      const { service, release, refresh } = await setupInFlightRefresh()
+      const startedAt = Date.now()
+
+      const result = await service.drainMutationQueue(60)
+
+      expect(result).toBe('timed-out')
+      expect(Date.now() - startedAt).toBeLessThan(1_000)
+      release()
+      await refresh
     })
   })
 

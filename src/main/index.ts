@@ -3719,6 +3719,10 @@ app.on('will-quit', (e) => {
   // Why: cancels relay restart/reinstall timers and kills wsl.exe children deterministically, not via stdio-pipe teardown.
   wslHookRelayManager.disposeAll()
   const statsFlush = stats?.flushAsync() ?? Promise.resolve()
+  // Why: an in-flight inactive-token refresh the server already acknowledged must land its rotated
+  // token on disk; bounded at ~5 s so it can never hold the quit (the keep-alive stopped earlier).
+  claudeTokenKeepAlive?.stop()
+  const claudeTokenMutationDrain = claudeRuntimeAuth?.drainMutationQueue(5_000) ?? Promise.resolve()
   // Why: agent-browser daemon processes would otherwise linger after quit, holding ports and stale session state on disk.
   runtime?.getAgentBrowserBridge()?.destroyAllSessions()
   // Why: headless offscreen browser windows are main-process owned; tear them down explicitly on quit.
@@ -3777,6 +3781,7 @@ app.on('will-quit', (e) => {
     { name: 'plugin-hosts', promise: pluginHostShutdown },
     { name: 'codex-backfill-recovery', promise: codexBackfillRecoveryShutdown },
     { name: 'usage-cache', promise: usageCacheFlush },
+    { name: 'claude-token-mutations', promise: claudeTokenMutationDrain },
     { name: 'stats', promise: statsFlush },
     { name: 'state', promise: storeFlush }
   ])

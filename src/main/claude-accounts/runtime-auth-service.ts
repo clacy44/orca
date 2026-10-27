@@ -245,6 +245,23 @@ export class ClaudeRuntimeAuthService {
     })
   }
 
+  /**
+   * Waits for the serialized mutations queued so far (an in-flight token refresh and its
+   * write-back, most importantly), giving up after `timeoutMs`. Quit calls this so a refresh the
+   * server already acknowledged is not cut off before its rotated token reaches disk.
+   */
+  async drainMutationQueue(timeoutMs = 5_000): Promise<'drained' | 'timed-out'> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<'timed-out'>((resolve) => {
+      timer = setTimeout(() => resolve('timed-out'), timeoutMs)
+    })
+    try {
+      return await Promise.race([this.mutationQueue.then(() => 'drained' as const), timeout])
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
   async forceMaterializeCurrentSelectionForRollback(): Promise<void> {
     await this.serializeMutation(async () => {
       const settings = this.store.getSettings()
@@ -306,7 +323,7 @@ export class ClaudeRuntimeAuthService {
         const account = this.store
           .getSettings()
           .claudeManagedAccounts.find((entry) => entry.id === accountId)
-        const stored = account ? await this.readManagedCredentials(account) : null
+        const stored = account ? await this.readStoredManagedCredentials(account) : null
         if (!account || !stored || readRefreshToken(stored) !== pending.oldRefreshToken) {
           this.pendingRotatedWrites.delete(accountId)
           continue
@@ -1100,7 +1117,21 @@ export class ClaudeRuntimeAuthService {
     return normalizeIdentityField(value)
   }
 
+  /**
+   * The account's credentials, preferring a rotated token still waiting for its write-back: the
+   * on-disk blob holds the already-used refresh token, and handing it to a sync would write it
+   * over the good runtime copy.
+   */
   private async readManagedCredentials(account: ClaudeManagedAccount): Promise<string | null> {
+    return (
+      this.pendingRotatedWrites.get(account.id)?.credentialsJson ??
+      (await this.readStoredManagedCredentials(account))
+    )
+  }
+
+  private async readStoredManagedCredentials(
+    account: ClaudeManagedAccount
+  ): Promise<string | null> {
     const managedAuthPath = this.getOwnedManagedAuthPath(account)
     if (!managedAuthPath) {
       return null
@@ -1121,9 +1152,12 @@ export class ClaudeRuntimeAuthService {
     }
     if (process.platform === 'darwin') {
       await writeManagedClaudeKeychainCredentials(account.id, credentialsJson)
-      return
+    } else {
+      writeClaudeManagedAuthFile(managedAuthPath, '.credentials.json', credentialsJson)
     }
-    writeClaudeManagedAuthFile(managedAuthPath, '.credentials.json', credentialsJson)
+    // Why: whatever landed on disk is now the newest credential; a stale pending blob must not
+    // shadow it on later reads.
+    this.pendingRotatedWrites.delete(account.id)
   }
 
   /**
@@ -1159,7 +1193,11 @@ export class ClaudeRuntimeAuthService {
       }
     }
     this.pendingRotatedWrites.set(account.id, {
-      oldRefreshToken: readRefreshToken(credentialsJson),
+      // Why: a follow-up rotation keeps the ORIGINAL on-disk baseline, or the compare-and-swap
+      // would compare against a token that never reached disk.
+      oldRefreshToken:
+        this.pendingRotatedWrites.get(account.id)?.oldRefreshToken ??
+        readRefreshToken(credentialsJson),
       credentialsJson: refreshed
     })
     return refreshed

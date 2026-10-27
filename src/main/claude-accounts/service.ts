@@ -333,7 +333,6 @@ export class ClaudeAccountService {
     const account = this.requireAccount(accountId)
     const managedAuthPath = this.assertManagedAuthPath(account.managedAuthPath, accountId)
     const previousSettings = this.store.getSettings()
-    const previousManagedAuth = await this.readManagedAuthSnapshot(accountId, managedAuthPath)
     const captured = await this.runClaudeLoginAndCapture({
       managedAuthPath,
       managedAuthRuntime: account.managedAuthRuntime ?? 'host',
@@ -344,6 +343,9 @@ export class ClaudeAccountService {
       throw new Error('Claude login completed, but Orca could not resolve the account email.')
     }
 
+    // Why here, not before the login: the old token may rotate (keep-alive, a live CLI) while the
+    // login runs, and rolling back to the pre-login blob would put a revoked refresh token back.
+    const previousManagedAuth = await this.readManagedAuthSnapshot(accountId, managedAuthPath)
     const settings = this.store.getSettings()
     const now = Date.now()
     const reauthenticatedAccounts = settings.claudeManagedAccounts.map((entry) =>

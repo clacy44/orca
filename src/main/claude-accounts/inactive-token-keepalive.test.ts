@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  INACTIVE_TOKEN_KEEPALIVE_FIRST_TICK_MS,
   INACTIVE_TOKEN_KEEPALIVE_INTERVAL_MS,
   startInactiveTokenKeepAlive
 } from './inactive-token-keepalive'
 
 const SIX_HOURS = 6 * 60 * 60 * 1000
+const FIVE_MINUTES = 5 * 60 * 1000
 
 describe('startInactiveTokenKeepAlive', () => {
   beforeEach(() => {
@@ -15,25 +17,33 @@ describe('startInactiveTokenKeepAlive', () => {
     vi.useRealTimers()
   })
 
-  it('is a six hour cadence', () => {
+  it('is a first pass after five minutes, then a six hour cadence', () => {
+    expect(INACTIVE_TOKEN_KEEPALIVE_FIRST_TICK_MS).toBe(FIVE_MINUTES)
     expect(INACTIVE_TOKEN_KEEPALIVE_INTERVAL_MS).toBe(SIX_HOURS)
   })
 
-  it('prepares each non-active account every six hours and not before', async () => {
+  it('prepares each non-active account five minutes after start, then every six hours', async () => {
     const prepare = vi.fn(async (_id: string) => ({ status: 'ready' }))
     const keepAlive = startInactiveTokenKeepAlive({
       listInactiveAccountIds: () => ['a', 'b'],
       prepare
     })
 
-    await vi.advanceTimersByTimeAsync(SIX_HOURS - 1)
+    await vi.advanceTimersByTimeAsync(FIVE_MINUTES - 1)
     expect(prepare).not.toHaveBeenCalled()
 
     await vi.advanceTimersByTimeAsync(1)
     expect(prepare.mock.calls.map(([id]) => id)).toEqual(['a', 'b'])
 
-    await vi.advanceTimersByTimeAsync(SIX_HOURS)
+    // Nothing more until the six hour interval (counted from start) comes round.
+    await vi.advanceTimersByTimeAsync(SIX_HOURS - FIVE_MINUTES - 1)
+    expect(prepare).toHaveBeenCalledTimes(2)
+
+    await vi.advanceTimersByTimeAsync(1)
     expect(prepare).toHaveBeenCalledTimes(4)
+
+    await vi.advanceTimersByTimeAsync(SIX_HOURS)
+    expect(prepare).toHaveBeenCalledTimes(6)
     keepAlive.stop()
   })
 
@@ -42,7 +52,7 @@ describe('startInactiveTokenKeepAlive', () => {
     let ids = ['a']
     const keepAlive = startInactiveTokenKeepAlive({ listInactiveAccountIds: () => ids, prepare })
 
-    await vi.advanceTimersByTimeAsync(SIX_HOURS)
+    await vi.advanceTimersByTimeAsync(FIVE_MINUTES)
     ids = ['b', 'c']
     await vi.advanceTimersByTimeAsync(SIX_HOURS)
 
@@ -62,7 +72,7 @@ describe('startInactiveTokenKeepAlive', () => {
       prepare
     })
 
-    await vi.advanceTimersByTimeAsync(SIX_HOURS)
+    await vi.advanceTimersByTimeAsync(FIVE_MINUTES)
 
     expect(prepare.mock.calls.map(([id]) => id)).toEqual(['a', 'b'])
     keepAlive.stop()
@@ -88,7 +98,7 @@ describe('startInactiveTokenKeepAlive', () => {
     keepAlive.stop()
   })
 
-  it('stops ticking after stop()', async () => {
+  it('stops ticking after stop(), including the first pass', async () => {
     const prepare = vi.fn(async (_id: string) => undefined)
     const keepAlive = startInactiveTokenKeepAlive({
       listInactiveAccountIds: () => ['a'],
@@ -101,17 +111,20 @@ describe('startInactiveTokenKeepAlive', () => {
     expect(prepare).not.toHaveBeenCalled()
   })
 
-  it('unrefs its timer so it cannot hold the process open', () => {
+  it('unrefs both its timers so they cannot hold the process open', () => {
     const unref = vi.fn()
-    const setIntervalSpy = vi
-      .spyOn(globalThis, 'setInterval')
-      .mockReturnValue({ unref } as unknown as ReturnType<typeof setInterval>)
-    const clearSpy = vi.spyOn(globalThis, 'clearInterval').mockImplementation(() => {})
+    const handle = { unref } as unknown as ReturnType<typeof setInterval>
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval').mockReturnValue(handle)
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockReturnValue(handle)
+    const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval').mockImplementation(() => {})
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout').mockImplementation(() => {})
 
     startInactiveTokenKeepAlive({ listInactiveAccountIds: () => [], prepare: async () => {} })
 
-    expect(unref).toHaveBeenCalledTimes(1)
+    expect(unref).toHaveBeenCalledTimes(2)
     setIntervalSpy.mockRestore()
-    clearSpy.mockRestore()
+    setTimeoutSpy.mockRestore()
+    clearIntervalSpy.mockRestore()
+    clearTimeoutSpy.mockRestore()
   })
 })

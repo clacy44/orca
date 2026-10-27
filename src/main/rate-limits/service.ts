@@ -702,10 +702,20 @@ export class RateLimitService {
         }
         staggerNextFetch = true
         try {
+          // Why: a `skip` means the account is now owned by the active path — "no update", not a
+          // failure, so it must not be cached as an error snapshot.
+          let preparerSkipped = false
+          const preparer = this.inactiveClaudeCredentialsPreparer
           const fresh = await fetchManagedAccountUsage(account, {
             allowUsagePanelSupplement: this.shouldAllowClaudeUsagePanelSupplement(),
             networkProxySettings: this.networkProxySettingsResolver?.(),
-            prepareCredentials: this.inactiveClaudeCredentialsPreparer ?? undefined,
+            prepareCredentials: preparer
+              ? async (accountId) => {
+                  const prepared = await preparer(accountId)
+                  preparerSkipped ||= prepared.status === 'skip'
+                  return prepared
+                }
+              : undefined,
             signal
           })
           if (
@@ -717,6 +727,11 @@ export class RateLimitService {
             if (!this.isCurrentInactiveClaudeAccount(account.id)) {
               this.inactiveClaudeCache.delete(account.id)
             }
+            this.pushToRenderer()
+            continue
+          }
+          if (preparerSkipped) {
+            this.inactiveClaudeFetching.delete(account.id)
             this.pushToRenderer()
             continue
           }
