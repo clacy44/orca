@@ -833,24 +833,20 @@ export class RateLimitService {
   }
 
   /**
-   * Oldest information first, so successive passes reach different accounts: accounts never
-   * successfully fetched lead, then the stalest successful data, ties by oldest attempt.
+   * Least recently attempted first, so successive passes reach different accounts: never-fetched
+   * accounts lead (key 0), and any attempt — ok or failed — sends an account to the back. Keyed
+   * on the attempt, not the data age: a throttled account keeps its old data time and would
+   * otherwise lead every pass and starve the rest. An ok account's attempt time equals its data
+   * time, so those stay stalest-first.
    */
   private orderInactiveClaudeAccounts<T extends { id: string }>(accounts: readonly T[]): T[] {
-    const keyOf = (id: string): [number, number] => {
+    const keyOf = (id: string): number => {
       const cached = this.inactiveClaudeCache.get(id)
-      if (!cached) {
-        return [0, 0]
-      }
-      const hasData = Boolean(cached.session || cached.weekly || cached.fableWeekly)
-      return [
-        hasData ? cached.updatedAt : 0,
-        cached.usageMetadata?.lastAttemptAt ?? cached.updatedAt
-      ]
+      return cached ? (cached.usageMetadata?.lastAttemptAt ?? cached.updatedAt) : 0
     }
     return accounts
       .map((account, index) => ({ account, index, key: keyOf(account.id) }))
-      .sort((a, b) => a.key[0] - b.key[0] || a.key[1] - b.key[1] || a.index - b.index)
+      .sort((a, b) => a.key - b.key || a.index - b.index)
       .map((entry) => entry.account)
   }
 

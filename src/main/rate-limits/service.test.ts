@@ -2916,6 +2916,63 @@ describe('RateLimitService inactive Claude account fetch policy', () => {
       ])
     })
 
+    it('moves a throttled account to the back so the oldest-data account cannot starve the rest', async () => {
+      const service = new RateLimitService()
+      service.setInactiveClaudeAccountsResolver(() => [accountA, accountB, accountC])
+      // A has the oldest data, B and C newer; all are stale enough to be fetched.
+      seedInactiveSnapshot(service, 'account-a', okProvider('claude', 1, Date.now() - 40 * MIN))
+      seedInactiveSnapshot(service, 'account-b', okProvider('claude', 2, Date.now() - 30 * MIN))
+      seedInactiveSnapshot(service, 'account-c', okProvider('claude', 3, Date.now() - 20 * MIN))
+      vi.mocked(fetchManagedAccountUsage).mockImplementation(async () => limitedNoRetryAfter())
+
+      await runPass(service)
+
+      // Pass 1: A (stalest) is tried first, gets the 429 and the pass stops.
+      expect(vi.mocked(fetchManagedAccountUsage).mock.calls.map(([a]) => a.id)).toEqual([
+        'account-a'
+      ])
+      // The failed attempt keeps A's old data on display.
+      expect(snapshotFor(service, 'account-a')?.session?.usedPercent).toBe(1)
+
+      vi.mocked(fetchManagedAccountUsage).mockClear()
+      vi.mocked(fetchManagedAccountUsage).mockImplementation(async () => okProvider('claude', 9))
+      await vi.advanceTimersByTimeAsync(2 * MIN + 1)
+      await runPass(service)
+
+      // Pass 2: B leads; the throttled A has gone to the back instead of leading again.
+      expect(vi.mocked(fetchManagedAccountUsage).mock.calls.map(([a]) => a.id)).toEqual([
+        'account-b',
+        'account-c',
+        'account-a'
+      ])
+    })
+
+    it('keeps rotating through every account when the same one is throttled each pass', async () => {
+      const service = new RateLimitService()
+      service.setInactiveClaudeAccountsResolver(() => [accountA, accountB, accountC])
+      seedInactiveSnapshot(service, 'account-a', okProvider('claude', 1, Date.now() - 40 * MIN))
+      seedInactiveSnapshot(service, 'account-b', okProvider('claude', 2, Date.now() - 30 * MIN))
+      seedInactiveSnapshot(service, 'account-c', okProvider('claude', 3, Date.now() - 20 * MIN))
+      // A is throttled every time; the others succeed.
+      vi.mocked(fetchManagedAccountUsage).mockImplementation(async (account) =>
+        account.id === 'account-a' ? limitedNoRetryAfter() : okProvider('claude', 9)
+      )
+      const reached = new Set<string>()
+
+      for (let pass = 0; pass < 3; pass += 1) {
+        await runPass(service)
+        await vi.advanceTimersByTimeAsync((sweepRetryIn(service) ?? 0) + 1)
+      }
+      for (const [account] of vi.mocked(fetchManagedAccountUsage).mock.calls) {
+        reached.add(account.id)
+      }
+
+      expect([...reached].sort()).toEqual(['account-a', 'account-b', 'account-c'])
+      // B and C each got a real fetch, not just A over and over.
+      expect(snapshotFor(service, 'account-b')?.session?.usedPercent).toBe(9)
+      expect(snapshotFor(service, 'account-c')?.session?.usedPercent).toBe(9)
+    })
+
     it('doubles the backoff 2 -> 4 -> 8 and caps at 30 minutes', async () => {
       const service = new RateLimitService()
       service.setInactiveClaudeAccountsResolver(() => [accountA])
