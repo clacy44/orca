@@ -12,7 +12,13 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock('@/i18n/i18n', () => ({
-  translate: (_key: string, fallback: string) => fallback
+  translate: (_key: string, fallback: string, values?: Record<string, string>) => {
+    let result = fallback
+    for (const [key, value] of Object.entries(values ?? {})) {
+      result = result.replace(`{{${key}}}`, value)
+    }
+    return result
+  }
 }))
 vi.mock('@/lib/agent-catalog', () => ({
   AgentIcon: ({ agent }: { agent: string }) => <span data-agent-icon={agent} />
@@ -29,7 +35,8 @@ vi.mock('@/components/ui/dropdown-menu', () => ({
 }))
 
 import { TooltipProvider } from '@/components/ui/tooltip'
-import { UsageRosterPanel, UsageRow } from './UsageRosterPanel'
+import { ClaudeAccountUsageList, UsageRosterPanel, UsageRow } from './UsageRosterPanel'
+import { buildClaudeSwitcherAccountRows } from './claude-switcher-account-rows'
 
 const signedOutCodex: ProviderRateLimits = {
   provider: 'codex',
@@ -324,5 +331,162 @@ describe('UsageRosterPanel density picker', () => {
       segmentButton('Compact').click()
     })
     expect(onStatusBarUsageModeChange).toHaveBeenLastCalledWith('compact')
+  })
+})
+
+describe('UsageRosterPanel per-account Claude rows', () => {
+  const NOW = 1_000_000_000
+
+  function claudeWith(
+    sessionPercent: number,
+    overrides: Partial<ProviderRateLimits> = {}
+  ): ProviderRateLimits {
+    return {
+      provider: 'claude',
+      session: {
+        usedPercent: sessionPercent,
+        windowMinutes: 300,
+        resetsAt: null,
+        resetDescription: null
+      },
+      weekly: { usedPercent: 10, windowMinutes: 10_080, resetsAt: null, resetDescription: null },
+      updatedAt: NOW,
+      error: null,
+      status: 'ok',
+      ...overrides
+    }
+  }
+
+  function rowsFor(
+    inactive: Parameters<typeof buildClaudeSwitcherAccountRows>[3]
+  ): ReturnType<typeof buildClaudeSwitcherAccountRows> {
+    return buildClaudeSwitcherAccountRows(
+      [
+        { id: 'acct-active', label: 'active@example.com', active: true },
+        { id: 'acct-b', label: 'b@example.com', active: false },
+        { id: 'acct-c', label: 'c@example.com', active: false }
+      ],
+      claudeWith(40),
+      true,
+      inactive,
+      NOW
+    )
+  }
+
+  function renderPanel(
+    rows: ReturnType<typeof buildClaudeSwitcherAccountRows>,
+    providers: ProviderRateLimits[]
+  ): string {
+    return renderToStaticMarkup(
+      <TooltipProvider>
+        <UsageRosterPanel
+          providers={providers}
+          display="used"
+          statusBarUsageMode="verbose"
+          onStatusBarUsageModeChange={() => {}}
+          isRefreshing={false}
+          onRefresh={() => {}}
+          onOpenProvider={() => {}}
+          onSignIn={() => {}}
+          canSignIn={() => true}
+          onManageAccounts={() => {}}
+          onUsageDetails={() => {}}
+          renderRowDetails={(p) =>
+            p.provider === 'claude' ? (
+              <ClaudeAccountUsageList
+                rows={rows}
+                formatAge={(ageMs) => `${Math.round(ageMs / 60_000)} min ago`}
+                renderUsage={(row) => (
+                  <span data-test-usage={row.id}>
+                    {row.limits ? `${row.limits.session?.usedPercent}% bars` : 'skeleton'}
+                  </span>
+                )}
+              />
+            ) : null
+          }
+        />
+      </TooltipProvider>
+    )
+  }
+
+  it('lists every saved Claude account under the Claude row with the active one marked', () => {
+    const rows = rowsFor([
+      {
+        accountId: 'acct-b',
+        rateLimits: claudeWith(77, { updatedAt: NOW - 5 * 60_000 }),
+        updatedAt: NOW - 5 * 60_000,
+        isFetching: false
+      },
+      {
+        accountId: 'acct-c',
+        rateLimits: claudeWith(12, { updatedAt: NOW - 60_000 }),
+        updatedAt: NOW - 60_000,
+        isFetching: false
+      }
+    ])
+    const markup = renderPanel(rows, [claudeWith(40), signedOutCodex])
+
+    for (const id of ['acct-active', 'acct-b', 'acct-c']) {
+      expect(markup).toContain(`data-claude-account-row="${id}"`)
+    }
+    expect(markup).toContain('active@example.com')
+    expect(markup).toContain('b@example.com')
+    expect(markup).toContain('c@example.com')
+    expect(markup).toContain('data-test-usage="acct-b">77% bars')
+    expect(markup).toContain('updated 5 min ago')
+    // Only the active account is marked.
+    expect(markup.match(/data-active="true"/g)).toHaveLength(1)
+    expect(markup).toMatch(/data-claude-account-row="acct-active"\s+data-active="true"/)
+    expect(markup.match(/>Active</g)).toHaveLength(1)
+    // Listed beneath the Claude provider row, and only there.
+    expect(markup.match(/data-claude-account-usage-list/g)).toHaveLength(1)
+    expect(markup.indexOf('Claude')).toBeLessThan(markup.indexOf('data-claude-account-usage-list'))
+  })
+
+  it('shows "No usage yet" for an account with no snapshot and a skeleton while it is fetching', () => {
+    const rows = rowsFor([
+      { accountId: 'acct-c', rateLimits: null, updatedAt: 0, isFetching: true }
+    ])
+    const markup = renderPanel(rows, [claudeWith(40)])
+
+    // acct-b has no cache entry at all; acct-c is still loading.
+    expect(markup).toMatch(
+      /data-claude-account-row="acct-b"[\s\S]*?No usage yet[\s\S]*?data-claude-account-row="acct-c"/
+    )
+    expect(markup).toContain('data-test-usage="acct-c">skeleton')
+    expect(markup.match(/No usage yet/g)).toHaveLength(1)
+    // No age caption for rows without a snapshot to date.
+    expect(markup.match(/updated /g)).toHaveLength(1)
+  })
+
+  it('says why a kept snapshot is not fresh', () => {
+    const rows = rowsFor([
+      {
+        accountId: 'acct-b',
+        rateLimits: claudeWith(55, {
+          status: 'error',
+          error: 'waiting',
+          usageMetadata: { failureKind: 'deferred-by-live-session' }
+        }),
+        updatedAt: NOW,
+        isFetching: false
+      }
+    ])
+    const markup = renderPanel(rows, [claudeWith(40)])
+
+    expect(markup).toContain('Waiting for Claude session')
+  })
+
+  it('renders no list when there are no saved accounts', () => {
+    const markup = renderPanel([], [claudeWith(40)])
+
+    expect(markup).not.toContain('data-claude-account-usage-list')
+  })
+
+  it('leaves non-Claude provider rows unchanged', () => {
+    const rows = rowsFor([])
+    const markup = renderPanel(rows, [signedOutCodex])
+
+    expect(markup).not.toContain('data-claude-account-usage-list')
   })
 })

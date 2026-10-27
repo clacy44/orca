@@ -12,7 +12,8 @@ import {
   type UsagePercentageDisplay
 } from '../../../../shared/usage-percentage-display'
 import { barColor, formatResetCountdown, getWindowSections, ProviderIcon } from './tooltip'
-import { getProviderDisplayName } from './usage-error-copy'
+import { getProviderDisplayName, getProviderUsageStatusLabel } from './usage-error-copy'
+import type { ClaudeSwitcherAccountRow } from './claude-switcher-account-rows'
 import { formatPlanLabel, usageTextColorClass } from './usage-roster-formatting'
 import { getUsageRosterRowState, type UsageRosterRowState } from './usage-roster-row-state'
 import type { StatusBarUsageMode } from '../../../../shared/status-bar-usage-mode'
@@ -183,6 +184,78 @@ export function UsageRow({
 }
 
 /**
+ * Every saved Claude account's usage, listed under the Claude provider row.
+ *
+ * Presentational on purpose: the host owns the account roster, the live clock and the usage bars
+ * (they live next to the switcher), this owns only the layout and the honest per-account states —
+ * bars, a loading skeleton, or an explicit "No usage yet".
+ */
+export function ClaudeAccountUsageList({
+  rows,
+  renderUsage,
+  formatAge
+}: {
+  rows: readonly ClaudeSwitcherAccountRow[]
+  renderUsage: (row: ClaudeSwitcherAccountRow) => React.ReactNode
+  formatAge: (ageMs: number) => string
+}): React.JSX.Element | null {
+  if (rows.length === 0) {
+    return null
+  }
+  return (
+    <div data-claude-account-usage-list className="flex flex-col gap-2 pb-2.5 pl-[44px] pr-3.5">
+      {rows.map((row) => {
+        const hasBars = Boolean(
+          row.limits?.session || row.limits?.weekly || row.limits?.fableWeekly
+        )
+        // Why: a kept-but-stale snapshot still shows its bars; say why it is not fresh.
+        const errorLabel =
+          row.limits?.status === 'error' && hasBars ? getProviderUsageStatusLabel(row.limits) : null
+        return (
+          <div
+            key={row.id}
+            data-claude-account-row={row.id}
+            data-active={row.active ? 'true' : 'false'}
+            className="flex min-w-0 flex-col gap-0.5"
+          >
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="min-w-0 flex-1 truncate text-[11px] text-foreground">
+                {row.label}
+              </span>
+              {row.active ? (
+                <span className="shrink-0 text-[10px] font-medium text-muted-foreground">
+                  {translate('auto.components.status.bar.StatusBar.ff0fbe9311', 'Active')}
+                </span>
+              ) : null}
+            </div>
+            {row.limits || row.isFetching ? (
+              renderUsage(row)
+            ) : (
+              <span className="text-[10px] text-muted-foreground">
+                {translate(
+                  'auto.components.status.bar.StatusBar.inactiveUsageNoData',
+                  'No usage yet'
+                )}
+              </span>
+            )}
+            {row.ageMs !== null ? (
+              <span className="text-[9px] text-muted-foreground/70">
+                {translate(
+                  'auto.components.status.bar.UsageRosterPanel.accountUsageUpdated',
+                  'updated {{value0}}',
+                  { value0: formatAge(row.ageMs) }
+                )}
+                {errorLabel ? ` · ${errorLabel}` : ''}
+              </span>
+            ) : null}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+/**
  * Consolidated "Usage" popover — one row per agent (icon · name · reset ·
  * per-window bars), opened from the status-bar roster pill. Deep per-agent
  * actions route to Settings via the callbacks.
@@ -199,7 +272,8 @@ export function UsageRosterPanel({
   canSignIn,
   onManageAccounts,
   onUsageDetails,
-  renderRow
+  renderRow,
+  renderRowDetails
 }: {
   providers: ProviderRateLimits[]
   display: UsagePercentageDisplay
@@ -216,6 +290,8 @@ export function UsageRosterPanel({
   // Claude/Codex account-switch drill-in submenu); return null to use the
   // default clickable row.
   renderRow?: (p: ProviderRateLimits, row: React.ReactNode) => React.ReactNode
+  // Content listed directly beneath a provider's row (Claude: every saved account's usage).
+  renderRowDetails?: (p: ProviderRateLimits) => React.ReactNode
 }): React.JSX.Element {
   // Why: one boundary-scheduled clock keeps every open row current without per-provider timers.
   const now = useResetCountdownClock(
@@ -289,6 +365,7 @@ export function UsageRosterPanel({
       {sorted.map((p) => {
         const state = getUsageRosterRowState(p, usedSections(p).length > 0)
         const showSignInAction = state.kind === 'sign-in' && canSignIn(p.provider)
+        const details = renderRowDetails?.(p) ?? null
         const rowNode = (
           <UsageRow
             p={p}
@@ -301,27 +378,36 @@ export function UsageRosterPanel({
         )
         if (showSignInAction) {
           return (
-            <DropdownMenuItem
-              key={p.provider}
-              onSelect={() => onSignIn(p.provider)}
-              className="w-full cursor-pointer rounded-none px-3.5 py-2.5"
-            >
-              {rowNode}
-            </DropdownMenuItem>
+            <React.Fragment key={p.provider}>
+              <DropdownMenuItem
+                onSelect={() => onSignIn(p.provider)}
+                className="w-full cursor-pointer rounded-none px-3.5 py-2.5"
+              >
+                {rowNode}
+              </DropdownMenuItem>
+              {details}
+            </React.Fragment>
           )
         }
         const custom = renderRow?.(p, rowNode)
         if (custom) {
-          return <React.Fragment key={p.provider}>{custom}</React.Fragment>
+          return (
+            <React.Fragment key={p.provider}>
+              {custom}
+              {details}
+            </React.Fragment>
+          )
         }
         return (
-          <DropdownMenuItem
-            key={p.provider}
-            onSelect={() => onOpenProvider(p.provider)}
-            className="w-full cursor-pointer rounded-none px-3.5 py-2.5"
-          >
-            {rowNode}
-          </DropdownMenuItem>
+          <React.Fragment key={p.provider}>
+            <DropdownMenuItem
+              onSelect={() => onOpenProvider(p.provider)}
+              className="w-full cursor-pointer rounded-none px-3.5 py-2.5"
+            >
+              {rowNode}
+            </DropdownMenuItem>
+            {details}
+          </React.Fragment>
         )
       })}
       <div className="border-t border-border/70" />

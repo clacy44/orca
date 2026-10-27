@@ -56,13 +56,18 @@ import {
   ProviderPanel,
   barColor,
   clampUsedPercent,
+  formatResetCountdown,
   formatResetCreditExpiry,
   getProviderDisplayName,
   getProviderUsageStatusLabel
 } from './tooltip'
 import { ClaudeIcon, GeminiIcon, MiniMaxIcon, OpenAIIcon, OpenCodeGoIcon } from './icons'
 import { AgentIcon } from '@/lib/agent-catalog'
-import { UsageRosterPanel, getTightestUsageSection } from './UsageRosterPanel'
+import {
+  ClaudeAccountUsageList,
+  UsageRosterPanel,
+  getTightestUsageSection
+} from './UsageRosterPanel'
 import { getUsageProviderAccountsSectionId } from './usage-provider-settings-target'
 import { formatRateLimitWindowChipLabel } from '@/lib/window-label-formatter'
 import { useResetCountdownClock } from '@/hooks/useResetCountdownClock'
@@ -1049,31 +1054,41 @@ export function InlineUsageBars({
     useAppStore((state) => state.usagePercentageDisplay)
   )
   // Why: tick the session countdown live via one boundary-scheduled clock, not just the usage poll (#5399).
-  const now = useResetCountdownClock([limits.session?.resetsAt])
+  const now = useResetCountdownClock([
+    limits.session?.resetsAt,
+    limits.weekly?.resetsAt,
+    limits.fableWeekly?.resetsAt
+  ])
   const usageWindows = [
     limits.session
       ? {
           key: 'session',
           used: clampUsedPercent(limits.session.usedPercent),
           // Why: live reset countdown (matches popover); '5h' window length only when resetsAt is unknown (#5399).
-          label: formatRateLimitWindowChipLabel(limits.session, now)
+          label: formatRateLimitWindowChipLabel(limits.session, now),
+          resetCaption: null
         }
       : null,
     limits.weekly
       ? {
           key: 'weekly',
           used: clampUsedPercent(limits.weekly.usedPercent),
-          label: translate('auto.components.status.bar.StatusBar.5c938d39ac', 'wk')
+          label: translate('auto.components.status.bar.StatusBar.5c938d39ac', 'wk'),
+          resetCaption: formatInlineResetCaption(limits.weekly.resetsAt, now)
         }
       : null,
     limits.fableWeekly
       ? {
           key: 'fableWeekly',
           used: clampUsedPercent(limits.fableWeekly.usedPercent),
-          label: translate('auto.components.status.bar.StatusBar.54e8d6bb2d', 'Fable')
+          label: translate('auto.components.status.bar.StatusBar.54e8d6bb2d', 'Fable'),
+          resetCaption: formatInlineResetCaption(limits.fableWeekly.resetsAt, now)
         }
       : null
-  ].filter((window): window is { key: string; used: number; label: string } => window !== null)
+  ].filter(
+    (window): window is { key: string; used: number; label: string; resetCaption: string | null } =>
+      window !== null
+  )
 
   return (
     <div
@@ -1083,26 +1098,43 @@ export function InlineUsageBars({
       }}
     >
       {usageWindows.map((window) => (
-        <div key={window.key} className="flex min-w-0 items-center gap-1">
-          <div className="h-[4px] min-w-0 flex-1 overflow-hidden rounded-full bg-muted">
-            {/* Why: fill follows the selected percentage; color still signals consumption urgency. */}
-            <div
-              className={`h-full rounded-full ${barColor(window.used)}`}
-              style={{ width: `${getDisplayedUsagePercentage(window.used, display)}%` }}
-            />
+        <div key={window.key} className="flex min-w-0 flex-col gap-0.5">
+          <div className="flex min-w-0 items-center gap-1">
+            <div className="h-[4px] min-w-0 flex-1 overflow-hidden rounded-full bg-muted">
+              {/* Why: fill follows the selected percentage; color still signals consumption urgency. */}
+              <div
+                className={`h-full rounded-full ${barColor(window.used)}`}
+                style={{ width: `${getDisplayedUsagePercentage(window.used, display)}%` }}
+              />
+            </div>
+            <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
+              {formatUsagePercentageLabel(window.used, display)} {window.label}
+            </span>
           </div>
-          <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
-            {formatUsagePercentageLabel(window.used, display)} {window.label}
-          </span>
+          {window.resetCaption ? (
+            <span
+              data-usage-reset-caption
+              className="truncate text-[9px] tabular-nums text-muted-foreground/80"
+            >
+              {window.resetCaption}
+            </span>
+          ) : null}
         </div>
       ))}
       {usageWindows.length === 0 && limits.status === 'error' ? (
         <span className="text-[10px] text-muted-foreground">
-          {translate('auto.components.status.bar.StatusBar.f19a63e7cd', 'Sign in to see usage')}
+          {/* Why: only absent credentials mean "sign in"; every other failure keeps its own honest status. */}
+          {limits.usageMetadata?.failureKind === 'missing-credentials'
+            ? translate('auto.components.status.bar.StatusBar.f19a63e7cd', 'Sign in to see usage')
+            : getProviderUsageStatusLabel(limits)}
         </span>
       ) : null}
     </div>
   )
+}
+
+function formatInlineResetCaption(resetsAt: number | null | undefined, now: number): string | null {
+  return resetsAt != null ? formatResetCountdown(resetsAt - now) : null
 }
 
 function isUnavailableInactiveUsage(limits: ProviderRateLimits | null | undefined): boolean {
@@ -1204,6 +1236,98 @@ function InlineUsageSkeleton(): React.JSX.Element {
       <div className="h-[4px] flex-1 rounded-full bg-muted" />
       <div className="h-[4px] flex-1 rounded-full bg-muted" />
     </div>
+  )
+}
+
+// Why: the hover panel lists every saved Claude account's usage, not just the active one. Mounted
+// only while the panel is open, so the fetch trigger, the age ticker and any remote snapshot load
+// cost nothing while it is closed. The 60 s open debounce lives in main
+// (fetchInactiveClaudeAccountsOnOpen); asking on every open is the intended contract.
+function ClaudeAccountUsageRows({
+  claude
+}: {
+  claude: ProviderRateLimits
+}): React.JSX.Element | null {
+  const fetchInactiveClaudeAccountUsage = useAppStore((s) => s.fetchInactiveClaudeAccountUsage)
+  const inactiveClaudeAccounts = useAppStore((s) => s.rateLimits.inactiveClaudeAccounts)
+  const claudeTarget = useAppStore((s) => s.rateLimits.claudeTarget)
+  const settings = useAppStore((s) => s.settings)
+  const activeRuntimeEnvironmentId = settings?.activeRuntimeEnvironmentId?.trim() || null
+  const [remote, setRemote] = useState<{
+    accounts: ClaudeRateLimitAccountsState
+    rateLimits: RateLimitState | null
+  } | null>(null)
+  const now = useNowTicker(30_000)
+
+  useEffect(() => {
+    void fetchInactiveClaudeAccountUsage()
+  }, [fetchInactiveClaudeAccountUsage])
+
+  // Why: with a Remote Orca Server the roster and its inactive usage belong to the server (D2);
+  // local settings and the local store describe this desktop instead.
+  useEffect(() => {
+    if (!activeRuntimeEnvironmentId) {
+      setRemote(null)
+      return
+    }
+    let cancelled = false
+    void fetchProviderAccountsSnapshot({ activeRuntimeEnvironmentId })
+      .then((snapshot) => {
+        if (cancelled || snapshot.failedProviders?.includes('claude')) {
+          return
+        }
+        setRemote({ accounts: snapshot.claude, rateLimits: snapshot.rateLimits })
+      })
+      .catch((error) => {
+        console.error('Failed to load Claude accounts for usage panel:', error)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [activeRuntimeEnvironmentId])
+
+  const accountState = resolveClaudeStatusAccountState(
+    settings,
+    remote?.accounts ?? {
+      accounts: [],
+      activeAccountId: null,
+      activeAccountIdsByRuntime: { host: null, wsl: {} }
+    }
+  )
+  const currentTarget = toCodexStatusRuntimeTarget(claudeTarget)
+  const groups = buildClaudeStatusSwitchGroups(accountState, currentTarget, {
+    fallbackWslDistro: getStatusBarPreferredWslDistro(settings, []),
+    includeFallbackWsl: !activeRuntimeEnvironmentId && shouldIncludeSettingsWslRuntime(settings)
+  })
+  const selectedRuntimeKey = getCodexStatusRuntimeKey(
+    normalizeClaudeStatusRuntimeTarget(accountState, currentTarget)
+  )
+  const selectedGroup = groups.find((group) => group.key === selectedRuntimeKey) ?? groups[0]
+  const isActiveGroup = selectedGroup?.key === selectedRuntimeKey
+  const useRemoteUsage = Boolean(activeRuntimeEnvironmentId && remote?.rateLimits)
+  const rows = buildClaudeSwitcherAccountRows(
+    // The system default has no saved credentials to list; saved accounts only.
+    (selectedGroup?.targets ?? []).filter((target) => target.id !== null),
+    useRemoteUsage && remote?.rateLimits ? remote.rateLimits.claude : claude,
+    isActiveGroup,
+    useRemoteUsage && remote?.rateLimits
+      ? remote.rateLimits.inactiveClaudeAccounts
+      : inactiveClaudeAccounts,
+    now
+  )
+
+  return (
+    <ClaudeAccountUsageList
+      rows={rows}
+      formatAge={formatInactiveUsageAge}
+      renderUsage={(row) =>
+        row.limits ? (
+          <InlineUsageBars limits={row.limits} isFetching={row.isFetching} />
+        ) : (
+          <InlineUsageSkeleton />
+        )
+      }
+    />
   )
 }
 
@@ -2376,6 +2500,9 @@ function StatusBarInner({ floatingTerminalOpen }: StatusBarProps): React.JSX.Ele
                   canSignIn={(provider) => getUsageProviderAccountsSectionId(provider) !== null}
                   onManageAccounts={handleManageAccounts}
                   onUsageDetails={handleUsageDetails}
+                  renderRowDetails={(p) =>
+                    p.provider === 'claude' ? <ClaudeAccountUsageRows claude={p} /> : null
+                  }
                   renderRow={(p, rowNode) => {
                     // Every provider drills into its detail panel (parity with the
                     // per-provider dropdowns on main); Claude/Codex additionally get

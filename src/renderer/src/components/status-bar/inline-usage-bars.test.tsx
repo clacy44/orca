@@ -140,4 +140,84 @@ describe('InlineUsageBars', () => {
     expect(markup).toContain('width:58%')
     expect(markup).not.toContain('width:32%')
   })
+  it('shows a countdown under the weekly and Fable bars when their resets are known', async () => {
+    const { InlineUsageBars } = await import('./StatusBar')
+
+    const limits = claudeLimits()
+    // +5s keeps the floor-based formatter stable across the few ms between snapshot and render.
+    limits.weekly!.resetsAt = Date.now() + (3 * 24 * 60 + 2 * 60) * 60_000 + 5_000
+    limits.fableWeekly!.resetsAt = Date.now() + 90 * 60_000 + 5_000
+
+    const markup = renderToStaticMarkup(<InlineUsageBars limits={limits} isFetching={false} />)
+
+    expect(markup).toContain('Resets in 3d 2h')
+    expect(markup).toContain('Resets in 1h 30m')
+    // The bars keep their identifying labels; the session countdown stays in its own label.
+    expect(markup).toContain('16% used wk')
+    expect(markup).toContain('42% used Fable')
+    expect(markup.match(/data-usage-reset-caption/g)).toHaveLength(2)
+  })
+
+  it('omits reset captions when no reset time is known', async () => {
+    const { InlineUsageBars } = await import('./StatusBar')
+
+    const markup = renderToStaticMarkup(
+      <InlineUsageBars limits={claudeLimits()} isFetching={false} />
+    )
+
+    expect(markup).not.toContain('data-usage-reset-caption')
+    expect(markup).not.toContain('Resets in')
+  })
+
+  describe('empty-bar status copy per failure kind', () => {
+    function errorLimits(
+      failureKind: NonNullable<ProviderRateLimits['usageMetadata']>['failureKind'],
+      error = 'boom'
+    ): ProviderRateLimits {
+      return {
+        provider: 'claude',
+        session: null,
+        weekly: null,
+        updatedAt: Date.now(),
+        error,
+        status: 'error',
+        usageMetadata: failureKind ? { failureKind } : undefined
+      }
+    }
+
+    async function render(limits: ProviderRateLimits): Promise<string> {
+      const { InlineUsageBars } = await import('./StatusBar')
+      return renderToStaticMarkup(<InlineUsageBars limits={limits} isFetching={false} />)
+    }
+
+    it('keeps "Sign in to see usage" only for missing credentials', async () => {
+      expect(await render(errorLimits('missing-credentials', 'No credentials'))).toContain(
+        'Sign in to see usage'
+      )
+    })
+
+    it.each([
+      ['deferred-by-live-session', 'Waiting for Claude session'],
+      ['stale-token', 'Refreshing sign-in'],
+      ['network', 'Network issue'],
+      ['keychain-unavailable', 'Sign-in unavailable'],
+      ['usage-unavailable', 'Usage unavailable'],
+      ['server', 'Refresh failed'],
+      [undefined, 'Refresh failed']
+    ] as const)('labels %s as "%s" instead of a sign-in prompt', async (failureKind, label) => {
+      const markup = await render(errorLimits(failureKind))
+
+      expect(markup).toContain(label)
+      expect(markup).not.toContain('Sign in to see usage')
+    })
+
+    it('labels a rate-limited account as Limited', async () => {
+      const markup = await render(
+        errorLimits('rate-limited', 'Claude usage is rate limited right now.')
+      )
+
+      expect(markup).toContain('Limited')
+      expect(markup).not.toContain('Sign in to see usage')
+    })
+  })
 })
