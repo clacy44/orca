@@ -43,6 +43,8 @@ export type UsageRateLimitMetadata = {
   lastSuccessfulSource?: UsageRateLimitSource
   /** Unix ms timestamp before which usage refetches should not be attempted (from HTTP Retry-After). */
   retryAtMs?: number
+  /** Unix ms of the most recent fetch attempt, successful or not; `updatedAt` stays the data's own time. */
+  lastAttemptAt?: number
 }
 
 export type ProviderRateLimits = {

@@ -15,7 +15,9 @@ const OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
 // Refresh slightly ahead of expiry so a token doesn't expire mid-launch. The
 // CLI uses the same 5-minute skew for its own refresh decision.
 const OAUTH_EXPIRY_BUFFER_MS = 5 * 60 * 1000
-const REFRESH_TIMEOUT_MS = 10_000
+// Why 30 s: the CLI's own refresh timeout. A shorter client timeout can abort AFTER the server has
+// already rotated the single-use refresh token, losing the new one.
+const REFRESH_TIMEOUT_MS = 30_000
 
 type ClaudeOauthBlob = {
   accessToken?: unknown
@@ -34,6 +36,7 @@ type TokenEndpointResponse = {
   access_token?: unknown
   expires_in?: unknown
   refresh_token?: unknown
+  refresh_token_expires_in?: unknown
   scope?: unknown
 }
 
@@ -108,6 +111,14 @@ export function applyRefreshedToken(
   // point of owning refresh.
   if (typeof response.refresh_token === 'string' && response.refresh_token.trim() !== '') {
     oauth.refreshToken = response.refresh_token
+  }
+  // Why: record when the (possibly new) refresh token itself expires, so a dead one is knowable
+  // before it is spent.
+  if (
+    typeof response.refresh_token_expires_in === 'number' &&
+    Number.isFinite(response.refresh_token_expires_in)
+  ) {
+    oauth.refreshTokenExpiresAt = now + response.refresh_token_expires_in * 1000
   }
   if (typeof response.scope === 'string' && response.scope.trim() !== '') {
     oauth.scopes = response.scope.split(' ')

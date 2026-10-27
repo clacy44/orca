@@ -31,7 +31,8 @@ import {
   resolveOwnedClaudeManagedAuthPath,
   writeClaudeManagedAuthFile
 } from '../claude-accounts/managed-auth-path'
-import { isOauthTokenExpiring } from '../claude-accounts/oauth-refresh'
+import { isOauthTokenExpiring, readRefreshToken } from '../claude-accounts/oauth-refresh'
+import { hasClaudeOauthAccessToken } from '../claude-accounts/lane-credential-writer'
 import { createOAuthUsageError, OAuthUsageError } from './claude-oauth-usage-error'
 import { mapClaudeUsageWindow, type ClaudeUsageWindowInput } from './claude-usage-window'
 import { withMacTailscaleDnsHint } from '../network/macos-tailscale-dns-diagnostic'
@@ -1177,11 +1178,28 @@ async function fetchManagedUsagePanelSupplement(input: {
       return null
     }
     const refreshedCredentials = await readStagedManagedPreviewCredentials(input.location)
-    if (refreshedCredentials && refreshedCredentials !== input.credentialsJson) {
+    // Why both halves: a CLI that lost a refresh race (or hit invalid_grant) wipes its blob to
+    // empty tokens; persisting that would replace a good account with a dead one.
+    if (
+      refreshedCredentials &&
+      refreshedCredentials !== input.credentialsJson &&
+      hasClaudeOauthAccessToken(refreshedCredentials) &&
+      readRefreshToken(refreshedCredentials) !== null
+    ) {
       await writeManagedCredentialsJson(input.location, refreshedCredentials)
     }
     return cliLimits
   })
+}
+
+function isAccessTokenExpired(credentialsJson: string, now: number = Date.now()): boolean {
+  try {
+    const expiresAt = (JSON.parse(credentialsJson) as { claudeAiOauth?: { expiresAt?: unknown } })
+      ?.claudeAiOauth?.expiresAt
+    return typeof expiresAt === 'number' && Number.isFinite(expiresAt) && expiresAt <= now
+  } catch {
+    return false
+  }
 }
 
 function missingManagedCredentialsResult(): ProviderRateLimits {
@@ -1240,6 +1258,11 @@ export async function fetchManagedAccountUsage(
   if (!token) {
     return missingManagedCredentialsResult()
   }
+  // Why: deferred behind a live terminal AND already expired — the usage endpoint can only say
+  // 401, so don't spend a request (or a 401 burst) to learn what we already know.
+  if (deferredByLiveClaude && isAccessTokenExpired(credentialsJson)) {
+    return liveClaudeDeferredResult({ attempts: { attemptedSources: [] }, oauthCredentials })
+  }
 
   // Why: no PTY fallback for inactive accounts — PTY only supplements after OAuth succeeds.
   const attempts: ClaudeUsageAttemptState = { attemptedSources: ['oauth'] }
@@ -1268,7 +1291,12 @@ export async function fetchManagedAccountUsage(
     !canSupplementOAuthUsageFromCli({
       oauthLimits,
       authPreparation: undefined,
-      allowUsagePanelSupplement: options.allowUsagePanelSupplement === true
+      // Why no PTY preview when deferred or expiring: a spawned CLI inside the managed config dir
+      // would refresh (rotate) the token itself, outside the lock and the live-terminal check.
+      allowUsagePanelSupplement:
+        options.allowUsagePanelSupplement === true &&
+        !deferredByLiveClaude &&
+        !isOauthTokenExpiring(credentialsJson)
     })
   ) {
     return oauthLimits

@@ -220,4 +220,180 @@ describe('InlineUsageBars', () => {
       expect(markup).not.toContain('Sign in to see usage')
     })
   })
+  describe('windows that reset since the data was fetched', () => {
+    function fetchedAnHourAgo(): ProviderRateLimits {
+      const limits = claudeLimits()
+      limits.updatedAt = Date.now() - 60 * 60_000
+      return limits
+    }
+
+    it('shows "reset since last check" instead of the old percentage', async () => {
+      const { InlineUsageBars } = await import('./StatusBar')
+      const limits = fetchedAnHourAgo()
+      limits.weekly!.resetsAt = Date.now() - 10 * 60_000
+
+      const markup = renderToStaticMarkup(<InlineUsageBars limits={limits} isFetching={false} />)
+
+      expect(markup).toContain('wk reset since last check')
+      expect(markup).not.toContain('16% used')
+      // Untouched windows keep their numbers, and the stale window shows no reset countdown.
+      expect(markup).toContain('32% used 5h')
+      expect(markup).toContain('42% used Fable')
+      expect(markup).not.toContain('Resets now')
+    })
+
+    it('applies to the session window too', async () => {
+      const { InlineUsageBars } = await import('./StatusBar')
+      const limits = fetchedAnHourAgo()
+      limits.session!.resetsAt = Date.now() - 10 * 60_000
+
+      const markup = renderToStaticMarkup(<InlineUsageBars limits={limits} isFetching={false} />)
+
+      expect(markup).toContain('5h reset since last check')
+      expect(markup).not.toContain('32% used')
+    })
+
+    it('keeps the numbers when the reset is still ahead or predates the fetch', async () => {
+      const { InlineUsageBars } = await import('./StatusBar')
+      const limits = fetchedAnHourAgo()
+      limits.weekly!.resetsAt = Date.now() + 60 * 60_000
+      limits.fableWeekly!.resetsAt = limits.updatedAt - 60_000
+
+      const markup = renderToStaticMarkup(<InlineUsageBars limits={limits} isFetching={false} />)
+
+      expect(markup).not.toContain('reset since last check')
+      expect(markup).toContain('16% used wk')
+      expect(markup).toContain('42% used Fable')
+    })
+  })
+
+  describe('error without bars by provider', () => {
+    function errored(provider: ProviderRateLimits['provider']): ProviderRateLimits {
+      return {
+        provider,
+        session: null,
+        weekly: null,
+        updatedAt: Date.now(),
+        error: 'boom',
+        status: 'error'
+      }
+    }
+
+    it('keeps Codex on the original "Sign in to see usage" prompt', async () => {
+      const { InlineUsageBars } = await import('./StatusBar')
+
+      const markup = renderToStaticMarkup(
+        <InlineUsageBars limits={errored('codex')} isFetching={false} />
+      )
+
+      expect(markup).toContain('Sign in to see usage')
+      expect(markup).not.toContain('Refresh failed')
+    })
+
+    it('does not give Codex the Claude failure-kind labels', async () => {
+      const { InlineUsageBars } = await import('./StatusBar')
+      const codex = errored('codex')
+      codex.usageMetadata = { failureKind: 'network' }
+
+      const markup = renderToStaticMarkup(<InlineUsageBars limits={codex} isFetching={false} />)
+
+      expect(markup).toContain('Sign in to see usage')
+      expect(markup).not.toContain('Network issue')
+    })
+
+    it('gives Claude its own honest label (positive control)', async () => {
+      const { InlineUsageBars } = await import('./StatusBar')
+
+      const markup = renderToStaticMarkup(
+        <InlineUsageBars limits={errored('claude')} isFetching={false} />
+      )
+
+      expect(markup).toContain('Refresh failed')
+      expect(markup).not.toContain('Sign in to see usage')
+    })
+  })
+  describe('footer pill and windows that reset since the data was fetched', () => {
+    function claudeFetchedAnHourAgo(
+      sessionResetsAt: number | null,
+      weeklyResetsAt: number | null,
+      status: ProviderRateLimits['status'] = 'ok'
+    ): ProviderRateLimits {
+      const limits = claudeLimits()
+      limits.updatedAt = Date.now() - 60 * 60_000
+      limits.fableWeekly = null
+      limits.session!.usedPercent = 91
+      limits.session!.resetsAt = sessionResetsAt
+      limits.weekly!.usedPercent = 17
+      limits.weekly!.resetsAt = weeklyResetsAt
+      limits.status = status
+      limits.error = status === 'error' ? 'boom' : null
+      return limits
+    }
+
+    async function renderSegment(
+      limits: ProviderRateLimits,
+      mode: 'verbose' | 'compact'
+    ): Promise<string> {
+      const { ProviderSegment } = await import('./StatusBar')
+      return renderToStaticMarkup(
+        <ProviderSegment p={limits} compact={false} display="used" mode={mode} />
+      )
+    }
+
+    it('does not pick a reset window as the tightest in compact mode', async () => {
+      const markup = await renderSegment(
+        claudeFetchedAnHourAgo(Date.now() - 10 * 60_000, Date.now() + 60 * 60_000),
+        'compact'
+      )
+
+      expect(markup).not.toContain('91%')
+      expect(markup).toContain('17%')
+    })
+
+    it("does not show a reset window's old percentage in verbose mode", async () => {
+      const markup = await renderSegment(
+        claudeFetchedAnHourAgo(Date.now() - 10 * 60_000, Date.now() + 60 * 60_000),
+        'verbose'
+      )
+
+      expect(markup).not.toContain('91%')
+      expect(markup).toContain('17%')
+      expect(markup).toContain('width:17%')
+      expect(markup).not.toContain('width:91%')
+    })
+
+    it.each(['verbose', 'compact'] as const)(
+      'renders the neutral state, no number, when every window reset (%s)',
+      async (mode) => {
+        const markup = await renderSegment(
+          claudeFetchedAnHourAgo(Date.now() - 10 * 60_000, Date.now() - 5 * 60_000),
+          mode
+        )
+
+        expect(markup).toContain('--')
+        expect(markup).not.toMatch(/\d+%/)
+        expect(markup).not.toContain('data-usage-bar')
+      }
+    )
+
+    it('keeps the existing error state when everything reset and the latest fetch failed', async () => {
+      const markup = await renderSegment(
+        claudeFetchedAnHourAgo(Date.now() - 10 * 60_000, Date.now() - 5 * 60_000, 'error'),
+        'compact'
+      )
+
+      expect(markup).toContain('Refresh failed')
+      expect(markup).not.toMatch(/\d+%/)
+    })
+
+    it('still shows both numbers while neither window has reset (positive control)', async () => {
+      const markup = await renderSegment(
+        claudeFetchedAnHourAgo(Date.now() + 60_000, Date.now() + 60 * 60_000),
+        'verbose'
+      )
+
+      expect(markup).toContain('91%')
+      expect(markup).toContain('17%')
+    })
+  })
 })

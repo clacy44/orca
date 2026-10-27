@@ -257,6 +257,8 @@ export class RateLimitService {
   private inactiveClaudeFetching = new Set<string>()
   // Why: accounts whose last fetch was deferred behind a live Claude terminal; refetched on drain.
   private inactiveClaudeDeferredIds = new Set<string>()
+  // Why: a drain that lands mid-fetch must not be dropped; it runs once the fetch finishes.
+  private queuedDrainRefetchIds = new Set<string>()
   private inactiveCodexFetching = new Set<string>()
   private lastInactiveClaudeFetchAt = 0
   private inactiveClaudeAccountsGeneration = 0
@@ -412,6 +414,7 @@ export class RateLimitService {
     this.abortActiveFetchCycle()
     this.clearQueuedFetches()
     this.inactiveClaudeFetching.clear()
+    this.queuedDrainRefetchIds.clear()
     this.inactiveCodexFetching.clear()
     this.resolveAndClearFetchIdleWaiters()
     this.stopTimer()
@@ -610,6 +613,14 @@ export class RateLimitService {
     }
     // Why: inactive accounts deferred behind the same terminals recover the same way, without
     // waiting for the next poll or the open debounce.
+    if (this.inactiveClaudeFetching.size > 0) {
+      // A fetch in flight may still come back deferred (it started while the terminal was live);
+      // queue every account it covers and let the tail of that fetch decide.
+      for (const id of [...this.inactiveClaudeDeferredIds, ...this.inactiveClaudeFetching]) {
+        this.queuedDrainRefetchIds.add(id)
+      }
+      return
+    }
     if (this.inactiveClaudeDeferredIds.size > 0) {
       await this.fetchInactiveClaudeAccountsOnOpen({
         onlyAccountIds: new Set(this.inactiveClaudeDeferredIds)
@@ -710,7 +721,10 @@ export class RateLimitService {
             continue
           }
           const cached = this.inactiveClaudeCache.get(account.id) ?? null
-          this.inactiveClaudeCache.set(account.id, this.applyStalePolicy(fresh, cached))
+          this.inactiveClaudeCache.set(
+            account.id,
+            this.applyStalePolicy(fresh, cached, { retainIndefinitely: true })
+          )
           if (fresh.usageMetadata?.failureKind === 'deferred-by-live-session') {
             this.inactiveClaudeDeferredIds.add(account.id)
           } else {
@@ -748,7 +762,7 @@ export class RateLimitService {
             }
             this.inactiveClaudeCache.set(
               account.id,
-              this.applyStalePolicy(errorSnapshot, cachedOnError)
+              this.applyStalePolicy(errorSnapshot, cachedOnError, { retainIndefinitely: true })
             )
           }
         }
@@ -765,6 +779,20 @@ export class RateLimitService {
       }
     } finally {
       this.finishFetchCycle(controller)
+    }
+    await this.runQueuedDrainRefetch()
+  }
+
+  private async runQueuedDrainRefetch(): Promise<void> {
+    if (this.queuedDrainRefetchIds.size === 0) {
+      return
+    }
+    const ids = [...this.queuedDrainRefetchIds].filter((id) =>
+      this.inactiveClaudeDeferredIds.has(id)
+    )
+    this.queuedDrainRefetchIds.clear()
+    if (ids.length > 0) {
+      await this.fetchInactiveClaudeAccountsOnOpen({ onlyAccountIds: new Set(ids) })
     }
   }
 
@@ -1604,7 +1632,7 @@ export class RateLimitService {
     if (fresh.status !== 'ok' && current && this.isLiveClaudeUsageFresh(current)) {
       return current
     }
-    return this.applyStalePolicy(fresh, previous)
+    return this.applyStalePolicy(fresh, previous, { retainIndefinitely: true })
   }
 
   private rememberClaudeAuthSnapshot(
@@ -2196,8 +2224,12 @@ export class RateLimitService {
 
   private applyStalePolicy(
     fresh: ProviderRateLimits,
-    previous: ProviderRateLimits | null
+    previous: ProviderRateLimits | null,
+    // Why: Claude keeps its last known numbers through any failure (owner ruling R2) — the row says
+    // how old they are and why they are stale instead of going blank.
+    options: { retainIndefinitely?: boolean } = {}
   ): ProviderRateLimits {
+    const lastAttemptAt = Date.now()
     // Fresh data is fine — use it
     if (fresh.status === 'ok') {
       return {
@@ -2205,14 +2237,20 @@ export class RateLimitService {
         usageMetadata: {
           ...fresh.usageMetadata,
           lastSuccessfulSource:
-            fresh.usageMetadata?.source ?? fresh.usageMetadata?.lastSuccessfulSource
+            fresh.usageMetadata?.source ?? fresh.usageMetadata?.lastSuccessfulSource,
+          lastAttemptAt
         }
       }
     }
 
     // Explicitly unavailable (e.g. setting cleared): discard stale data so the UI shows the provider as disabled/unconfigured.
     if (fresh.status === 'unavailable') {
-      return fresh
+      return { ...fresh, usageMetadata: { ...fresh.usageMetadata, lastAttemptAt } }
+    }
+
+    const freshWithAttempt: ProviderRateLimits = {
+      ...fresh,
+      usageMetadata: { ...fresh.usageMetadata, lastAttemptAt }
     }
 
     const previousHasData = Boolean(
@@ -2225,7 +2263,7 @@ export class RateLimitService {
 
     // No previous data to fall back on
     if (!previous || !previousHasData) {
-      return fresh
+      return freshWithAttempt
     }
 
     // Previous data is too old — don't show stale data
@@ -2233,8 +2271,8 @@ export class RateLimitService {
       fresh.usageMetadata?.failureKind === 'rate-limited'
         ? RATE_LIMITED_STALE_THRESHOLD_MS
         : STALE_THRESHOLD_MS
-    if (Date.now() - previous.updatedAt > staleThresholdMs) {
-      return fresh
+    if (!options.retainIndefinitely && Date.now() - previous.updatedAt > staleThresholdMs) {
+      return freshWithAttempt
     }
 
     // Why: keep showing a recent snapshot through repeated transient failures until it ages out, so the bar doesn't flap to empty.
@@ -2246,7 +2284,8 @@ export class RateLimitService {
         ...previous.usageMetadata,
         ...fresh.usageMetadata,
         lastSuccessfulSource:
-          previous.usageMetadata?.lastSuccessfulSource ?? previous.usageMetadata?.source
+          previous.usageMetadata?.lastSuccessfulSource ?? previous.usageMetadata?.source,
+        lastAttemptAt
       }
     }
   }

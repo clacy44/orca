@@ -31,8 +31,13 @@ import { parseWslUncPath } from '../../shared/wsl-paths'
 import { resolveLocalAccountRuntimeTarget } from '../../shared/local-account-runtime'
 import { getDefaultWslDistro, getWslHome, toWindowsWslPath } from '../wsl'
 import { buildEncodedWslBashCommand } from '../wsl-bash-command'
-import { hasLiveClaudePtys, hasLiveClaudePtysForAccount } from './live-pty-gate'
-import { isOauthTokenExpiring, refreshClaudeOauthCredentials } from './oauth-refresh'
+import { hasLiveClaudePtys, hasLiveClaudePtysInAccountConfigDir } from './live-pty-gate'
+import { waitForClaudeCliRefreshLock } from './cli-refresh-lock'
+import {
+  isOauthTokenExpiring,
+  readRefreshToken,
+  refreshClaudeOauthCredentials
+} from './oauth-refresh'
 import { ClaudeRuntimePathResolver } from './runtime-paths'
 import {
   deleteActiveClaudeKeychainCredentialsStrict,
@@ -129,6 +134,11 @@ export class ClaudeRuntimeAuthService {
   private lastWrittenOauthAccount: unknown = null
   private skipNextReadBackForAccountId: string | null = null
   private managedRefreshDeferredByLivePtyAccountId: string | null = null
+  // Why: a rotated token whose write-back failed; see flushPendingRotatedWrites.
+  private readonly pendingRotatedWrites = new Map<
+    string,
+    { oldRefreshToken: string | null; credentialsJson: string }
+  >()
   readonly laneCredentials: LaneCredentialCoordinator
 
   constructor(private readonly store: Store) {
@@ -188,9 +198,12 @@ export class ClaudeRuntimeAuthService {
   /**
    * Credentials for a NON-active managed account's usage fetch, refreshing an expiring token
    * safely. Runs inside the same mutation queue as the active-account sync so the single-use
-   * refresh token is never rotated by two paths at once, and defers while a live Claude
-   * terminal may hold it. The rotated token is written back before this resolves, so an
-   * aborted usage fetch afterwards cannot lose it.
+   * refresh token is never rotated by two paths at once. The rotated token is written back before
+   * this resolves, so an aborted usage fetch afterwards cannot lose it.
+   *
+   * Owner ruling R1: every local host agent follows the single active account, so a non-active
+   * HOST account is never held by a live terminal and is always refreshed. Only a WSL-managed
+   * account can have a live terminal running in its own config dir; that one defers.
    */
   async prepareInactiveCredentialsForUsage(
     accountId: string
@@ -199,7 +212,9 @@ export class ClaudeRuntimeAuthService {
       const settings = this.store.getSettings()
       const selection = normalizeClaudeRuntimeSelection(settings)
       const selectedIds = new Set<string | null>([selection.host, ...Object.values(selection.wsl)])
-      if (selectedIds.has(accountId)) {
+      // Why lastSyncedAccountId too: a deselected account stays materialized in the shared runtime
+      // config dir until the next sync replaces it, and a live terminal may still own that copy.
+      if (selectedIds.has(accountId) || this.lastSyncedAccountId === accountId) {
         return { status: 'skip' }
       }
       const account = settings.claudeManagedAccounts.find((entry) => entry.id === accountId)
@@ -215,7 +230,14 @@ export class ClaudeRuntimeAuthService {
       if (!isOauthTokenExpiring(credentialsJson)) {
         return { status: 'ready', credentialsJson, deferred: false }
       }
-      if (hasLiveClaudePtysForAccount(accountId)) {
+      if (
+        account.managedAuthRuntime === 'wsl' &&
+        hasLiveClaudePtysInAccountConfigDir(accountId, {
+          // Why win32 only: a pre-attribution seed there may be a WSL CLI inside this account's
+          // config dir; on Linux/macOS a WSL account cannot be running at all.
+          legacyUnattributedHolds: process.platform === 'win32'
+        })
+      ) {
         return { status: 'ready', credentialsJson, deferred: true }
       }
       const refreshed = await this.refreshManagedAccountTokenIfNeeded(account, credentialsJson)
@@ -260,9 +282,41 @@ export class ClaudeRuntimeAuthService {
   }
 
   private serializeMutation<T>(fn: () => Promise<T>): Promise<T> {
-    const next = this.mutationQueue.then(fn, fn)
+    const run = async (): Promise<T> => {
+      await this.flushPendingRotatedWrites()
+      return fn()
+    }
+    const next = this.mutationQueue.then(run, run)
     this.mutationQueue = next.catch(() => {})
     return next
+  }
+
+  /**
+   * Re-attempts rotated tokens whose write-back failed twice. The server has already rotated the
+   * single-use refresh token, so the in-memory copy is the only valid one until it lands on disk.
+   * Compare-and-swap on the OLD refresh token: if storage changed meanwhile (a re-login, a CLI
+   * read-back) that newer write wins and the pending one is dropped.
+   */
+  private async flushPendingRotatedWrites(): Promise<void> {
+    if (this.pendingRotatedWrites.size === 0) {
+      return
+    }
+    for (const [accountId, pending] of this.pendingRotatedWrites) {
+      try {
+        const account = this.store
+          .getSettings()
+          .claudeManagedAccounts.find((entry) => entry.id === accountId)
+        const stored = account ? await this.readManagedCredentials(account) : null
+        if (!account || !stored || readRefreshToken(stored) !== pending.oldRefreshToken) {
+          this.pendingRotatedWrites.delete(accountId)
+          continue
+        }
+        await this.writeManagedCredentials(account, pending.credentialsJson)
+        this.pendingRotatedWrites.delete(accountId)
+      } catch (error) {
+        console.warn('[claude-runtime-auth] Pending rotated token write-back still failing:', error)
+      }
+    }
   }
 
   private async doSyncForCurrentSelection(target?: ClaudeAccountSelectionTarget): Promise<void> {
@@ -284,6 +338,16 @@ export class ClaudeRuntimeAuthService {
       : null
     if (previousAccount && previousAccount.id !== activeAccount?.id) {
       if (previousManagedCredentialsJson) {
+        // Why: a CLI mid-refresh holds this lock; reading the runtime blob before it saves would
+        // capture the pre-rotation token and then overwrite managed storage with a revoked one.
+        const lockWait = await waitForClaudeCliRefreshLock(
+          this.pathResolver.getRuntimePaths().configDir
+        )
+        if (lockWait === 'timed-out') {
+          console.warn(
+            '[claude-runtime-auth] Claude CLI refresh lock still held; reading runtime credentials back anyway'
+          )
+        }
         const outgoingReadBackResult = await this.readBackRefreshedTokens(
           previousManagedCredentialsJson,
           {
@@ -315,6 +379,16 @@ export class ClaudeRuntimeAuthService {
               '[claude-runtime-auth] Skipping unverified live Claude auth read-back while switching accounts'
             )
           }
+        } else if (
+          outgoingReadBackResult.status === 'rejected' &&
+          outgoingReadBackResult.runtimeCredentialsChanged &&
+          outgoingReadBackResult.hasValidChangedRuntimeCredentials
+        ) {
+          // Diagnostic (no token or identity): valid, changed runtime credentials were rejected
+          // although no live terminal holds them — the shape of a lost-rotation /login report.
+          console.warn(
+            '[claude-runtime-auth] Rejected a valid, changed runtime credential read-back on switch-away with no live Claude terminal'
+          )
         }
       }
     }
@@ -1071,12 +1145,23 @@ export class ClaudeRuntimeAuthService {
     if (!refreshed || !this.isValidCredentialsJsonObject(refreshed)) {
       return null
     }
-    try {
-      await this.writeManagedCredentials(account, refreshed)
-    } catch (error) {
-      console.warn('[claude-runtime-auth] Failed to persist refreshed Claude token:', error)
-      return null
+    // Why retry, then keep: the server already rotated the single-use refresh token, so dropping
+    // the new blob on a write failure would strand the account on a revoked token.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await this.writeManagedCredentials(account, refreshed)
+        this.pendingRotatedWrites.delete(account.id)
+        return refreshed
+      } catch (error) {
+        if (attempt === 1) {
+          console.warn('[claude-runtime-auth] Failed to persist refreshed Claude token:', error)
+        }
+      }
     }
+    this.pendingRotatedWrites.set(account.id, {
+      oldRefreshToken: readRefreshToken(credentialsJson),
+      credentialsJson: refreshed
+    })
     return refreshed
   }
 

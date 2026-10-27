@@ -1297,7 +1297,7 @@ describe('fetchClaudeRateLimits', () => {
       JSON.stringify({
         claudeAiOauth: {
           accessToken: 'inactive-token',
-          expiresAt: Date.now() + 60_000
+          expiresAt: Date.now() + 3_600_000
         }
       }),
       'utf-8'
@@ -1347,7 +1347,7 @@ describe('fetchClaudeRateLimits', () => {
     const credentialsJson = JSON.stringify({
       claudeAiOauth: {
         accessToken: 'managed-keychain-token',
-        expiresAt: Date.now() + 60_000
+        expiresAt: Date.now() + 3_600_000
       }
     })
     mkdirSync(ownedAuthPath, { recursive: true })
@@ -1489,7 +1489,7 @@ describe('fetchClaudeRateLimits', () => {
       JSON.stringify({
         claudeAiOauth: {
           accessToken: 'managed-keychain-token',
-          expiresAt: Date.now() + 60_000
+          expiresAt: Date.now() + 3_600_000
         }
       })
     )
@@ -1651,10 +1651,13 @@ describe('fetchClaudeRateLimits', () => {
     })
 
     it('reports the live-session deferral on a 401 when the callback deferred the refresh', async () => {
-      const { authPath } = setupLinuxAccount(expiredCredentials)
+      // Inside the CLI's refresh skew but not yet expired: the endpoint is still asked, and its
+      // 401 is read as the deferral rather than as a sign-in problem.
+      const expiringCredentials = { ...expiredCredentials, expiresAt: Date.now() + 60_000 }
+      const { authPath } = setupLinuxAccount(expiringCredentials)
       const prepareCredentials = vi.fn(async () => ({
         status: 'ready' as const,
-        credentialsJson: JSON.stringify({ claudeAiOauth: expiredCredentials }),
+        credentialsJson: JSON.stringify({ claudeAiOauth: expiringCredentials }),
         deferred: true
       }))
       netFetchMock.mockResolvedValueOnce(new Response('{}', { status: 401 }))
@@ -1673,6 +1676,34 @@ describe('fetchClaudeRateLimits', () => {
       )
     })
 
+    it('lets the callback finish its write-back when the fetch is aborted mid-callback', async () => {
+      const { authPath, credentialsPath } = setupLinuxAccount(expiredCredentials)
+      const controller = new AbortController()
+      const rotated = JSON.stringify({
+        claudeAiOauth: { accessToken: 'rotated', refreshToken: 'rotated-r', expiresAt: 9e12 }
+      })
+      let callbackFinished = false
+      const prepareCredentials = vi.fn(async () => {
+        controller.abort()
+        await Promise.resolve()
+        writeFileSync(credentialsPath, rotated, 'utf-8')
+        callbackFinished = true
+        return { status: 'ready' as const, credentialsJson: rotated, deferred: false }
+      })
+
+      const result = await fetchManagedAccountUsage(
+        { id: 'account-1', managedAuthPath: authPath },
+        { prepareCredentials, signal: controller.signal }
+      )
+
+      expect(result.error).toBe('Rate-limit fetch aborted')
+      expect(callbackFinished).toBe(true)
+      expect(JSON.parse(readFileSync(credentialsPath, 'utf-8')).claudeAiOauth.accessToken).toBe(
+        'rotated'
+      )
+      expect(netFetchMock).not.toHaveBeenCalled()
+    })
+
     it('drops the fetch when the callback says the account became active', async () => {
       const { authPath } = setupLinuxAccount(expiredCredentials)
 
@@ -1683,6 +1714,159 @@ describe('fetchClaudeRateLimits', () => {
 
       expect(result.status).toBe('error')
       expect(netFetchMock).not.toHaveBeenCalled()
+    })
+
+    const matchingPtyResult = {
+      provider: 'claude' as const,
+      session: { usedPercent: 12, windowMinutes: 300, resetsAt: null, resetDescription: null },
+      weekly: { usedPercent: 34, windowMinutes: 10080, resetsAt: null, resetDescription: null },
+      fableWeekly: {
+        usedPercent: 58,
+        windowMinutes: 10080,
+        resetsAt: null,
+        resetDescription: '3d'
+      },
+      updatedAt: 1,
+      error: null,
+      status: 'ok' as const
+    }
+
+    it('spawns no PTY preview while the refresh is deferred behind a live terminal', async () => {
+      // Expiring (inside the CLI's 5 minute skew) but not yet expired, so the usage call still runs.
+      const expiring = { accessToken: 'soon', refreshToken: 'r', expiresAt: Date.now() + 60_000 }
+      const { authPath } = setupLinuxAccount(expiring)
+      netFetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ five_hour: { utilization: 12 }, seven_day: { utilization: 34 } })
+      })
+
+      const result = await fetchManagedAccountUsage(
+        { id: 'account-1', managedAuthPath: authPath },
+        {
+          allowUsagePanelSupplement: true,
+          prepareCredentials: async () => ({
+            status: 'ready',
+            credentialsJson: JSON.stringify({ claudeAiOauth: expiring }),
+            deferred: true
+          })
+        }
+      )
+
+      expect(result.status).toBe('ok')
+      expect(fetchViaPty).not.toHaveBeenCalled()
+    })
+
+    it('spawns no PTY preview while the token is expiring and was not refreshed', async () => {
+      const { authPath } = setupLinuxAccount({
+        accessToken: 'soon',
+        refreshToken: 'r',
+        expiresAt: Date.now() + 60_000
+      })
+      netFetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ five_hour: { utilization: 12 }, seven_day: { utilization: 34 } })
+      })
+
+      await fetchManagedAccountUsage(
+        { id: 'account-1', managedAuthPath: authPath },
+        { allowUsagePanelSupplement: true }
+      )
+
+      expect(fetchViaPty).not.toHaveBeenCalled()
+    })
+
+    it('still spawns the PTY preview for a healthy, non-expiring token (positive control)', async () => {
+      const { authPath } = setupLinuxAccount({
+        accessToken: 'healthy',
+        refreshToken: 'r',
+        expiresAt: Date.now() + 3_600_000
+      })
+      netFetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ five_hour: { utilization: 12 }, seven_day: { utilization: 34 } })
+      })
+      vi.mocked(fetchViaPty).mockResolvedValueOnce(matchingPtyResult)
+
+      await fetchManagedAccountUsage(
+        { id: 'account-1', managedAuthPath: authPath },
+        { allowUsagePanelSupplement: true }
+      )
+
+      expect(fetchViaPty).toHaveBeenCalledTimes(1)
+    })
+
+    it('returns the deferral without calling the usage endpoint when deferred and already expired', async () => {
+      const { authPath } = setupLinuxAccount(expiredCredentials)
+
+      const result = await fetchManagedAccountUsage(
+        { id: 'account-1', managedAuthPath: authPath },
+        {
+          prepareCredentials: async () => ({
+            status: 'ready',
+            credentialsJson: JSON.stringify({ claudeAiOauth: expiredCredentials }),
+            deferred: true
+          })
+        }
+      )
+
+      expect(result.usageMetadata?.failureKind).toBe('deferred-by-live-session')
+      expect(netFetchMock).not.toHaveBeenCalled()
+    })
+
+    describe('macOS staged usage-panel credentials', () => {
+      async function runWithStagedBlob(staged: string): Promise<void> {
+        setPlatform('darwin')
+        tempDir = mkdtempSync(join(tmpdir(), 'orca-claude-fetcher-'))
+        appGetPathMock.mockReturnValue(tempDir)
+        const ownedAuthPath = join(tempDir, 'claude-accounts', 'account-1', 'auth')
+        mkdirSync(ownedAuthPath, { recursive: true })
+        writeFileSync(join(ownedAuthPath, '.orca-managed-claude-auth'), 'account-1\n', 'utf-8')
+        vi.mocked(readManagedClaudeKeychainCredentials).mockResolvedValueOnce(
+          JSON.stringify({
+            claudeAiOauth: {
+              accessToken: 'managed',
+              refreshToken: 'managed-refresh',
+              expiresAt: Date.now() + 3_600_000
+            }
+          })
+        )
+        vi.mocked(readActiveClaudeKeychainCredentialsStrict).mockResolvedValue(staged)
+        vi.mocked(fetchViaPty).mockResolvedValueOnce(matchingPtyResult)
+        await fetchManagedAccountUsage(
+          { id: 'account-1', managedAuthPath: ownedAuthPath },
+          { allowUsagePanelSupplement: true }
+        )
+      }
+
+      it('never writes back a staged blob the CLI wiped to empty tokens', async () => {
+        await runWithStagedBlob(
+          JSON.stringify({ claudeAiOauth: { accessToken: '', refreshToken: '', expiresAt: 0 } })
+        )
+
+        expect(fetchViaPty).toHaveBeenCalledTimes(1)
+        expect(writeManagedClaudeKeychainCredentials).not.toHaveBeenCalled()
+      })
+
+      it('never writes back a staged blob that kept an access token but lost the refresh token', async () => {
+        await runWithStagedBlob(
+          JSON.stringify({ claudeAiOauth: { accessToken: 'still-here', refreshToken: '' } })
+        )
+
+        expect(writeManagedClaudeKeychainCredentials).not.toHaveBeenCalled()
+      })
+
+      it('writes back a staged blob the CLI legitimately rotated (positive control)', async () => {
+        const rotated = JSON.stringify({
+          claudeAiOauth: {
+            accessToken: 'rotated',
+            refreshToken: 'rotated-refresh',
+            expiresAt: Date.now() + 7_200_000
+          }
+        })
+        await runWithStagedBlob(rotated)
+
+        expect(writeManagedClaudeKeychainCredentials).toHaveBeenCalledWith('account-1', rotated)
+      })
     })
 
     it('marks missing credentials with the missing-credentials failure kind', async () => {

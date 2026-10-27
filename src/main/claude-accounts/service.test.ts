@@ -250,6 +250,74 @@ describe('ClaudeAccountService credential capture', () => {
     expect(runtimeAuth.forceMaterializeCurrentSelectionForRollback).toHaveBeenCalled()
   })
 
+  it('leaves rotated managed credentials alone when reauth fails after a background refresh', async () => {
+    setPlatform('linux')
+    tempDir = CLAUDE_SERVICE_TEST_ROOT
+    rmSync(tempDir, { recursive: true, force: true })
+    const managedAuthPath = join(tempDir, 'claude-accounts', 'account-1', 'auth')
+    mkdirSync(managedAuthPath, { recursive: true })
+    writeFileSync(join(managedAuthPath, '.orca-managed-claude-auth'), 'account-1\n', 'utf-8')
+    writeFileSync(join(managedAuthPath, '.credentials.json'), '{"old":true}\n', 'utf-8')
+    writeFileSync(join(managedAuthPath, 'oauth-account.json'), '{"oldOauth":true}\n', 'utf-8')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    let settings = {
+      claudeManagedAccounts: [
+        {
+          id: 'account-1',
+          email: 'old@example.com',
+          managedAuthPath,
+          authMethod: 'subscription-oauth',
+          organizationUuid: null,
+          organizationName: null,
+          createdAt: 1,
+          updatedAt: 1,
+          lastAuthenticatedAt: 1
+        }
+      ],
+      activeClaudeManagedAccountId: 'account-1'
+    }
+    const store = {
+      getSettings: vi.fn(() => settings),
+      updateSettings: vi.fn((updates: Partial<typeof settings>) => {
+        settings = { ...settings, ...updates }
+        return settings
+      })
+    }
+    const runtimeAuth = {
+      clearLastWrittenCredentialsJson: vi.fn(),
+      forceMaterializeCurrentSelectionForRollback: vi.fn(async () => {}),
+      // The background keep-alive rotates the freshly stored login before the sync fails.
+      syncForCurrentSelection: vi.fn(async () => {
+        writeFileSync(join(managedAuthPath, '.credentials.json'), '{"rotated":true}\n', 'utf-8')
+        throw new Error('materialize failed')
+      })
+    }
+    const rateLimits = { evictInactiveClaudeCache: vi.fn(), refreshForClaudeAccountChange: vi.fn() }
+    const { ClaudeAccountService } = await import('./service')
+    const service = new ClaudeAccountService(
+      store as never,
+      rateLimits as never,
+      runtimeAuth as never
+    )
+    ;(
+      service as unknown as { runClaudeLoginAndCapture(): Promise<unknown> }
+    ).runClaudeLoginAndCapture = vi.fn(async () => ({
+      credentialsJson: '{"new":true}\n',
+      oauthAccount: { newOauth: true },
+      identity: { email: 'new@example.com', organizationUuid: null, organizationName: null }
+    }))
+
+    await expect(service.reauthenticateAccount('account-1')).rejects.toThrow('materialize failed')
+
+    // The pre-login blob must not be put back over the rotated one.
+    expect(readFileSync(join(managedAuthPath, '.credentials.json'), 'utf-8')).toBe(
+      '{"rotated":true}\n'
+    )
+    expect(runtimeAuth.forceMaterializeCurrentSelectionForRollback).not.toHaveBeenCalled()
+    expect(store.getSettings().claudeManagedAccounts[0].email).toBe('new@example.com')
+    warn.mockRestore()
+  })
+
   it('restores settings without rematerializing when managed-auth rollback write fails', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     tempDir = CLAUDE_SERVICE_TEST_ROOT
@@ -258,7 +326,11 @@ describe('ClaudeAccountService credential capture', () => {
     mkdirSync(managedAuthPath, { recursive: true })
     writeFileSync(join(managedAuthPath, '.orca-managed-claude-auth'), 'account-1\n', 'utf-8')
     writeFileSync(join(managedAuthPath, 'oauth-account.json'), '{"oldOauth":true}\n', 'utf-8')
-    vi.mocked(readManagedClaudeKeychainCredentials).mockResolvedValue('{"old":true}\n')
+    // Snapshot read sees the old blob; after the new login is written the store holds the captured
+    // one, so the rollback still tries (and fails) to restore.
+    vi.mocked(readManagedClaudeKeychainCredentials)
+      .mockResolvedValueOnce('{"old":true}\n')
+      .mockResolvedValue('{"new":true}\n')
     vi.mocked(writeManagedClaudeKeychainCredentials)
       .mockResolvedValueOnce()
       .mockRejectedValueOnce(new Error('managed restore failed'))

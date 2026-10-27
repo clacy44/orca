@@ -19,11 +19,12 @@ export const SHARED_CLAUDE_LANE_KEY = 'host'
 // pinned to a lane or to the shared one, and L1 forbids a lane's account also being the shared
 // one, so a shared-lane `claude` defers nobody's lane.
 const lanePrincipalIdByPtyId = new Map<string, string>()
-// Why: which managed Claude account each SPAWNED pty was launched under; `null` records a launch
-// that is known to hold no managed account (system default, lane). A live pty ABSENT from this map
-// is of unknown account — seeded from persistence, or a synthetic probe id — and
-// `hasLiveClaudePtysForAccount` treats it as possibly holding any account (persistence stores
-// the lane, not the account, so a surviving CLI would otherwise look harmless after a restart).
+// Why: which WSL-managed Claude account each SPAWNED pty was launched under; `null` records a
+// launch known to hold no WSL-managed account (host account, system default, lane). Host accounts
+// are never attributed: every local host agent follows the single active account, so a host
+// account's config dir is only ever held by the active one (owner ruling R1). A live pty ABSENT
+// from this map is of unknown account (seeded from persistence before the account was recorded)
+// and only counts as a holder when the caller's `legacyUnattributedHolds` says so.
 const accountIdByPtyId = new Map<string, string | null>()
 // Why: ids restored from persistence at startup, not yet confirmed against the
 // daemon. They keep the OAuth refresh gate closed so an early managed refresh
@@ -134,17 +135,16 @@ export function confirmSeededClaudeLivePtys(aliveSessionIds: readonly string[]):
 export function markClaudePtySpawned(
   ptyId: string,
   lanePrincipalId: string | null,
-  // Why optional-but-load-bearing: omitting it records NO attribution, which defers every
-  // account's inactive refresh (safe); pass `null` only when the launch holds no managed account.
+  // Why optional-but-load-bearing: `undefined` KEEPS any attribution already recorded for this
+  // pty (a reattach must not erase what the original spawn knew); `null` records "holds no
+  // WSL-managed account".
   accountId?: string | null
 ): void {
   liveClaudePtyIds.add(ptyId)
   seededUnconfirmedPtyIds.delete(ptyId)
   const laneId = lanePrincipalId || SHARED_CLAUDE_LANE_KEY
   lanePrincipalIdByPtyId.set(ptyId, laneId)
-  if (accountId === undefined) {
-    accountIdByPtyId.delete(ptyId)
-  } else {
+  if (accountId !== undefined) {
     accountIdByPtyId.set(ptyId, accountId)
   }
   persistence?.addClaudeLivePtySessionId(ptyId, laneId)
@@ -227,34 +227,47 @@ export function hasUnattributedLiveClaudePtys(): boolean {
 }
 
 /**
- * Whether a live `claude` may be holding THIS managed account's single-use refresh token.
+ * Whether a live `claude` may be holding THIS account's config dir (and so its single-use
+ * refresh token).
  *
- * True when a live pty was launched under the account, or when any live pty is unattributed
- * (no lane, or no recorded account — e.g. a seeded id): over-deferring costs a delayed refresh,
- * under-deferring revokes a token out from under a running CLI. When unsure, defer.
+ * Only a pty launched under the account counts. A pty with no recorded attribution (a seed from
+ * before attribution was persisted) counts only when `legacyUnattributedHolds` is set — the
+ * caller passes it where such a seed could be running inside a managed WSL config dir. Lane probe
+ * ptys never count: a lane holds its own credential copy, never the account's.
  */
-export function hasLiveClaudePtysForAccount(accountId: string): boolean {
+export function hasLiveClaudePtysInAccountConfigDir(
+  accountId: string,
+  options: { legacyUnattributedHolds: boolean }
+): boolean {
   for (const ptyId of liveClaudePtyIds) {
-    if (!accountIdByPtyId.has(ptyId) || accountIdByPtyId.get(ptyId) === accountId) {
+    if (ephemeralPtyIds.has(ptyId)) {
+      continue
+    }
+    if (!accountIdByPtyId.has(ptyId)) {
+      if (options.legacyUnattributedHolds) {
+        return true
+      }
+      continue
+    }
+    if (accountIdByPtyId.get(ptyId) === accountId) {
       return true
     }
   }
-  return hasUnattributedLiveClaudePtys()
+  return false
 }
 
 /**
- * The managed account id a launch provenance names (`managed:<id>[:…]`), else null.
+ * The WSL-managed account id a launch provenance names, else null.
  *
- * `system`, `wsl:<distro>:system` and `lane:<label>` provenances name no managed account.
+ * Only `managed:<id>:wsl:<distro>` names one. A host `managed:<id>` launch, `system`,
+ * `wsl:<distro>:system` and `lane:<label>` do not (owner ruling R1: host accounts are never held
+ * by a non-active account's pty).
  */
-export function parseManagedAccountIdFromProvenance(
+export function parseWslManagedAccountIdFromProvenance(
   provenance: string | null | undefined
 ): string | null {
-  if (!provenance || !provenance.startsWith('managed:')) {
-    return null
-  }
-  const id = provenance.slice('managed:'.length).split(':')[0]
-  return id ? id : null
+  const match = /^managed:([^:]+):wsl:/.exec(provenance ?? '')
+  return match ? match[1] : null
 }
 
 /** The lane id is required: an omitted one silently gated every lane behind the shared one. */

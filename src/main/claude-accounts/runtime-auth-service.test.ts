@@ -19,6 +19,8 @@ import type { GlobalSettings } from '../../shared/global-settings-types'
 import type { ClaudeManagedAccount } from '../../shared/managed-account-types'
 import { isOauthTokenExpiring, refreshClaudeOauthCredentials } from './oauth-refresh'
 import type { ClaudeRuntimeAuthService } from './runtime-auth-service'
+import { waitForClaudeCliRefreshLock } from './cli-refresh-lock'
+import { writeManagedClaudeKeychainCredentials } from './keychain'
 
 const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')
 const hostPlatform = process.platform
@@ -53,7 +55,21 @@ vi.mock('electron', () => ({
 // existing expectations hold; individual tests can override these mocks.
 vi.mock('./oauth-refresh', () => ({
   isOauthTokenExpiring: vi.fn(() => false),
-  refreshClaudeOauthCredentials: vi.fn(async () => null)
+  refreshClaudeOauthCredentials: vi.fn(async () => null),
+  readRefreshToken: (credentialsJson: string) => {
+    try {
+      const token = JSON.parse(credentialsJson)?.claudeAiOauth?.refreshToken
+      return typeof token === 'string' && token.trim() !== '' ? token.trim() : null
+    } catch {
+      return null
+    }
+  }
+}))
+
+// Why: real polling would stall switch-away tests on a lock that never exists; the lock's own
+// behavior is covered in cli-refresh-lock.test.ts.
+vi.mock('./cli-refresh-lock', () => ({
+  waitForClaudeCliRefreshLock: vi.fn(async () => 'clear')
 }))
 
 vi.mock('node:os', async () => {
@@ -3972,6 +3988,7 @@ describe('ClaudeRuntimeAuthService', () => {
       gate.markClaudePtyExited('inactive-live-pty')
       gate.markClaudePtyExited('seeded-unattributed-pty')
       gate.confirmSeededClaudeLivePtys([])
+      vi.restoreAllMocks()
     })
 
     it('refreshes an expiring inactive account and persists the rotation', async () => {
@@ -4078,52 +4095,331 @@ describe('ClaudeRuntimeAuthService', () => {
       expect(refreshClaudeOauthCredentials).not.toHaveBeenCalled()
     })
 
-    it('defers without refreshing while a live pty is attributed to the account', async () => {
+    // Owner ruling R1: host agents follow the single active account, so a non-active HOST
+    // account is never held by a live terminal.
+    it('refreshes a host account even while a managed pty or a legacy seed is live', async () => {
       const { service, managedAuthPath2 } = await setup()
-      const { markClaudePtySpawned } = await import('./live-pty-gate')
-      markClaudePtySpawned('inactive-live-pty', null, 'account-2')
+      const gate = await import('./live-pty-gate')
+      gate.markClaudePtySpawned('inactive-live-pty', null, null)
+      gate.seedLiveClaudePtysFromPersistence([
+        { sessionId: 'seeded-unattributed-pty', laneId: null }
+      ])
 
       const result = await service.prepareInactiveCredentialsForUsage('account-2')
 
-      expect(result).toEqual({ status: 'ready', credentialsJson: STALE, deferred: true })
-      expect(refreshClaudeOauthCredentials).not.toHaveBeenCalled()
-      expect(readManagedCredentialsForTest('account-2', managedAuthPath2)).toBe(STALE)
+      expect(result).toEqual({ status: 'ready', credentialsJson: REFRESHED, deferred: false })
+      expect(refreshClaudeOauthCredentials).toHaveBeenCalledTimes(1)
+      expect(readManagedCredentialsForTest('account-2', managedAuthPath2)).toBe(REFRESHED)
     })
 
-    it('refreshes normally when the live pty is attributed to a different account', async () => {
-      const { service } = await setup()
-      const { markClaudePtySpawned } = await import('./live-pty-gate')
-      markClaudePtySpawned('inactive-live-pty', null, 'account-1')
+    it('returns skip for an account deselected but still materialized in the runtime', async () => {
+      const { service, store } = await setup()
+      // account-1 was materialized by the initial sync; deselect it without a sync.
+      store.updateSettings({
+        activeClaudeManagedAccountId: null,
+        activeClaudeManagedAccountIdsByRuntime: { host: null, wsl: {} }
+      })
 
-      const result = await service.prepareInactiveCredentialsForUsage('account-2')
+      const result = await service.prepareInactiveCredentialsForUsage('account-1')
 
-      expect(result).toMatchObject({ status: 'ready', deferred: false })
+      expect(result).toEqual({ status: 'skip' })
+      expect(refreshClaudeOauthCredentials).not.toHaveBeenCalled()
+      // Negative control: a never-materialized account is still refreshed.
+      expect(await service.prepareInactiveCredentialsForUsage('account-2')).toMatchObject({
+        status: 'ready'
+      })
+    })
+
+    describe('WSL-managed accounts', () => {
+      type PrivateAuthApi = {
+        readManagedCredentials: (account: unknown) => Promise<string | null>
+        writeManagedCredentials: (account: unknown, json: string) => Promise<void>
+      }
+
+      async function setupWslAccount(): Promise<{
+        service: ClaudeRuntimeAuthService
+        writeSpy: ReturnType<typeof vi.fn>
+      }> {
+        const { service, store } = await setup()
+        store.updateSettings({
+          claudeManagedAccounts: [
+            ...store.getSettings().claudeManagedAccounts,
+            createClaudeAccount(
+              'account-wsl',
+              '\\\\wsl.localhost\\Ubuntu\\home\\u\\.local\\share\\orca\\claude-accounts\\account-wsl\\auth',
+              {
+                email: 'wsl@example.com',
+                managedAuthRuntime: 'wsl',
+                wslDistro: 'Ubuntu',
+                wslLinuxAuthPath: '/home/u/.local/share/orca/claude-accounts/account-wsl/auth'
+              }
+            )
+          ]
+        })
+        const priv = service as unknown as PrivateAuthApi
+        vi.spyOn(priv, 'readManagedCredentials').mockResolvedValue(STALE)
+        const writeSpy = vi.spyOn(priv, 'writeManagedCredentials').mockResolvedValue(undefined)
+        return { service, writeSpy }
+      }
+
+      it('defers while a live pty was launched under the WSL account', async () => {
+        const { service, writeSpy } = await setupWslAccount()
+        const { markClaudePtySpawned } = await import('./live-pty-gate')
+        markClaudePtySpawned('inactive-live-pty', null, 'account-wsl')
+
+        const result = await service.prepareInactiveCredentialsForUsage('account-wsl')
+
+        expect(result).toEqual({ status: 'ready', credentialsJson: STALE, deferred: true })
+        expect(refreshClaudeOauthCredentials).not.toHaveBeenCalled()
+        expect(writeSpy).not.toHaveBeenCalled()
+      })
+
+      it('keeps deferring after a reattach that passes no attribution', async () => {
+        const { service } = await setupWslAccount()
+        const { markClaudePtySpawned } = await import('./live-pty-gate')
+        markClaudePtySpawned('inactive-live-pty', null, 'account-wsl')
+        markClaudePtySpawned('inactive-live-pty', null, undefined)
+
+        const result = await service.prepareInactiveCredentialsForUsage('account-wsl')
+
+        expect(result).toMatchObject({ status: 'ready', deferred: true })
+      })
+
+      it('refreshes when the live pty belongs to another WSL account', async () => {
+        const { service, writeSpy } = await setupWslAccount()
+        const { markClaudePtySpawned } = await import('./live-pty-gate')
+        markClaudePtySpawned('inactive-live-pty', null, 'some-other-wsl-account')
+
+        const result = await service.prepareInactiveCredentialsForUsage('account-wsl')
+
+        expect(result).toMatchObject({ status: 'ready', deferred: false })
+        expect(refreshClaudeOauthCredentials).toHaveBeenCalledTimes(1)
+        expect(writeSpy).toHaveBeenCalledWith(expect.anything(), REFRESHED)
+      })
+
+      it('defers on a legacy unattributed seed on win32', async () => {
+        const { service } = await setupWslAccount()
+        setPlatform('win32')
+        const { seedLiveClaudePtysFromPersistence } = await import('./live-pty-gate')
+        seedLiveClaudePtysFromPersistence([{ sessionId: 'seeded-unattributed-pty', laneId: null }])
+
+        const result = await service.prepareInactiveCredentialsForUsage('account-wsl')
+
+        expect(result).toMatchObject({ status: 'ready', deferred: true })
+        expect(refreshClaudeOauthCredentials).not.toHaveBeenCalled()
+      })
+
+      it('refreshes despite a legacy unattributed seed on linux', async () => {
+        const { service } = await setupWslAccount()
+        setPlatform('linux')
+        const { seedLiveClaudePtysFromPersistence } = await import('./live-pty-gate')
+        seedLiveClaudePtysFromPersistence([{ sessionId: 'seeded-unattributed-pty', laneId: null }])
+
+        const result = await service.prepareInactiveCredentialsForUsage('account-wsl')
+
+        expect(result).toMatchObject({ status: 'ready', deferred: false })
+        expect(refreshClaudeOauthCredentials).toHaveBeenCalledTimes(1)
+      })
+    })
+
+    it('hands back the rotated token for a usage fetch that is aborted after prepare resolves', async () => {
+      const { service, managedAuthPath2 } = await setup()
+      const controller = new AbortController()
+      // A faithful stand-in for the fetcher: it awaits the preparer, and the abort lands after it.
+      const abortedFetch = (async () => {
+        const prepared = await service.prepareInactiveCredentialsForUsage('account-2')
+        controller.abort()
+        return controller.signal.aborted ? 'aborted' : prepared
+      })()
+
+      expect(await abortedFetch).toBe('aborted')
+
+      expect(readManagedCredentialsForTest('account-2', managedAuthPath2)).toBe(REFRESHED)
       expect(refreshClaudeOauthCredentials).toHaveBeenCalledTimes(1)
     })
 
-    it('defers without refreshing while an unattributed live pty exists', async () => {
-      const { service } = await setup()
-      const { seedLiveClaudePtysFromPersistence } = await import('./live-pty-gate')
-      seedLiveClaudePtysFromPersistence([{ sessionId: 'seeded-unattributed-pty', laneId: null }])
+    it.each(['linux', 'win32'] as const)(
+      'writes a rotated non-active token back to the managed file on %s',
+      async (platform) => {
+        setPlatform(platform)
+        const { service, managedAuthPath2 } = await setup()
 
-      const result = await service.prepareInactiveCredentialsForUsage('account-2')
+        const result = await service.prepareInactiveCredentialsForUsage('account-2')
 
-      expect(result).toEqual({ status: 'ready', credentialsJson: STALE, deferred: true })
-      expect(refreshClaudeOauthCredentials).not.toHaveBeenCalled()
+        expect(result).toEqual({ status: 'ready', credentialsJson: REFRESHED, deferred: false })
+        expect(readFileSync(join(managedAuthPath2, '.credentials.json'), 'utf-8')).toBe(REFRESHED)
+      }
+    )
+
+    describe('write-back failure of a rotated token', () => {
+      it('retries once and persists the rotation when the second write succeeds', async () => {
+        const { service, managedAuthPath2 } = await setup()
+        vi.mocked(writeManagedClaudeKeychainCredentials).mockClear()
+        vi.mocked(writeManagedClaudeKeychainCredentials).mockRejectedValueOnce(new Error('locked'))
+
+        const result = await service.prepareInactiveCredentialsForUsage('account-2')
+
+        expect(result).toEqual({ status: 'ready', credentialsJson: REFRESHED, deferred: false })
+        expect(writeManagedClaudeKeychainCredentials).toHaveBeenCalledTimes(2)
+        expect(refreshClaudeOauthCredentials).toHaveBeenCalledTimes(1)
+        expect(readManagedCredentialsForTest('account-2', managedAuthPath2)).toBe(REFRESHED)
+      })
+
+      it('returns the new token and flushes it at the next mutation when both writes fail', async () => {
+        const { service, managedAuthPath2 } = await setup()
+        vi.mocked(writeManagedClaudeKeychainCredentials).mockClear()
+        vi.mocked(writeManagedClaudeKeychainCredentials)
+          .mockRejectedValueOnce(new Error('locked'))
+          .mockRejectedValueOnce(new Error('still locked'))
+        vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+        const result = await service.prepareInactiveCredentialsForUsage('account-2')
+
+        // The rotated token is not lost even though storage still holds the revoked one.
+        expect(result).toEqual({ status: 'ready', credentialsJson: REFRESHED, deferred: false })
+        expect(readManagedCredentialsForTest('account-2', managedAuthPath2)).toBe(STALE)
+
+        await service.syncForCurrentSelection()
+
+        expect(readManagedCredentialsForTest('account-2', managedAuthPath2)).toBe(REFRESHED)
+      })
+
+      it('drops the pending write when storage changed meanwhile (compare-and-swap)', async () => {
+        const { service, managedAuthPath2 } = await setup()
+        vi.mocked(writeManagedClaudeKeychainCredentials)
+          .mockRejectedValueOnce(new Error('locked'))
+          .mockRejectedValueOnce(new Error('still locked'))
+        vi.spyOn(console, 'warn').mockImplementation(() => {})
+        await service.prepareInactiveCredentialsForUsage('account-2')
+        // A re-login (or a CLI read-back) landed a newer credential in the meantime.
+        const reLogin = createClaudeCredentialsJson('two@example.com', 'two-relogin')
+        testState.managedKeychainCredentials.set('account-2', reLogin)
+        writeFileSync(join(managedAuthPath2, '.credentials.json'), reLogin, 'utf-8')
+        vi.mocked(writeManagedClaudeKeychainCredentials).mockClear()
+
+        await service.syncForCurrentSelection()
+        await service.syncForCurrentSelection()
+
+        expect(readManagedCredentialsForTest('account-2', managedAuthPath2)).toBe(reLogin)
+        expect(writeManagedClaudeKeychainCredentials).not.toHaveBeenCalledWith(
+          'account-2',
+          REFRESHED
+        )
+      })
+    })
+  })
+
+  describe('switch-away read-back', () => {
+    afterEach(() => {
+      vi.restoreAllMocks()
     })
 
-    it('writes the rotated token back even if the usage fetch is aborted afterwards', async () => {
-      const { service, managedAuthPath2 } = await setup()
-      const controller = new AbortController()
+    async function setupSwitch(): Promise<{
+      service: ClaudeRuntimeAuthService
+      store: ReturnType<typeof createStore>
+    }> {
+      const path1 = createManagedClaudeAuth(
+        testState.userDataDir,
+        'account-1',
+        createClaudeCredentialsJson('one@example.com', 'one-fresh')
+      )
+      const path2 = createManagedClaudeAuth(
+        testState.userDataDir,
+        'account-2',
+        createClaudeCredentialsJson('two@example.com', 'two-fresh')
+      )
+      const store = createStore(
+        createSettings({
+          claudeManagedAccounts: [
+            createClaudeAccount('account-1', path1, { email: 'one@example.com' }),
+            createClaudeAccount('account-2', path2, { email: 'two@example.com' })
+          ],
+          activeClaudeManagedAccountId: 'account-1'
+        })
+      )
+      const { ClaudeRuntimeAuthService } = await import('./runtime-auth-service')
+      const service = new ClaudeRuntimeAuthService(store as never)
+      await service.syncForCurrentSelection()
+      return { service, store }
+    }
 
-      const pending = service.prepareInactiveCredentialsForUsage('account-2')
-      // The caller gives up while the refresh is still in flight; the lock-held section has no
-      // abort path, so the single-use rotation can never be lost between server and disk.
-      controller.abort()
-      await pending
+    it('waits for the CLI refresh lock before reading the runtime credentials back', async () => {
+      const { service, store } = await setupSwitch()
+      let releaseLock: (value: 'clear') => void = () => {}
+      vi.mocked(waitForClaudeCliRefreshLock).mockImplementationOnce(
+        () => new Promise((resolve) => (releaseLock = resolve))
+      )
+      const readBack = vi.spyOn(
+        service as unknown as { readBackRefreshedTokens: () => Promise<unknown> },
+        'readBackRefreshedTokens'
+      )
+      store.updateSettings({ activeClaudeManagedAccountId: 'account-2' })
 
-      expect(controller.signal.aborted).toBe(true)
-      expect(readManagedCredentialsForTest('account-2', managedAuthPath2)).toBe(REFRESHED)
+      const sync = service.syncForCurrentSelection()
+      await vi.waitFor(() => expect(waitForClaudeCliRefreshLock).toHaveBeenCalledTimes(1))
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(readBack).not.toHaveBeenCalled()
+      expect(vi.mocked(waitForClaudeCliRefreshLock).mock.calls[0]?.[0]).toBe(
+        expectedRuntimeConfigDir()
+      )
+
+      releaseLock('clear')
+      await sync
+
+      expect(readBack).toHaveBeenCalled()
+    })
+
+    it('logs one tokenless diagnostic when a valid, changed read-back is rejected with no live terminal', async () => {
+      const { service, store } = await setupSwitch()
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      vi.spyOn(
+        service as unknown as { readBackRefreshedTokens: () => Promise<unknown> },
+        'readBackRefreshedTokens'
+      ).mockResolvedValue({
+        status: 'rejected',
+        runtimeCredentialsChanged: true,
+        hasValidChangedRuntimeCredentials: true
+      })
+      store.updateSettings({ activeClaudeManagedAccountId: 'account-2' })
+
+      await service.syncForCurrentSelection()
+
+      const diagnostics = warn.mock.calls.filter(([message]) =>
+        String(message).includes('Rejected a valid, changed runtime credential read-back')
+      )
+      expect(diagnostics).toHaveLength(1)
+      expect(JSON.stringify(diagnostics)).not.toMatch(/one-fresh|two-fresh|@example\.com/)
+    })
+
+    it('does not log the diagnostic when the read-back was not rejected or a terminal is live', async () => {
+      const { service, store } = await setupSwitch()
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const readBack = vi.spyOn(
+        service as unknown as { readBackRefreshedTokens: () => Promise<unknown> },
+        'readBackRefreshedTokens'
+      )
+      readBack.mockResolvedValue({ status: 'unchanged' })
+      store.updateSettings({ activeClaudeManagedAccountId: 'account-2' })
+      await service.syncForCurrentSelection()
+      store.updateSettings({ activeClaudeManagedAccountId: 'account-1' })
+      readBack.mockResolvedValue({
+        status: 'rejected',
+        runtimeCredentialsChanged: true,
+        hasValidChangedRuntimeCredentials: true
+      })
+      const { markClaudePtySpawned, markClaudePtyExited } = await import('./live-pty-gate')
+      markClaudePtySpawned('diag-live-pty', null, null)
+      try {
+        await service.syncForCurrentSelection()
+      } finally {
+        markClaudePtyExited('diag-live-pty')
+      }
+
+      expect(
+        warn.mock.calls.some(([message]) =>
+          String(message).includes('Rejected a valid, changed runtime credential read-back')
+        )
+      ).toBe(false)
     })
   })
 

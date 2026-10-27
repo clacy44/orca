@@ -69,7 +69,8 @@ import {
   getTightestUsageSection
 } from './UsageRosterPanel'
 import { getUsageProviderAccountsSectionId } from './usage-provider-settings-target'
-import { formatRateLimitWindowChipLabel } from '@/lib/window-label-formatter'
+import { formatRateLimitWindowChipLabel, formatWindowLabel } from '@/lib/window-label-formatter'
+import { hasWindowResetSinceCheck, withoutWindowsResetSinceCheck } from './window-reset-since-check'
 import { useResetCountdownClock } from '@/hooks/useResetCountdownClock'
 import {
   markLiveCodexSessionsForRestart,
@@ -1066,7 +1067,9 @@ export function InlineUsageBars({
           used: clampUsedPercent(limits.session.usedPercent),
           // Why: live reset countdown (matches popover); '5h' window length only when resetsAt is unknown (#5399).
           label: formatRateLimitWindowChipLabel(limits.session, now),
-          resetCaption: null
+          idLabel: formatWindowLabel(limits.session.windowMinutes),
+          resetCaption: null,
+          resetSinceCheck: hasWindowResetSinceCheck(limits.session, limits.updatedAt, now)
         }
       : null,
     limits.weekly
@@ -1074,7 +1077,9 @@ export function InlineUsageBars({
           key: 'weekly',
           used: clampUsedPercent(limits.weekly.usedPercent),
           label: translate('auto.components.status.bar.StatusBar.5c938d39ac', 'wk'),
-          resetCaption: formatInlineResetCaption(limits.weekly.resetsAt, now)
+          idLabel: translate('auto.components.status.bar.StatusBar.5c938d39ac', 'wk'),
+          resetCaption: formatInlineResetCaption(limits.weekly.resetsAt, now),
+          resetSinceCheck: hasWindowResetSinceCheck(limits.weekly, limits.updatedAt, now)
         }
       : null,
     limits.fableWeekly
@@ -1082,12 +1087,22 @@ export function InlineUsageBars({
           key: 'fableWeekly',
           used: clampUsedPercent(limits.fableWeekly.usedPercent),
           label: translate('auto.components.status.bar.StatusBar.54e8d6bb2d', 'Fable'),
-          resetCaption: formatInlineResetCaption(limits.fableWeekly.resetsAt, now)
+          idLabel: translate('auto.components.status.bar.StatusBar.54e8d6bb2d', 'Fable'),
+          resetCaption: formatInlineResetCaption(limits.fableWeekly.resetsAt, now),
+          resetSinceCheck: hasWindowResetSinceCheck(limits.fableWeekly, limits.updatedAt, now)
         }
       : null
   ].filter(
-    (window): window is { key: string; used: number; label: string; resetCaption: string | null } =>
-      window !== null
+    (
+      window
+    ): window is {
+      key: string
+      used: number
+      label: string
+      idLabel: string
+      resetCaption: string | null
+      resetSinceCheck: boolean
+    } => window !== null
   )
 
   return (
@@ -1101,17 +1116,33 @@ export function InlineUsageBars({
         <div key={window.key} className="flex min-w-0 flex-col gap-0.5">
           <div className="flex min-w-0 items-center gap-1">
             <div className="h-[4px] min-w-0 flex-1 overflow-hidden rounded-full bg-muted">
-              {/* Why: fill follows the selected percentage; color still signals consumption urgency. */}
-              <div
-                className={`h-full rounded-full ${barColor(window.used)}`}
-                style={{ width: `${getDisplayedUsagePercentage(window.used, display)}%` }}
-              />
+              {/* Why: fill follows the selected percentage; color still signals consumption urgency.
+                  A window that reset since the data was fetched has no honest fill. */}
+              {window.resetSinceCheck ? null : (
+                <div
+                  className={`h-full rounded-full ${barColor(window.used)}`}
+                  style={{ width: `${getDisplayedUsagePercentage(window.used, display)}%` }}
+                />
+              )}
             </div>
-            <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
-              {formatUsagePercentageLabel(window.used, display)} {window.label}
-            </span>
+            {window.resetSinceCheck ? (
+              <span
+                data-usage-reset-since-check
+                className="min-w-0 shrink truncate text-[10px] text-muted-foreground"
+              >
+                {window.idLabel}{' '}
+                {translate(
+                  'auto.components.status.bar.UsageRosterPanel.resetSinceLastCheck',
+                  'reset since last check'
+                )}
+              </span>
+            ) : (
+              <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
+                {formatUsagePercentageLabel(window.used, display)} {window.label}
+              </span>
+            )}
           </div>
-          {window.resetCaption ? (
+          {window.resetCaption && !window.resetSinceCheck ? (
             <span
               data-usage-reset-caption
               className="truncate text-[9px] tabular-nums text-muted-foreground/80"
@@ -1123,8 +1154,10 @@ export function InlineUsageBars({
       ))}
       {usageWindows.length === 0 && limits.status === 'error' ? (
         <span className="text-[10px] text-muted-foreground">
-          {/* Why: only absent credentials mean "sign in"; every other failure keeps its own honest status. */}
-          {limits.usageMetadata?.failureKind === 'missing-credentials'
+          {/* Why: Claude only — "sign in" is right solely for absent credentials, every other Claude
+              failure keeps its own honest status. Other providers keep the original prompt. */}
+          {limits.provider !== 'claude' ||
+          limits.usageMetadata?.failureKind === 'missing-credentials'
             ? translate('auto.components.status.bar.StatusBar.f19a63e7cd', 'Sign in to see usage')
             : getProviderUsageStatusLabel(limits)}
         </span>
@@ -1320,6 +1353,7 @@ function ClaudeAccountUsageRows({
     <ClaudeAccountUsageList
       rows={rows}
       formatAge={formatInactiveUsageAge}
+      now={now}
       renderUsage={(row) =>
         row.limits ? (
           <InlineUsageBars limits={row.limits} isFetching={row.isFetching} />
@@ -1482,6 +1516,13 @@ export function ProviderSegment({
 }): React.JSX.Element {
   const provider = p?.provider ?? 'claude'
   const statusLabel = p ? getProviderUsageStatusLabel(p) : ''
+  // Why: ticks at reset boundaries so a window that resets while the pill is on screen flips live.
+  const now = useResetCountdownClock([
+    p?.session?.resetsAt,
+    p?.weekly?.resetsAt,
+    p?.fableWeekly?.resetsAt,
+    p?.monthly?.resetsAt
+  ])
 
   // Idle / initial load
   if (!p || p.status === 'idle') {
@@ -1493,7 +1534,19 @@ export function ProviderSegment({
     )
   }
 
-  const tightest = getTightestUsageSection(p)
+  // Why: a window that reset since the data was fetched must never show (or rank by) its old
+  // percentage; with nothing current left the pill falls back to its no-data state below.
+  const current = withoutWindowsResetSinceCheck(p, now)
+  const tightest = getTightestUsageSection(current, now)
+  const hasWindows = (limits: ProviderRateLimits): boolean =>
+    Boolean(
+      limits.session ||
+      limits.weekly ||
+      limits.fableWeekly ||
+      limits.monthly ||
+      limits.buckets?.length
+    )
+  const allWindowsReset = hasWindows(p) && !hasWindows(current)
 
   // Fetching with no prior data
   if (p.status === 'fetching' && !tightest) {
@@ -1507,6 +1560,15 @@ export function ProviderSegment({
 
   // Unavailable (CLI not installed)
   if (p.status === 'unavailable') {
+    return (
+      <span className="inline-flex items-center gap-1 text-muted-foreground/50">
+        <ProviderIcon provider={provider} /> --
+      </span>
+    )
+  }
+
+  // Every window reset since the last check: neutral, never an old number
+  if (allWindowsReset && p.status !== 'error') {
     return (
       <span className="inline-flex items-center gap-1 text-muted-foreground/50">
         <ProviderIcon provider={provider} /> --
@@ -1536,7 +1598,7 @@ export function ProviderSegment({
           {tightest && !compact ? (
             <MiniBar usedPct={clampUsedPercent(tightest.window.usedPercent)} display={display} />
           ) : null}
-          <VerboseProviderUsage p={p} display={display} />
+          <VerboseProviderUsage p={current} display={display} />
         </>
       ) : tightest ? (
         <WindowLabel

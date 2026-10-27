@@ -120,6 +120,29 @@ describe('applyRefreshedToken', () => {
     expect(parseClaudeOauthBlob(updated!)!.scopes).toEqual(['user:inference', 'user:profile'])
   })
 
+  it('records refreshTokenExpiresAt from refresh_token_expires_in', () => {
+    const updated = applyRefreshedToken(
+      credentials(),
+      {
+        access_token: 'b',
+        expires_in: 3600,
+        refresh_token: 'new-refresh',
+        refresh_token_expires_in: 86_400
+      },
+      NOW
+    )
+    expect(parseClaudeOauthBlob(updated!)!.refreshTokenExpiresAt).toBe(NOW + 86_400 * 1000)
+  })
+
+  it('leaves refreshTokenExpiresAt untouched when the server does not report it', () => {
+    const updated = applyRefreshedToken(
+      credentials({ refreshTokenExpiresAt: 123 }),
+      { access_token: 'b', expires_in: 3600 },
+      NOW
+    )
+    expect(parseClaudeOauthBlob(updated!)!.refreshTokenExpiresAt).toBe(123)
+  })
+
   it('returns null when the response lacks an access token', () => {
     expect(applyRefreshedToken(credentials(), {}, NOW)).toBeNull()
     expect(applyRefreshedToken('not json', { access_token: 'b' }, NOW)).toBeNull()
@@ -169,6 +192,19 @@ describe('refreshClaudeOauthCredentials', () => {
     const oauth = parseClaudeOauthBlob(result!)!
     expect(oauth.accessToken).toBe('fresh-access')
     expect(oauth.refreshToken).toBe('fresh-refresh')
+  })
+
+  it('allows the CLI-sized 30 s for the token endpoint before aborting', async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout')
+    netFetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ access_token: 'fresh-access', expires_in: 3600 })
+    })
+
+    await refreshClaudeOauthCredentials(credentials(), NOW)
+
+    expect(timeoutSpy).toHaveBeenCalledWith(30_000)
+    timeoutSpy.mockRestore()
   })
 
   it('returns null on a non-ok response and logs the status for diagnosability', async () => {

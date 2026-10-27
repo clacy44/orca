@@ -35,7 +35,12 @@ vi.mock('@/components/ui/dropdown-menu', () => ({
 }))
 
 import { TooltipProvider } from '@/components/ui/tooltip'
-import { ClaudeAccountUsageList, UsageRosterPanel, UsageRow } from './UsageRosterPanel'
+import {
+  ClaudeAccountUsageList,
+  getTightestUsageSection,
+  UsageRosterPanel,
+  UsageRow
+} from './UsageRosterPanel'
 import { buildClaudeSwitcherAccountRows } from './claude-switcher-account-rows'
 
 const signedOutCodex: ProviderRateLimits = {
@@ -256,6 +261,124 @@ describe('UsageRow', () => {
   })
 })
 
+describe('UsageRow windows that reset since the last check', () => {
+  const FETCHED = mocks.now - 60 * 60_000
+
+  function claudeFetchedAt(weeklyResetsAt: number | null): ProviderRateLimits {
+    return {
+      provider: 'claude',
+      session: { usedPercent: 25, windowMinutes: 300, resetsAt: null, resetDescription: null },
+      weekly: {
+        usedPercent: 63,
+        windowMinutes: 10_080,
+        resetsAt: weeklyResetsAt,
+        resetDescription: null
+      },
+      updatedAt: FETCHED,
+      error: null,
+      status: 'ok'
+    }
+  }
+
+  function renderRow(p: ProviderRateLimits): string {
+    return renderToStaticMarkup(
+      <UsageRow
+        p={p}
+        display="used"
+        state={{ kind: 'usage', statusLabel: null }}
+        showSignInAction={false}
+        now={mocks.now}
+      />
+    )
+  }
+
+  it('shows "reset since last check" instead of the old percentage', () => {
+    const markup = renderRow(claudeFetchedAt(FETCHED + 10 * 60_000))
+
+    expect(markup).toContain('reset since last check')
+    expect(markup.match(/data-usage-reset-since-check/g)).toHaveLength(1)
+    expect(markup).not.toContain('63%')
+    // The other window is unaffected.
+    expect(markup).toContain('25%')
+  })
+
+  it('keeps the percentage while the reset is still ahead', () => {
+    const markup = renderRow(claudeFetchedAt(mocks.now + 60_000))
+
+    expect(markup).toContain('63%')
+    expect(markup).not.toContain('reset since last check')
+  })
+
+  it('keeps the percentage when the reset predates the fetch', () => {
+    const markup = renderRow(claudeFetchedAt(FETCHED - 60_000))
+
+    expect(markup).toContain('63%')
+    expect(markup).not.toContain('reset since last check')
+  })
+})
+
+describe('getTightestUsageSection and windows reset since the last check', () => {
+  const FETCHED = mocks.now - 60 * 60_000
+  const PASSED = FETCHED + 10 * 60_000
+
+  function claude(
+    session: { used: number; resetsAt: number | null },
+    weekly: { used: number; resetsAt: number | null }
+  ): ProviderRateLimits {
+    return {
+      provider: 'claude',
+      session: {
+        usedPercent: session.used,
+        windowMinutes: 300,
+        resetsAt: session.resetsAt,
+        resetDescription: null
+      },
+      weekly: {
+        usedPercent: weekly.used,
+        windowMinutes: 10_080,
+        resetsAt: weekly.resetsAt,
+        resetDescription: null
+      },
+      updatedAt: FETCHED,
+      error: null,
+      status: 'ok'
+    }
+  }
+
+  it('skips a window that reset since the data was fetched, however high its old percentage', () => {
+    const tightest = getTightestUsageSection(
+      claude({ used: 95, resetsAt: PASSED }, { used: 40, resetsAt: mocks.now + 60_000 }),
+      mocks.now
+    )
+
+    expect(tightest?.window.usedPercent).toBe(40)
+  })
+
+  it('still ranks a high window whose reset is ahead or predates the fetch (positive control)', () => {
+    expect(
+      getTightestUsageSection(
+        claude({ used: 95, resetsAt: mocks.now + 60_000 }, { used: 40, resetsAt: null }),
+        mocks.now
+      )?.window.usedPercent
+    ).toBe(95)
+    expect(
+      getTightestUsageSection(
+        claude({ used: 95, resetsAt: FETCHED - 60_000 }, { used: 40, resetsAt: null }),
+        mocks.now
+      )?.window.usedPercent
+    ).toBe(95)
+  })
+
+  it('returns null when every window has reset', () => {
+    expect(
+      getTightestUsageSection(
+        claude({ used: 95, resetsAt: PASSED }, { used: 40, resetsAt: PASSED }),
+        mocks.now
+      )
+    ).toBeNull()
+  })
+})
+
 describe('UsageRosterPanel density picker', () => {
   let container: HTMLDivElement
   let root: Root
@@ -396,6 +519,7 @@ describe('UsageRosterPanel per-account Claude rows', () => {
               <ClaudeAccountUsageList
                 rows={rows}
                 formatAge={(ageMs) => `${Math.round(ageMs / 60_000)} min ago`}
+                now={NOW}
                 renderUsage={(row) => (
                   <span data-test-usage={row.id}>
                     {row.limits ? `${row.limits.session?.usedPercent}% bars` : 'skeleton'}
@@ -488,5 +612,45 @@ describe('UsageRosterPanel per-account Claude rows', () => {
     const markup = renderPanel(rows, [signedOutCodex])
 
     expect(markup).not.toContain('data-claude-account-usage-list')
+  })
+  it('says how old the data is, when it was last checked, and why when the latest attempt failed', () => {
+    const rows = rowsFor([
+      {
+        accountId: 'acct-b',
+        rateLimits: claudeWith(55, {
+          status: 'error',
+          error: 'waiting',
+          updatedAt: NOW - 30 * 60_000,
+          usageMetadata: { failureKind: 'network', lastAttemptAt: NOW - 2 * 60_000 }
+        }),
+        updatedAt: NOW - 30 * 60_000,
+        isFetching: false
+      }
+    ])
+    const markup = renderPanel(rows, [claudeWith(40)])
+
+    expect(markup).toContain('data 30 min ago · checked 2 min ago · Network issue')
+  })
+
+  it('shows only when it was checked for a failure with no numbers to keep', () => {
+    const rows = rowsFor([
+      {
+        accountId: 'acct-b',
+        rateLimits: {
+          provider: 'claude',
+          session: null,
+          weekly: null,
+          updatedAt: NOW - 4 * 60_000,
+          error: 'boom',
+          status: 'error'
+        },
+        updatedAt: NOW - 4 * 60_000,
+        isFetching: false
+      }
+    ])
+    const markup = renderPanel(rows, [claudeWith(40)])
+
+    expect(markup).toContain('checked 4 min ago')
+    expect(markup).not.toContain('data ')
   })
 })

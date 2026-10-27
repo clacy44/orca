@@ -6,7 +6,7 @@ import {
   confirmSeededClaudeLivePtys,
   endClaudeAuthSwitch,
   hasLiveClaudePtys,
-  hasLiveClaudePtysForAccount,
+  hasLiveClaudePtysInAccountConfigDir,
   hasLiveClaudePtysInLane,
   hasUnattributedLiveClaudePtys,
   isClaudeAuthSwitchInProgress,
@@ -17,7 +17,7 @@ import {
   markEphemeralClaudePtyExited,
   markEphemeralClaudePtySpawned,
   onLiveClaudePtysDrained,
-  parseManagedAccountIdFromProvenance,
+  parseWslManagedAccountIdFromProvenance,
   seedLiveClaudePtysFromPersistence,
   SHARED_CLAUDE_LANE_KEY
 } from './live-pty-gate'
@@ -298,23 +298,30 @@ describe('seeding the gate from persistence', () => {
   })
 })
 
-// Inactive-account usage refresh must not rotate a single-use token a live CLI may hold.
+// Inactive-account usage refresh must not rotate a single-use token a live WSL CLI may hold.
+// Owner ruling R1: host accounts are never held by a non-active account's terminal, so only a
+// WSL-managed launch is ever attributed to an account.
 describe('per-account live pty attribution', () => {
+  const STRICT = { legacyUnattributedHolds: false }
+  const LEGACY = { legacyUnattributedHolds: true }
+
   afterEach(() => {
     markClaudePtyExited('account-a-pty')
     markClaudePtyExited('account-b-pty')
     markClaudePtyExited('no-account-pty')
     markClaudePtyExited('unspecified-pty')
     markClaudePtyExited('seeded-pty-1')
+    markEphemeralClaudePtyExited('probe-pty')
     confirmSeededClaudeLivePtys([])
   })
 
-  it('defers only the account a live pty was launched under', () => {
+  it('holds only the account a live pty was launched under', () => {
     markClaudePtySpawned('account-a-pty', null, 'account-a')
 
-    expect(hasLiveClaudePtysForAccount('account-a')).toBe(true)
-    // Negative control: another account's refresh is not blocked by it.
-    expect(hasLiveClaudePtysForAccount('account-b')).toBe(false)
+    expect(hasLiveClaudePtysInAccountConfigDir('account-a', STRICT)).toBe(true)
+    // Negative control: another account's config dir is not held by it.
+    expect(hasLiveClaudePtysInAccountConfigDir('account-b', STRICT)).toBe(false)
+    expect(hasLiveClaudePtysInAccountConfigDir('account-b', LEGACY)).toBe(false)
   })
 
   it('forgets the attribution when the pty exits', () => {
@@ -323,44 +330,76 @@ describe('per-account live pty attribution', () => {
 
     markClaudePtyExited('account-a-pty')
 
-    expect(hasLiveClaudePtysForAccount('account-a')).toBe(false)
-    expect(hasLiveClaudePtysForAccount('account-b')).toBe(true)
+    expect(hasLiveClaudePtysInAccountConfigDir('account-a', STRICT)).toBe(false)
+    expect(hasLiveClaudePtysInAccountConfigDir('account-b', STRICT)).toBe(true)
     markClaudePtyExited('account-b-pty')
-    expect(hasLiveClaudePtysForAccount('account-b')).toBe(false)
+    expect(hasLiveClaudePtysInAccountConfigDir('account-b', STRICT)).toBe(false)
   })
 
-  it('does not defer any account for a launch known to hold no managed account', () => {
+  it('holds no account for a launch known to hold no WSL-managed account', () => {
     markClaudePtySpawned('no-account-pty', null, null)
 
-    expect(hasLiveClaudePtysForAccount('account-a')).toBe(false)
+    expect(hasLiveClaudePtysInAccountConfigDir('account-a', STRICT)).toBe(false)
+    expect(hasLiveClaudePtysInAccountConfigDir('account-a', LEGACY)).toBe(false)
   })
 
-  it('defers every account when a launch recorded no attribution', () => {
+  // The owner-sanctioned change: an unattributed pty no longer defers every account
+  // unconditionally; it holds only where the caller says a legacy seed could be a WSL CLI.
+  it('lets an unattributed live pty hold an account only when legacyUnattributedHolds is set', () => {
     markClaudePtySpawned('unspecified-pty', null)
 
-    expect(hasLiveClaudePtysForAccount('account-a')).toBe(true)
+    expect(hasLiveClaudePtysInAccountConfigDir('account-a', STRICT)).toBe(false)
+    expect(hasLiveClaudePtysInAccountConfigDir('account-a', LEGACY)).toBe(true)
   })
 
-  it('defers every account for an unattributed seeded pty, even one that names a lane', () => {
+  it('treats an unattributed seeded pty the same way, before and after reconciliation', () => {
     seedLiveClaudePtysFromPersistence([{ sessionId: 'seeded-pty-1', laneId: null }])
-    expect(hasLiveClaudePtysForAccount('account-a')).toBe(true)
+    expect(hasLiveClaudePtysInAccountConfigDir('account-a', STRICT)).toBe(false)
+    expect(hasLiveClaudePtysInAccountConfigDir('account-a', LEGACY)).toBe(true)
 
     confirmSeededClaudeLivePtys(['seeded-pty-1'])
-    // Still alive in the daemon and still of unknown account: keep deferring.
-    expect(hasLiveClaudePtysForAccount('account-a')).toBe(true)
+    // Still alive in the daemon and still of unknown account.
+    expect(hasLiveClaudePtysInAccountConfigDir('account-a', LEGACY)).toBe(true)
 
     confirmSeededClaudeLivePtys([])
     markClaudePtyExited('seeded-pty-1')
-    expect(hasLiveClaudePtysForAccount('account-a')).toBe(false)
+    expect(hasLiveClaudePtysInAccountConfigDir('account-a', LEGACY)).toBe(false)
   })
 
-  it('parses the managed account id out of a launch provenance', () => {
-    expect(parseManagedAccountIdFromProvenance('managed:abc-123')).toBe('abc-123')
-    expect(parseManagedAccountIdFromProvenance('managed:abc-123:wsl:Ubuntu')).toBe('abc-123')
-    expect(parseManagedAccountIdFromProvenance('system')).toBeNull()
-    expect(parseManagedAccountIdFromProvenance('wsl:Ubuntu:system')).toBeNull()
-    expect(parseManagedAccountIdFromProvenance('lane:opaque')).toBeNull()
-    expect(parseManagedAccountIdFromProvenance('managed:')).toBeNull()
-    expect(parseManagedAccountIdFromProvenance(undefined)).toBeNull()
+  it('keeps the recorded attribution when a reattach passes undefined', () => {
+    markClaudePtySpawned('account-a-pty', null, 'account-a')
+
+    markClaudePtySpawned('account-a-pty', null, undefined)
+
+    expect(hasLiveClaudePtysInAccountConfigDir('account-a', STRICT)).toBe(true)
+    expect(hasLiveClaudePtysInAccountConfigDir('account-b', STRICT)).toBe(false)
+  })
+
+  it('lets a later explicit null overwrite an attribution', () => {
+    markClaudePtySpawned('account-a-pty', null, 'account-a')
+
+    markClaudePtySpawned('account-a-pty', null, null)
+
+    expect(hasLiveClaudePtysInAccountConfigDir('account-a', STRICT)).toBe(false)
+  })
+
+  it('never counts a lane usage probe pty, even with legacyUnattributedHolds', () => {
+    markEphemeralClaudePtySpawned('probe-pty', LANE_A)
+
+    expect(hasLiveClaudePtysInAccountConfigDir('account-a', LEGACY)).toBe(false)
+    // Positive control: the probe is a live pty for the lane gate.
+    expect(hasLiveClaudePtysInLane(LANE_A)).toBe(true)
+  })
+
+  it('parses an account id only from a managed:<id>:wsl:<distro> provenance', () => {
+    expect(parseWslManagedAccountIdFromProvenance('managed:abc-123:wsl:Ubuntu')).toBe('abc-123')
+    expect(parseWslManagedAccountIdFromProvenance('managed:abc-123:wsl:')).toBe('abc-123')
+    // Host accounts are never attributed (R1).
+    expect(parseWslManagedAccountIdFromProvenance('managed:abc-123')).toBeNull()
+    expect(parseWslManagedAccountIdFromProvenance('system')).toBeNull()
+    expect(parseWslManagedAccountIdFromProvenance('wsl:Ubuntu:system')).toBeNull()
+    expect(parseWslManagedAccountIdFromProvenance('lane:opaque')).toBeNull()
+    expect(parseWslManagedAccountIdFromProvenance('managed::wsl:Ubuntu')).toBeNull()
+    expect(parseWslManagedAccountIdFromProvenance(undefined)).toBeNull()
   })
 })

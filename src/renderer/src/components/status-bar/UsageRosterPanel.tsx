@@ -12,9 +12,10 @@ import {
   type UsagePercentageDisplay
 } from '../../../../shared/usage-percentage-display'
 import { barColor, formatResetCountdown, getWindowSections, ProviderIcon } from './tooltip'
-import { getProviderDisplayName, getProviderUsageStatusLabel } from './usage-error-copy'
-import type { ClaudeSwitcherAccountRow } from './claude-switcher-account-rows'
+import { getProviderDisplayName } from './usage-error-copy'
+export { ClaudeAccountUsageList } from './ClaudeAccountUsageList'
 import { formatPlanLabel, usageTextColorClass } from './usage-roster-formatting'
+import { hasWindowResetSinceCheck } from './window-reset-since-check'
 import { getUsageRosterRowState, type UsageRosterRowState } from './usage-roster-row-state'
 import type { StatusBarUsageMode } from '../../../../shared/status-bar-usage-mode'
 
@@ -55,8 +56,15 @@ function shortLabel(
     : formatWindowLabel(section.window.windowMinutes)
 }
 
-export function getTightestUsageSection(p: ProviderRateLimits): UsageSection | null {
-  const sections = usedSections(p)
+export function getTightestUsageSection(
+  p: ProviderRateLimits,
+  now: number = Date.now()
+): UsageSection | null {
+  // Why: a window that reset since the data was fetched is "reset", not its old percentage, so it
+  // can be neither ranked nor shown.
+  const sections = usedSections(p).filter(
+    (section) => !hasWindowResetSinceCheck(section.window, p.updatedAt, now)
+  )
   if (sections.length === 0) {
     return null
   }
@@ -85,12 +93,15 @@ function UsageMetric({
   section,
   label,
   display,
-  showBar = true
+  showBar = true,
+  resetSinceCheck = false
 }: {
   section: UsageSection
   label: string
   display: UsagePercentageDisplay
   showBar?: boolean
+  // The window reset after this data was fetched, so its percentage describes the old window.
+  resetSinceCheck?: boolean
 }): React.JSX.Element {
   const used = clampUsedPercent(section.window.usedPercent)
   const shown = getDisplayedUsagePercentage(section.window.usedPercent, display)
@@ -100,13 +111,24 @@ function UsageMetric({
       <span className="text-[10px] text-muted-foreground">{label}</span>
       {showBar ? (
         <span data-usage-bar className="h-[5px] w-7 overflow-hidden rounded-full bg-muted">
-          <span
-            className={`block h-full rounded-full ${barColor(used)}`}
-            style={{ width: `${shown}%` }}
-          />
+          {resetSinceCheck ? null : (
+            <span
+              className={`block h-full rounded-full ${barColor(used)}`}
+              style={{ width: `${shown}%` }}
+            />
+          )}
         </span>
       ) : null}
-      <span className={`tabular-nums text-[11px] ${usageTextColorClass(used)}`}>{shown}%</span>
+      {resetSinceCheck ? (
+        <span data-usage-reset-since-check className="text-[11px] text-muted-foreground">
+          {translate(
+            'auto.components.status.bar.UsageRosterPanel.resetSinceLastCheck',
+            'reset since last check'
+          )}
+        </span>
+      ) : (
+        <span className={`tabular-nums text-[11px] ${usageTextColorClass(used)}`}>{shown}%</span>
+      )}
     </span>
   )
 }
@@ -131,7 +153,7 @@ export function UsageRow({
   const name = getProviderDisplayName(p.provider)
   const plan = formatPlanLabel(p.planType)
   const reset = hasUsage ? soonestResetLabel(sections, now) : null
-  const tightest = mode === 'compact' ? getTightestUsageSection(p) : null
+  const tightest = mode === 'compact' ? getTightestUsageSection(p, now) : null
 
   return (
     <div data-usage-mode={mode} className="flex min-w-0 flex-1 flex-col gap-1">
@@ -175,82 +197,11 @@ export function UsageRow({
               section={section}
               label={shortLabel(p, section)}
               display={display}
+              resetSinceCheck={hasWindowResetSinceCheck(section.window, p.updatedAt, now)}
             />
           ))}
         </div>
       ) : null}
-    </div>
-  )
-}
-
-/**
- * Every saved Claude account's usage, listed under the Claude provider row.
- *
- * Presentational on purpose: the host owns the account roster, the live clock and the usage bars
- * (they live next to the switcher), this owns only the layout and the honest per-account states —
- * bars, a loading skeleton, or an explicit "No usage yet".
- */
-export function ClaudeAccountUsageList({
-  rows,
-  renderUsage,
-  formatAge
-}: {
-  rows: readonly ClaudeSwitcherAccountRow[]
-  renderUsage: (row: ClaudeSwitcherAccountRow) => React.ReactNode
-  formatAge: (ageMs: number) => string
-}): React.JSX.Element | null {
-  if (rows.length === 0) {
-    return null
-  }
-  return (
-    <div data-claude-account-usage-list className="flex flex-col gap-2 pb-2.5 pl-[44px] pr-3.5">
-      {rows.map((row) => {
-        const hasBars = Boolean(
-          row.limits?.session || row.limits?.weekly || row.limits?.fableWeekly
-        )
-        // Why: a kept-but-stale snapshot still shows its bars; say why it is not fresh.
-        const errorLabel =
-          row.limits?.status === 'error' && hasBars ? getProviderUsageStatusLabel(row.limits) : null
-        return (
-          <div
-            key={row.id}
-            data-claude-account-row={row.id}
-            data-active={row.active ? 'true' : 'false'}
-            className="flex min-w-0 flex-col gap-0.5"
-          >
-            <div className="flex min-w-0 items-center gap-2">
-              <span className="min-w-0 flex-1 truncate text-[11px] text-foreground">
-                {row.label}
-              </span>
-              {row.active ? (
-                <span className="shrink-0 text-[10px] font-medium text-muted-foreground">
-                  {translate('auto.components.status.bar.StatusBar.ff0fbe9311', 'Active')}
-                </span>
-              ) : null}
-            </div>
-            {row.limits || row.isFetching ? (
-              renderUsage(row)
-            ) : (
-              <span className="text-[10px] text-muted-foreground">
-                {translate(
-                  'auto.components.status.bar.StatusBar.inactiveUsageNoData',
-                  'No usage yet'
-                )}
-              </span>
-            )}
-            {row.ageMs !== null ? (
-              <span className="text-[9px] text-muted-foreground/70">
-                {translate(
-                  'auto.components.status.bar.UsageRosterPanel.accountUsageUpdated',
-                  'updated {{value0}}',
-                  { value0: formatAge(row.ageMs) }
-                )}
-                {errorLabel ? ` · ${errorLabel}` : ''}
-              </span>
-            ) : null}
-          </div>
-        )
-      })}
     </div>
   )
 }

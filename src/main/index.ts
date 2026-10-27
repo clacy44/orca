@@ -287,6 +287,7 @@ import { getDefaultWslDistro } from './wsl'
 import { collectWorktreeTrashSweepRoots, sweepStaleWorktreeTrash } from './worktree-trash'
 import { ClaudeAccountService } from './claude-accounts/service'
 import { ClaudeRuntimeAuthService } from './claude-accounts/runtime-auth-service'
+import { startInactiveTokenKeepAlive } from './claude-accounts/inactive-token-keepalive'
 import { setLaneWireHostDependencies } from './runtime/lane-wire-composition'
 import { startLaneLoginDesktopService } from './claude-accounts/lane-login-desktop-service'
 import {
@@ -402,6 +403,7 @@ let codexRuntimeHome: CodexRuntimeHomeService | null = null
 let codexSessionMigration: ReturnType<typeof createCodexSessionMigrationScheduler> | null = null
 let claudeAccounts: ClaudeAccountService | null = null
 let claudeRuntimeAuth: ClaudeRuntimeAuthService | null = null
+let claudeTokenKeepAlive: { stop: () => void } | null = null
 let runtime: OrcaRuntimeService | null = null
 // [S10-21c B6c, D-R155-b6b finding 1] see desktop-materialize-hydration-gate.ts's own doc comment.
 const desktopMaterializeHydrationGate = createDesktopMaterializeHydrationGateState()
@@ -2735,6 +2737,18 @@ void app.whenReady().then(async () => {
   rateLimits.setInactiveClaudeCredentialsPreparer((accountId) =>
     claudeRuntimeAuth!.prepareInactiveCredentialsForUsage(accountId)
   )
+  claudeTokenKeepAlive?.stop()
+  claudeTokenKeepAlive = startInactiveTokenKeepAlive({
+    listInactiveAccountIds: () => {
+      const settings = store!.getSettings()
+      const selection = normalizeClaudeRuntimeSelection(settings)
+      const activeIds = new Set([selection.host, ...Object.values(selection.wsl)])
+      return settings.claudeManagedAccounts
+        .map((account) => account.id)
+        .filter((id) => !activeIds.has(id))
+    },
+    prepare: (accountId) => claudeRuntimeAuth!.prepareInactiveCredentialsForUsage(accountId)
+  })
   rateLimits.setInactiveCodexAccountsResolver(() => {
     const settings = store!.getSettings()
     const activeIds = new Set(
@@ -3651,6 +3665,8 @@ app.on('before-quit', () => {
   agentAwakeService = null
   // Why: defer PTY cleanup to will-quit so the renderer captures scrollback before PTY-exit events unmount TerminalPane (dropping its capture callbacks).
   rateLimits?.stop()
+  claudeTokenKeepAlive?.stop()
+  claudeTokenKeepAlive = null
 })
 
 // Why: will-quit fires twice — first pass preventDefaults and runs teardown; second pass exits.

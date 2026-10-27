@@ -142,7 +142,7 @@ import {
 import {
   markClaudePtyExited,
   markClaudePtySpawned,
-  parseManagedAccountIdFromProvenance
+  parseWslManagedAccountIdFromProvenance
 } from '../claude-accounts/live-pty-gate'
 import { notifyDaemonDiedFanout } from '../daemon/daemon-died-fanout-registry'
 import { createDaemonSessionLossHandler } from './pty-daemon-session-loss'
@@ -5934,7 +5934,10 @@ export function registerPtyHandlers(
           markClaudePtySpawned(
             result.id,
             lanePrincipalId ?? null,
-            parseManagedAccountIdFromProvenance(claudeAuth?.provenance)
+            // Why: a reattach keeps the attribution the original spawn recorded.
+            result.isReattach === true
+              ? undefined
+              : parseWslManagedAccountIdFromProvenance(claudeAuth?.provenance)
           )
         }
         if (args.telemetry && !stablePaneOwner) {
@@ -7802,7 +7805,10 @@ export function registerPtyHandlers(
           markClaudePtySpawned(
             result.id,
             lanePrincipalId ?? null,
-            parseManagedAccountIdFromProvenance(claudeAuth?.provenance)
+            // Why: a reattach keeps the attribution the original spawn recorded.
+            result.isReattach === true
+              ? undefined
+              : parseWslManagedAccountIdFromProvenance(claudeAuth?.provenance)
           )
         }
         // Why: record the paneKey mapping so clearProviderPtyState can clear the agent-hooks server's per-paneKey caches on exit.

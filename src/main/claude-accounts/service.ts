@@ -375,12 +375,23 @@ export class ClaudeAccountService {
     } catch (error) {
       let restoredManagedCredentials = false
       try {
-        await this.restoreManagedCredentialsSnapshot(
-          accountId,
-          managedAuthPath,
-          previousManagedAuth
-        )
-        restoredManagedCredentials = true
+        // Why: once the new login is stored, a background refresh may have rotated it; restoring
+        // the pre-login blob over that would put a revoked refresh token back on disk.
+        const storedNow = wroteManagedCredentials
+          ? (await this.readManagedAuthSnapshot(accountId, managedAuthPath)).credentialsJson
+          : null
+        if (wroteManagedCredentials && storedNow !== captured.credentialsJson) {
+          console.warn(
+            '[claude-accounts] Managed credentials changed since login; skipping pre-login restore during rollback'
+          )
+        } else {
+          await this.restoreManagedCredentialsSnapshot(
+            accountId,
+            managedAuthPath,
+            previousManagedAuth
+          )
+          restoredManagedCredentials = true
+        }
       } catch (rollbackError) {
         console.warn(
           '[claude-accounts] Failed to restore managed credentials during rollback:',

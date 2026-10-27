@@ -2689,7 +2689,8 @@ describe('RateLimitService inactive Claude account fetch policy', () => {
 
     expect(snapshotFor(service, 'account-a')?.usageMetadata).toEqual({
       failureKind: 'rate-limited',
-      retryAtMs: Date.now() + 120_000 - 2_000
+      retryAtMs: Date.now() + 120_000 - 2_000,
+      lastAttemptAt: Date.now() - 2_000
     })
     expect(snapshotFor(service, 'account-b')?.usageMetadata?.failureKind).toBe('unknown')
     expect(snapshotFor(service, 'account-b')?.usageMetadata?.retryAtMs).toBeUndefined()
@@ -2723,5 +2724,121 @@ describe('RateLimitService inactive Claude account fetch policy', () => {
     vi.mocked(fetchManagedAccountUsage).mockClear()
     await service.refreshAfterClaudeLivePtysDrained()
     expect(fetchManagedAccountUsage).not.toHaveBeenCalled()
+  })
+  it('queues a drain refetch that arrives mid-fetch and runs it once that fetch finishes', async () => {
+    const service = new RateLimitService()
+    service.setInactiveClaudeAccountsResolver(() => [accountA])
+    vi.mocked(fetchManagedAccountUsage).mockResolvedValueOnce(deferredByLiveSession())
+    await service.fetchInactiveClaudeAccountsOnOpen()
+    expect(fetchManagedAccountUsage).toHaveBeenCalledTimes(1)
+
+    // A second fetch starts while the terminal is still live and is still in flight at the drain.
+    const inFlight = deferred<ProviderRateLimits>()
+    vi.mocked(fetchManagedAccountUsage).mockReturnValueOnce(inFlight.promise)
+    resetOpenDebounce(service)
+    const secondFetch = service.fetchInactiveClaudeAccountsOnOpen()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fetchManagedAccountUsage).toHaveBeenCalledTimes(2)
+
+    await service.refreshAfterClaudeLivePtysDrained()
+    // Not dropped, not run concurrently.
+    expect(fetchManagedAccountUsage).toHaveBeenCalledTimes(2)
+
+    vi.mocked(fetchManagedAccountUsage).mockResolvedValueOnce(okProvider('claude', 42))
+    inFlight.resolve(deferredByLiveSession())
+    await secondFetch
+
+    expect(fetchManagedAccountUsage).toHaveBeenCalledTimes(3)
+    expect(snapshotFor(service, 'account-a')?.status).toBe('ok')
+    expect(snapshotFor(service, 'account-a')?.session?.usedPercent).toBe(42)
+  })
+
+  it('does not refetch a queued account whose in-flight fetch recovered by itself', async () => {
+    const service = new RateLimitService()
+    service.setInactiveClaudeAccountsResolver(() => [accountA])
+    vi.mocked(fetchManagedAccountUsage).mockResolvedValueOnce(deferredByLiveSession())
+    await service.fetchInactiveClaudeAccountsOnOpen()
+    const inFlight = deferred<ProviderRateLimits>()
+    vi.mocked(fetchManagedAccountUsage).mockReturnValueOnce(inFlight.promise)
+    resetOpenDebounce(service)
+    const secondFetch = service.fetchInactiveClaudeAccountsOnOpen()
+    await vi.advanceTimersByTimeAsync(0)
+    await service.refreshAfterClaudeLivePtysDrained()
+
+    inFlight.resolve(okProvider('claude', 7))
+    await secondFetch
+
+    expect(fetchManagedAccountUsage).toHaveBeenCalledTimes(2)
+  })
+
+  describe('keeping the last known numbers through failures (R2)', () => {
+    const MIN = 60_000
+
+    it("keeps a Claude inactive account's data on an error 31 minutes later", async () => {
+      const service = new RateLimitService()
+      service.setInactiveClaudeAccountsResolver(() => [accountA])
+      vi.mocked(fetchManagedAccountUsage).mockResolvedValueOnce(okProvider('claude', 61))
+      await service.fetchInactiveClaudeAccountsOnOpen()
+      const dataTime = snapshotFor(service, 'account-a')!.updatedAt
+
+      resetOpenDebounce(service)
+      await vi.advanceTimersByTimeAsync(31 * MIN)
+      vi.mocked(fetchManagedAccountUsage).mockResolvedValueOnce(
+        errorProvider('claude', 'Network request failed')
+      )
+      await service.fetchInactiveClaudeAccountsOnOpen()
+
+      const kept = snapshotFor(service, 'account-a')!
+      expect(kept.status).toBe('error')
+      expect(kept.session?.usedPercent).toBe(61)
+      // The data keeps its own age; the attempt time is the failed check.
+      expect(kept.updatedAt).toBe(dataTime)
+      expect(kept.usageMetadata?.lastAttemptAt).toBe(Date.now())
+      expect(kept.error).toBe('Network request failed')
+    })
+
+    it("keeps a Claude inactive account's data across a day-long outage", async () => {
+      const service = new RateLimitService()
+      service.setInactiveClaudeAccountsResolver(() => [accountA])
+      vi.mocked(fetchManagedAccountUsage).mockResolvedValueOnce(okProvider('claude', 61))
+      await service.fetchInactiveClaudeAccountsOnOpen()
+
+      resetOpenDebounce(service)
+      await vi.advanceTimersByTimeAsync(30 * 60 * MIN)
+      vi.mocked(fetchManagedAccountUsage).mockResolvedValueOnce(errorProvider('claude', 'down'))
+      await service.fetchInactiveClaudeAccountsOnOpen()
+
+      expect(snapshotFor(service, 'account-a')!.session?.usedPercent).toBe(61)
+    })
+
+    it('stamps lastAttemptAt on an ok result', async () => {
+      const service = new RateLimitService()
+      service.setInactiveClaudeAccountsResolver(() => [accountA])
+      vi.mocked(fetchManagedAccountUsage).mockResolvedValueOnce(okProvider('claude', 5))
+
+      await service.fetchInactiveClaudeAccountsOnOpen()
+
+      expect(snapshotFor(service, 'account-a')!.usageMetadata?.lastAttemptAt).toBe(Date.now())
+    })
+
+    it("still drops a Codex inactive account's data on an error 31 minutes later", async () => {
+      const service = new RateLimitService()
+      const codexAccount = { id: 'codex-a', managedHomePath: '/tmp/codex-a/home' }
+      service.setInactiveCodexAccountsResolver(() => [codexAccount])
+      vi.mocked(fetchCodexRateLimits).mockResolvedValueOnce(okProvider('codex', 40))
+      await service.fetchInactiveCodexAccountsOnOpen()
+      const codexSnapshot = (): ProviderRateLimits | null | undefined =>
+        service.getState().inactiveCodexAccounts.find((entry) => entry.accountId === 'codex-a')
+          ?.rateLimits
+      expect(codexSnapshot()?.session?.usedPercent).toBe(40)
+
+      ;(service as unknown as { lastInactiveCodexFetchAt: number }).lastInactiveCodexFetchAt = 0
+      await vi.advanceTimersByTimeAsync(31 * MIN)
+      vi.mocked(fetchCodexRateLimits).mockResolvedValueOnce(errorProvider('codex', 'down'))
+      await service.fetchInactiveCodexAccountsOnOpen()
+
+      expect(codexSnapshot()?.status).toBe('error')
+      expect(codexSnapshot()?.session).toBeNull()
+    })
   })
 })
