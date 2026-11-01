@@ -10875,3 +10875,291 @@ describe('useIpcEvents digit-chord routing while Cmd+J is open', () => {
     expect(seen).toEqual([0])
   })
 })
+
+describe('useIpcEvents materialize-only terminal reveal', () => {
+  const WORKTREE = 'wt-1'
+  const TAB = 'tab-live'
+  const LEAF_A = '11111111-1111-4111-8111-111111111111'
+  const LEAF_B = '22222222-2222-4222-8222-222222222222'
+  const request = {
+    requestId: 'req-1',
+    worktreeId: WORKTREE,
+    ptyId: 'pty-b',
+    tabId: TAB,
+    leafId: LEAF_B,
+    title: 'claude',
+    materializeOnly: true,
+    presentation: 'background' as const,
+    activate: false,
+    focus: false
+  }
+
+  function stateWith(
+    overrides: Partial<HarnessStoreState> & Pick<HarnessStoreState, 'tabsByWorktree'>
+  ): HarnessStoreState {
+    const storeState: HarnessStoreState = createHarnessStoreState({
+      getKnownWorktreeById: vi.fn((id: string) => (id === WORKTREE ? { id } : undefined)),
+      pendingReconnectPtyIdByTabId: {},
+      createTab: vi.fn(
+        (worktreeId: string, _g: unknown, _t: unknown, options?: { id?: string }) => {
+          const tab = { id: options?.id ?? 'tab-minted', ptyId: null, title: 'Terminal 1' }
+          storeState.tabsByWorktree[worktreeId] = [
+            ...(storeState.tabsByWorktree[worktreeId] ?? []),
+            tab
+          ]
+          return tab
+        }
+      ),
+      ...overrides
+    })
+    return storeState
+  }
+
+  async function load(storeState: HarnessStoreState) {
+    const harness = await loadIpcEventsHarness(storeState)
+    harness.useIpcEvents()
+    return harness
+  }
+
+  it('replies owned and changes nothing when a saved tab already records the pty', async () => {
+    const storeState = stateWith({
+      tabsByWorktree: { [WORKTREE]: [{ id: 'tab-saved', ptyId: 'pty-b', title: 'Saved' }] },
+      terminalLayoutsByTabId: { 'tab-saved': { ptyIdsByLeafId: { [LEAF_A]: 'pty-b' } } }
+    })
+    const harness = await load(storeState)
+
+    harness.createTerminal(request)
+
+    expect(harness.replyTerminalCreate).toHaveBeenCalledWith({
+      requestId: 'req-1',
+      tabId: 'tab-saved',
+      title: 'claude',
+      identity: { worktreeId: WORKTREE, tabId: 'tab-saved', leafId: LEAF_A, ptyId: 'pty-b' },
+      skipped: 'owned'
+    })
+    expect(storeState.createTab).not.toHaveBeenCalled()
+    expect(storeState.setTabLayout).not.toHaveBeenCalled()
+    expect(storeState.updateTabPtyId).not.toHaveBeenCalled()
+    expect(storeState.pendingReconnectPtyIdByTabId).toEqual({})
+  })
+
+  it('replies owned for a tab-level or live-mounted record too', async () => {
+    const storeState = stateWith({
+      tabsByWorktree: { [WORKTREE]: [{ id: 'tab-saved', ptyId: 'pty-b', title: 'Saved' }] },
+      ptyIdsByTabId: { 'tab-saved': ['pty-b'] }
+    })
+    const harness = await load(storeState)
+
+    harness.createTerminal(request)
+
+    expect(harness.replyTerminalCreate).toHaveBeenCalledWith({
+      requestId: 'req-1',
+      tabId: 'tab-saved',
+      title: 'claude',
+      skipped: 'owned'
+    })
+    expect(storeState.createTab).not.toHaveBeenCalled()
+  })
+
+  it('replies an ambiguity error and creates nothing when two tabs record the pty', async () => {
+    const storeState = stateWith({
+      tabsByWorktree: {
+        [WORKTREE]: [
+          { id: 'tab-one', ptyId: null, title: 'One' },
+          { id: 'tab-two', ptyId: null, title: 'Two' }
+        ]
+      },
+      terminalLayoutsByTabId: {
+        'tab-one': { ptyIdsByLeafId: { [LEAF_A]: 'pty-b' } },
+        'tab-two': { ptyIdsByLeafId: { [LEAF_B]: 'pty-b' } }
+      }
+    })
+    const harness = await load(storeState)
+
+    harness.createTerminal(request)
+
+    expect(harness.replyTerminalCreate).toHaveBeenCalledWith({
+      requestId: 'req-1',
+      error: 'terminal_materialize_ownership_ambiguous'
+    })
+    expect(storeState.createTab).not.toHaveBeenCalled()
+    expect(storeState.setTabLayout).not.toHaveBeenCalled()
+  })
+
+  it('replies an error instead of duplicating when the tab id belongs to another worktree', async () => {
+    const storeState = stateWith({
+      tabsByWorktree: { 'wt-other': [{ id: TAB, ptyId: 'pty-x', title: 'Elsewhere' }] }
+    })
+    const harness = await load(storeState)
+
+    harness.createTerminal(request)
+
+    expect(harness.replyTerminalCreate).toHaveBeenCalledWith({
+      requestId: 'req-1',
+      error: 'terminal_materialize_tab_conflict'
+    })
+    expect(storeState.createTab).not.toHaveBeenCalled()
+  })
+
+  it('replies an error for a worktree this window does not know yet, so main retries later', async () => {
+    const storeState = stateWith({
+      tabsByWorktree: {},
+      getKnownWorktreeById: vi.fn(() => undefined)
+    })
+    const harness = await load(storeState)
+
+    harness.createTerminal(request)
+
+    expect(harness.replyTerminalCreate).toHaveBeenCalledWith({
+      requestId: 'req-1',
+      error: 'terminal_materialize_unknown_worktree'
+    })
+    expect(storeState.createTab).not.toHaveBeenCalled()
+  })
+
+  it('adds the leaf as a split of an existing tab without replacing its layout', async () => {
+    const existingLayout = {
+      root: { type: 'leaf' as const, leafId: LEAF_A },
+      activeLeafId: LEAF_A,
+      expandedLeafId: null,
+      ptyIdsByLeafId: { [LEAF_A]: 'pty-a' }
+    }
+    const storeState = stateWith({
+      tabsByWorktree: { [WORKTREE]: [{ id: TAB, ptyId: 'pty-a', title: 'Live' }] },
+      ptyIdsByTabId: { [TAB]: ['pty-a'] },
+      terminalLayoutsByTabId: { [TAB]: existingLayout },
+      pendingReconnectPtyIdByTabId: { [TAB]: 'pty-stale' }
+    })
+    const harness = await load(storeState)
+
+    harness.createTerminal({ ...request, splitFromLeafId: LEAF_A })
+
+    expect(storeState.createTab).not.toHaveBeenCalled()
+    expect(storeState.updateTabPtyId).not.toHaveBeenCalled()
+    expect(storeState.setTabLayout).toHaveBeenCalledWith(TAB, {
+      root: {
+        type: 'split',
+        direction: 'horizontal',
+        first: { type: 'leaf', leafId: LEAF_A },
+        second: { type: 'leaf', leafId: LEAF_B },
+        ratio: 0.5
+      },
+      // The tab's active leaf is left alone.
+      activeLeafId: LEAF_A,
+      expandedLeafId: null,
+      ptyIdsByLeafId: { [LEAF_A]: 'pty-a', [LEAF_B]: 'pty-b' },
+      titlesByLeafId: { [LEAF_B]: 'claude' }
+    })
+    expect(storeState.pendingReconnectPtyIdByTabId).toEqual({ [TAB]: 'pty-b' })
+    expect(storeState.setActiveTab).not.toHaveBeenCalled()
+    expect(harness.replyTerminalCreate).toHaveBeenCalledWith({
+      requestId: 'req-1',
+      tabId: TAB,
+      title: 'claude',
+      identity: { worktreeId: WORKTREE, tabId: TAB, leafId: LEAF_B, ptyId: 'pty-b' }
+    })
+  })
+
+  it('splits from the active leaf when the caller names no (or an unknown) source leaf', async () => {
+    const storeState = stateWith({
+      tabsByWorktree: { [WORKTREE]: [{ id: TAB, ptyId: 'pty-a', title: 'Live' }] },
+      terminalLayoutsByTabId: {
+        [TAB]: {
+          root: { type: 'leaf', leafId: LEAF_A },
+          activeLeafId: LEAF_A,
+          expandedLeafId: null,
+          ptyIdsByLeafId: { [LEAF_A]: 'pty-a' }
+        }
+      }
+    })
+    const harness = await load(storeState)
+
+    harness.createTerminal({ ...request, splitFromLeafId: 'leaf-that-is-gone' })
+
+    expect(storeState.setTabLayout).toHaveBeenCalledTimes(1)
+    expect(harness.replyTerminalCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ tabId: TAB, identity: expect.anything() })
+    )
+  })
+
+  it('refuses to overwrite a leaf the tab already holds with another pty', async () => {
+    const storeState = stateWith({
+      tabsByWorktree: { [WORKTREE]: [{ id: TAB, ptyId: 'pty-a', title: 'Live' }] },
+      terminalLayoutsByTabId: {
+        [TAB]: {
+          root: { type: 'leaf', leafId: LEAF_B },
+          activeLeafId: LEAF_B,
+          expandedLeafId: null,
+          ptyIdsByLeafId: { [LEAF_B]: 'pty-other' }
+        }
+      }
+    })
+    const harness = await load(storeState)
+
+    harness.createTerminal(request)
+
+    expect(harness.replyTerminalCreate).toHaveBeenCalledWith({
+      requestId: 'req-1',
+      error: 'terminal_materialize_tab_conflict'
+    })
+    expect(storeState.setTabLayout).not.toHaveBeenCalled()
+  })
+
+  it('creates a fresh background tab under the pre-minted id when nothing records the pty', async () => {
+    const storeState = stateWith({ tabsByWorktree: { [WORKTREE]: [] } })
+    const harness = await load(storeState)
+
+    harness.createTerminal({ ...request, launchAgent: 'claude' })
+
+    expect(storeState.createTab).toHaveBeenCalledWith(
+      WORKTREE,
+      undefined,
+      undefined,
+      expect.objectContaining({
+        initialPtyId: 'pty-b',
+        activate: false,
+        launchAgent: 'claude',
+        id: TAB
+      })
+    )
+    expect(storeState.setTabLayout).toHaveBeenCalledWith(TAB, {
+      root: { type: 'leaf', leafId: LEAF_B },
+      activeLeafId: LEAF_B,
+      expandedLeafId: null,
+      ptyIdsByLeafId: { [LEAF_B]: 'pty-b' },
+      titlesByLeafId: { [LEAF_B]: 'claude' }
+    })
+    expect(storeState.setActiveTab).not.toHaveBeenCalled()
+    expect(harness.replyTerminalCreate).toHaveBeenCalledWith({
+      requestId: 'req-1',
+      tabId: TAB,
+      title: 'claude',
+      identity: { worktreeId: WORKTREE, tabId: TAB, leafId: LEAF_B, ptyId: 'pty-b' }
+    })
+  })
+
+  it('ignores a split hint when the tab it names is gone and mints a fresh tab', async () => {
+    const storeState = stateWith({ tabsByWorktree: { [WORKTREE]: [] } })
+    const harness = await load(storeState)
+
+    harness.createTerminal({ ...request, splitFromLeafId: LEAF_A })
+
+    expect(storeState.createTab).toHaveBeenCalledTimes(1)
+    expect(harness.replyTerminalCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ tabId: TAB, identity: expect.anything() })
+    )
+  })
+
+  it('rejects a materialize-only request that carries no surface identity', async () => {
+    const storeState = stateWith({ tabsByWorktree: { [WORKTREE]: [] } })
+    const harness = await load(storeState)
+
+    harness.createTerminal({ requestId: 'req-2', worktreeId: WORKTREE, materializeOnly: true })
+
+    expect(harness.replyTerminalCreate).toHaveBeenCalledWith({
+      requestId: 'req-2',
+      error: 'terminal_materialize_requires_surface'
+    })
+    expect(storeState.createTab).not.toHaveBeenCalled()
+  })
+})

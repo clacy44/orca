@@ -122,6 +122,7 @@ import {
 } from './updater'
 import { configureRemoteServerUpdater } from './runtime/remote-server-updater'
 import type { UpdateCheckOptions } from '../shared/update-status-types'
+import type { ReconcileLiveTerminalSurfacesReply } from '../shared/sweep-restore-mark-list'
 import { recordUpdaterLifecycle } from './updater-lifecycle-diagnostics'
 import {
   installServeSupervisorDisconnectQuit,
@@ -940,6 +941,30 @@ ipcMain.handle('app:recoverLegacyWorkerTerminalsForRendererStartup', () => {
       console.warn('[orchestration] legacy worker provider-ready recovery failed', error)
     }
   })
+})
+
+// Why: a window that rebuilt its tabs from a saved session (or recovered from a renderer death)
+// may lack tabs for terminals this process still holds alive; re-show them, attached to the same
+// process, instead of letting a wake path start a second copy of the conversation.
+ipcMain.handle('app:reconcileLiveTerminalSurfaces', async () => {
+  await Promise.all([firstWindowStartupServicesReady, managedWslCliStartupBarrierReady])
+  try {
+    await runtime?.reconcileLiveTerminalSurfacesForRenderer()
+  } catch (error) {
+    console.warn('[terminal-surface-reconcile] reconcile failed', error)
+  }
+  // Why returned here: the renderer applies these marks without the sweep-lock-gated
+  // `sweepRestoreMarkList` re-read, which can wait up to 30 s during startup.
+  const reply: ReconcileLiveTerminalSurfacesReply = {}
+  try {
+    const marks = await runtime?.getLiveAgentSessionMarks()
+    if (marks) {
+      reply.liveAgentSessions = marks
+    }
+  } catch (error) {
+    console.warn('[terminal-surface-reconcile] live agent session read failed', error)
+  }
+  return reply
 })
 
 // Why: the renderer pulls this once its ui:openSettings listener attaches, so a Settings request queued before mount isn't lost.
@@ -2897,6 +2922,8 @@ void app.whenReady().then(async () => {
   runtimeService.setLiveReportPanesForSessionCheck((sessionId, opts) =>
     agentHookServer.liveReportPanesForSession(sessionId, opts)
   )
+  // Latest hook status per pane, read when naming the agent conversations live terminals still hold.
+  runtimeService.setAgentStatusRowsSource(() => agentHookServer.getStatusSnapshot())
   // [R316] Same wiring, background-work verdict — the agent-sleep guard reads it through the runtime.
   runtimeService.setBackgroundWorkVerdictCheck((paneKey) =>
     agentHookServer.backgroundWorkVerdict(paneKey)

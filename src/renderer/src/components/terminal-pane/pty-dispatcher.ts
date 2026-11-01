@@ -32,6 +32,7 @@ import {
   ptyReplayHandlers
 } from './pty-shutdown-data-suspension'
 import { markCommittedPtyShutdowns } from './pty-shutdown-exit-deferral'
+import { notifyGlobalPtyExitObservers } from '@/lib/global-pty-exit-observers'
 
 export {
   ptyDataHandlers,
@@ -191,6 +192,8 @@ function attachPtySecondaryPushListeners(unsubscribes: (() => void)[]): void {
       // Why: main drops its accounting on exit; drop totals too so a reused id restarts at zero on both sides.
       clearProcessedPtyCharTotal(payload.id)
       clearReceivedPtyCharTotal(payload.id)
+      // Why: the store drops the exited terminal's live-agent marks; a stale mark would keep a legitimate resume blocked.
+      notifyGlobalPtyExitObservers(payload.id)
       const sidecars = ptyExitSidecars.get(payload.id)
       if (sidecars) {
         ptyExitSidecars.delete(payload.id)

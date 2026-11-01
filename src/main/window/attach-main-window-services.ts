@@ -411,6 +411,7 @@ function registerRuntimeWindowLifecycle(
           }
           if (
             expectedIdentity &&
+            reply.skipped !== 'owned' &&
             (!reply.identity ||
               reply.identity.worktreeId !== expectedIdentity.worktreeId ||
               reply.identity.tabId !== expectedIdentity.tabId ||
@@ -423,7 +424,8 @@ function registerRuntimeWindowLifecycle(
           resolve({
             tabId: reply.tabId!,
             title: reply.title,
-            ...(reply.identity ? { identity: reply.identity } : {})
+            ...(reply.identity ? { identity: reply.identity } : {}),
+            ...(reply.skipped ? { skipped: reply.skipped } : {})
           })
         }
         ipcMain.on('terminal:tabCreateReply', handler)
@@ -448,7 +450,8 @@ function registerRuntimeWindowLifecycle(
           ...(opts.splitTelemetrySource !== undefined
             ? { splitTelemetrySource: opts.splitTelemetrySource }
             : {}),
-          ...(opts.focus !== undefined ? { focus: opts.focus } : {})
+          ...(opts.focus !== undefined ? { focus: opts.focus } : {}),
+          ...(opts.materializeOnly ? { materializeOnly: true } : {})
         })
         if (!sent) {
           clearTimeout(timer)

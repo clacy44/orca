@@ -572,6 +572,7 @@ function createWebPreloadApi(): Partial<PreloadApi> {
       awaitBeforeUnloadCheckpoint: () => Promise.resolve(),
       awaitFirstWindowStartupServices: () => Promise.resolve(),
       recoverLegacyWorkerTerminalsForRendererStartup: () => Promise.resolve(),
+      reconcileLiveTerminalSurfaces: () => Promise.resolve({}),
       startupDiagnostic: () => Promise.resolve(),
       getKeyboardInputSourceId: () => Promise.resolve(null),
       setUnreadDockBadgeCount: () => Promise.resolve(),

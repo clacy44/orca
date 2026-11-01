@@ -129,6 +129,7 @@ import { singlePaneLayoutSnapshot } from '@/store/slices/terminal-helpers'
 import { buildWorkspaceSessionPayload } from '@/lib/workspace-session'
 import { persistWorkspaceSessionByHost } from '@/lib/workspace-session-host-persistence'
 import { verifyTerminalRevealIdentity } from '@/lib/terminal-reveal-identity'
+import { planMaterializeOnlyTerminalReveal } from '@/lib/materialize-only-terminal-reveal'
 import { getLinearIssueWorkspaceName } from '../../../shared/workspace-name'
 import type { RuntimeClientEvent } from '../../../shared/runtime-client-events'
 import { applyHostWorktreeTerminalSleepState } from '@/components/terminal-pane/pty-shutdown-exit-deferral'
@@ -475,6 +476,36 @@ function activateExistingLeafInLayout(
         }
       : {})
   }
+}
+
+// Why: a materialize-only bind fills a slot; unlike a focus reveal it must not move the tab's active leaf.
+function bindLeafInLayout(
+  layout: TerminalLayoutSnapshot | null | undefined,
+  leafId: string,
+  ptyId: string,
+  title?: string | null
+): TerminalLayoutSnapshot | null {
+  if (!layout?.root || !collectLeafIdsInOrder(layout.root).includes(leafId)) {
+    return null
+  }
+  return {
+    ...layout,
+    ptyIdsByLeafId: { ...layout.ptyIdsByLeafId, [leafId]: ptyId },
+    ...(title ? { titlesByLeafId: { ...layout.titlesByLeafId, [leafId]: title } } : {})
+  }
+}
+
+// Why: before reconnect finishes, the pending map is how the tab keeps its pty; once it is done
+// nothing consumes the map, and a lingering entry would block orphan cleanup forever.
+function recordMaterializedTabPty(tabId: string, ptyId: string): void {
+  const state = useAppStore.getState()
+  if (state.workspaceSessionReady) {
+    state.updateTabPtyId(tabId, ptyId)
+    return
+  }
+  useAppStore.setState((current) => ({
+    pendingReconnectPtyIdByTabId: { ...current.pendingReconnectPtyIdByTabId, [tabId]: ptyId }
+  }))
 }
 
 export function isRemoteWorkspaceSnapshotApplyInProgress(): boolean {
@@ -1508,16 +1539,57 @@ export function useIpcEvents(): void {
           ptyId,
           activate,
           focus,
+          materializeOnly,
           presentation,
           surfaceOwner,
           tabId,
           leafId,
-          splitFromLeafId,
+          splitFromLeafId: requestedSplitFromLeafId,
           splitDirection,
           splitTelemetrySource
         }) => {
           try {
             const store = useAppStore.getState()
+            // Why: a materialize-only reveal re-shows a live terminal main still holds; it decides
+            // ownership first and only ever adds a surface, never rewrites an existing one.
+            let splitFromLeafId = requestedSplitFromLeafId
+            let materializeClaimsSlot = false
+            let claimedTabId: string | undefined
+            if (materializeOnly) {
+              if (!ptyId || !tabId || !leafId) {
+                throw new Error('terminal_materialize_requires_surface')
+              }
+              const plan = planMaterializeOnlyTerminalReveal(store, {
+                worktreeId,
+                ptyId,
+                tabId,
+                leafId,
+                ...(requestedSplitFromLeafId ? { splitFromLeafId: requestedSplitFromLeafId } : {})
+              })
+              if (plan.kind === 'error') {
+                throw new Error(plan.error)
+              }
+              if (plan.kind === 'owned') {
+                if (requestId) {
+                  const ownerTab = store.tabsByWorktree[worktreeId]?.find(
+                    (candidate) => candidate.id === plan.tabId
+                  )
+                  window.api.ui.replyTerminalCreate({
+                    requestId,
+                    tabId: plan.tabId,
+                    title: title ?? ownerTab?.title,
+                    ...(plan.identity ? { identity: plan.identity } : {}),
+                    skipped: 'owned'
+                  })
+                }
+                return
+              }
+              splitFromLeafId = plan.kind === 'add-leaf' ? plan.sourceLeafId : undefined
+              if (plan.kind === 'bind-leaf' || plan.kind === 'fill-empty') {
+                materializeClaimsSlot = true
+                claimedTabId = plan.tabId
+              }
+            }
             const terminalPresentation = resolveTerminalPresentation({
               presentation,
               activate,
@@ -1551,7 +1623,10 @@ export function useIpcEvents(): void {
             if (isSplitReveal && !splitTargetTab) {
               throw new Error(`Terminal tab ${tabId} not found`)
             }
-            const reusedTab = existingTab ?? splitTargetTab
+            const claimedTab = claimedTabId
+              ? worktreeTabs.find((candidate) => candidate.id === claimedTabId)
+              : undefined
+            const reusedTab = existingTab ?? splitTargetTab ?? claimedTab
             const tab =
               reusedTab ??
               (ptyId
@@ -1620,12 +1695,17 @@ export function useIpcEvents(): void {
                     leafId
                   })
                 }
-              } else if (!splitFromLeafId && launchPaneKey) {
+              } else if (!splitFromLeafId && !materializeOnly && launchPaneKey) {
                 store.clearAgentLaunchConfig(launchPaneKey)
               }
               if (splitFromLeafId) {
                 // Why: runtime split PTYs already carry the parent tab's paneKey, so reuse the tab instead of minting a collision tab.
-                store.updateTabPtyId(tab.id, ptyId)
+                if (materializeOnly) {
+                  // Why: the tab keeps its own tab-level pty and launch config; reconnect must not restore a stale id over this one.
+                  recordMaterializedTabPty(tab.id, ptyId)
+                } else {
+                  store.updateTabPtyId(tab.id, ptyId)
+                }
                 const existingLayout = store.terminalLayoutsByTabId?.[tab.id]
                 const sourcePtyId = existingLayout?.ptyIdsByLeafId?.[splitFromLeafId]
                 store.setTabLayout(
@@ -1656,20 +1736,22 @@ export function useIpcEvents(): void {
                 )
               } else {
                 // Why: CLI/runtime PTYs emit hook events before the tab mounts, so the leaf must exist in layout for paneKey validation.
+                const currentLayout = store.terminalLayoutsByTabId?.[tab.id]
                 const existingLayout = reusedTab
-                  ? activateExistingLeafInLayout(
-                      store.terminalLayoutsByTabId?.[tab.id],
-                      leafId,
-                      ptyId,
-                      title
-                    )
+                  ? materializeClaimsSlot
+                    ? bindLeafInLayout(currentLayout, leafId, ptyId, title)
+                    : activateExistingLeafInLayout(currentLayout, leafId, ptyId, title)
                   : null
-                if (existingLayout) {
+                if (materializeClaimsSlot) {
+                  // Why: an empty slot has no layout to bind, but the tab still has to record its pty.
+                  recordMaterializedTabPty(tab.id, ptyId)
+                } else if (existingLayout) {
                   store.updateTabPtyId(tab.id, ptyId)
-                  store.setTabLayout(tab.id, existingLayout)
-                } else {
-                  store.setTabLayout(tab.id, singlePaneLayoutSnapshot(leafId, ptyId, title))
                 }
+                store.setTabLayout(
+                  tab.id,
+                  existingLayout ?? singlePaneLayoutSnapshot(leafId, ptyId, title)
+                )
               }
             }
             if (command) {

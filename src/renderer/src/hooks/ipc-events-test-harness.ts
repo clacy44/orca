@@ -1,6 +1,6 @@
 import { vi } from 'vitest'
 import type * as ReactModule from 'react'
-import type { TerminalPaneLayoutNode } from '../../../shared/terminal-tab-types'
+import type { TerminalLayoutSnapshot } from '../../../shared/terminal-tab-types'
 
 export type CreateTerminalRequest = {
   requestId?: string
@@ -14,6 +14,9 @@ export type CreateTerminalRequest = {
   tabId?: string
   leafId?: string
   splitFromLeafId?: string
+  materializeOnly?: boolean
+  focus?: boolean
+  launchAgent?: string
 }
 
 export type RequestTerminalCreateRequest = {
@@ -31,10 +34,7 @@ export type HarnessTab = { id: string; ptyId?: string | null; title?: string }
 export type HarnessStoreState = {
   tabsByWorktree: Record<string, HarnessTab[]>
   ptyIdsByTabId: Record<string, string[]>
-  terminalLayoutsByTabId: Record<
-    string,
-    { root?: TerminalPaneLayoutNode; ptyIdsByLeafId?: Record<string, string> }
-  >
+  terminalLayoutsByTabId: Record<string, Partial<TerminalLayoutSnapshot>>
   [key: string]: unknown
 }
 
@@ -160,7 +160,15 @@ export async function loadIpcEventsHarness(
     return { ...actual, useEffect: (effect: () => void | (() => void)) => void effect() }
   })
   vi.doMock('../store', () => ({
-    useAppStore: { subscribe: vi.fn(() => () => {}), getState: () => storeState }
+    useAppStore: {
+      subscribe: vi.fn(() => () => {}),
+      getState: () => storeState,
+      setState: (patch: unknown) =>
+        Object.assign(
+          storeState,
+          typeof patch === 'function' ? (patch as (state: unknown) => object)(storeState) : patch
+        )
+    }
   }))
   vi.doMock('@/lib/ui-zoom', () => ({ applyUIZoom: vi.fn() }))
   vi.doMock('@/lib/worktree-activation', () => ({
@@ -266,6 +274,8 @@ export async function loadIpcEventsHarness(
         mobile: createApiNamespaceStub({
           consumePendingUnpairedDeviceAuthFailure: () => Promise.resolve(false)
         }),
+        // Why: a ready workspace session makes the hook fetch the status snapshot at mount.
+        agentStatus: createApiNamespaceStub({ getSnapshot: () => Promise.resolve([]) }),
         remoteWorkspace: createApiNamespaceStub({ clientId: () => Promise.resolve(null) })
       } as Record<string, unknown>,
       { get: (target, prop: string) => target[prop] ?? createApiNamespaceStub() }

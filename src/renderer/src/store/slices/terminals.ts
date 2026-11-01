@@ -4,6 +4,7 @@ import type { AppState } from '../types'
 import type { WorkspaceKey } from '../../../../shared/folder-workspace-types'
 import type { Repo } from '../../../../shared/repo-types'
 import type { Tab } from '../../../../shared/tab-types'
+import type { LiveAgentSessionMark } from '../../../../shared/sweep-restore-mark-list'
 import type { TerminalLayoutSnapshot, TerminalTab } from '../../../../shared/terminal-tab-types'
 import type { TuiAgent } from '../../../../shared/tui-agent'
 import type { WorkspaceSessionState } from '../../../../shared/workspace-session-state-types'
@@ -51,6 +52,7 @@ import type { AiVaultSessionTitle } from '../../../../shared/ai-vault-session-ti
 import { scheduleRuntimeGraphSync } from '@/runtime/sync-runtime-graph'
 import { forgetAgentHibernationTabOutput } from '@/lib/agent-hibernation-output-activity'
 import { forgetForegroundTerminalTabs } from '@/lib/foreground-terminal-tabs'
+import { deriveLiveAgentSessionState } from '@/lib/live-agent-session-guard'
 import { terminalLayoutEqual } from '@/lib/terminal-layout-equality'
 import { forgetAgentStartupDeliveriesForTabs } from '@/lib/agent-startup-delivery-guards'
 import { clearTransientTerminalState, emptyLayoutSnapshot } from './terminal-helpers'
@@ -599,6 +601,15 @@ export type TerminalSlice = {
    * resumed it, and a renderer-side wake would double-resume the same session into a fresh pane. */
   sweepRestoredPaneKeys: ReadonlySet<string>
   setSweepRestoredPaneKeys: (paneKeys: readonly string[]) => void
+  /** Agent conversations a live local terminal in main's inventory still holds, keyed by the
+   * holding pty so its exit can drop them. No wake path may resume these. */
+  liveAgentSessionMarksByPtyId: Readonly<Record<string, readonly LiveAgentSessionMark[]>>
+  /** Derived from the marks: their pane keys, and their provider-session keys (`liveAgentSessionKey`). */
+  liveAgentSessionPaneKeys: ReadonlySet<string>
+  liveAgentSessionKeys: ReadonlySet<string>
+  setLiveAgentSessions: (sessions: readonly LiveAgentSessionMark[]) => void
+  /** The holding pty exited: its conversation is no longer held by a live terminal. */
+  dropLiveAgentSessionMarksForPty: (ptyId: string) => void
   /** [S10-21a C15, R52] False until App.tsx's hydration applies the awaited (post-sweep)
    * `sweepRestoreMarkList` reply. Every resume/spawn decision that consults
    * `sweepRestoredPaneKeys` must defer while this is false — the set is not yet trustworthy. */
@@ -1098,6 +1109,24 @@ export const createTerminalSlice: StateCreator<AppState, [], [], TerminalSlice> 
   workspaceSessionReady: false,
   sweepRestoredPaneKeys: new Set<string>(),
   setSweepRestoredPaneKeys: (paneKeys) => set({ sweepRestoredPaneKeys: new Set(paneKeys) }),
+  liveAgentSessionMarksByPtyId: {},
+  liveAgentSessionPaneKeys: new Set<string>(),
+  liveAgentSessionKeys: new Set<string>(),
+  setLiveAgentSessions: (sessions) => {
+    const byPtyId: Record<string, LiveAgentSessionMark[]> = {}
+    for (const session of sessions) {
+      ;(byPtyId[session.ptyId] ??= []).push(session)
+    }
+    set(deriveLiveAgentSessionState(byPtyId))
+  },
+  dropLiveAgentSessionMarksForPty: (ptyId) => {
+    const current = get().liveAgentSessionMarksByPtyId
+    if (!(ptyId in current)) {
+      return
+    }
+    const { [ptyId]: _dropped, ...rest } = current
+    set(deriveLiveAgentSessionState(rest))
+  },
   sweepRestoreMarksHydrated: false,
   setSweepRestoreMarksHydrated: (value) => set({ sweepRestoreMarksHydrated: value }),
   pendingSweepMarksResumeWorktreeIds: new Set<string>(),

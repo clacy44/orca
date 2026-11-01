@@ -288,6 +288,8 @@ type StoreState = {
   settleDirectSshPaneRetry?: ReturnType<typeof vi.fn>
   sweepRestoredPaneKeys?: Set<string>
   sweepRestoreMarksHydrated?: boolean
+  liveAgentSessionPaneKeys?: Set<string>
+  liveAgentSessionKeys?: Set<string>
 }
 
 type WindowsShiftEnterPaneState = Parameters<typeof resolveWindowsShiftEnterEncodingForPane>[0]
@@ -3573,6 +3575,70 @@ describe('connectPanePty', () => {
     expect(resumeConnectOptions?.command).toBeUndefined()
     expect(resumeConnectOptions?.env?.ORCA_AGENT_LAUNCH_TOKEN).toBeUndefined()
     expect(deps.onShowSessionRestoredBanner).toHaveBeenCalledWith(2, 'restored-elsewhere')
+  })
+
+  // A live terminal elsewhere still runs the pane's conversation: the cold-restore resume line must
+  // not be typed here, and the sleeping record stays. The same pane as the live holder is not blocked.
+  it.each([
+    {
+      name: 'skips the cold-restore resume while another pane holds the session live',
+      livePaneKeys: new Set(['tab-9:other-leaf']),
+      expectResume: false
+    },
+    {
+      name: 'does not skip it when this pane is itself the live holder',
+      livePaneKeys: new Set(['SELF']),
+      expectResume: true
+    }
+  ])('live agent terminals: $name', async ({ livePaneKeys, expectResume }) => {
+    const { connectPanePty } = await import('./pty-connection')
+    const transport = createMockTransport('pty-pane-2')
+    transportFactoryQueue.push(transport)
+    const manager = createManager(1)
+    const deps = createDeps({
+      consumeSuppressedPtyExit: vi.fn(() => true),
+      isVisibleRef: { current: false }
+    })
+    const pane = createPane(2)
+    const paneKey = `tab-1:${leafIdForPane(2)}`
+    mockStoreState.liveAgentSessionPaneKeys = new Set(
+      [...livePaneKeys].map((key) => (key === 'SELF' ? paneKey : key))
+    )
+    mockStoreState.liveAgentSessionKeys = new Set(['wt-1\0claude\0sess-live-elsewhere'])
+    mockStoreState.sleepingAgentSessionsByPaneKey[paneKey] = {
+      paneKey,
+      tabId: 'tab-1',
+      worktreeId: 'wt-1',
+      agent: 'claude',
+      providerSession: { key: 'session_id', id: 'sess-live-elsewhere' },
+      prompt: 'test prompt',
+      state: 'done',
+      capturedAt: 1,
+      updatedAt: 1,
+      origin: 'worktree-sleep'
+    }
+    mockStoreState.suppressedPtyExitIds['tab-pty'] = true
+
+    const binding = connectPanePty(pane as never, manager as never, deps as never) as unknown as {
+      noteVisibilityResume: () => void
+      dispose: () => void
+    }
+    await flushAsyncTicks()
+    const onPtyExit = createdTransportOptions[0]?.onPtyExit as ((ptyId: string) => void) | undefined
+    onPtyExit?.('tab-pty')
+    await flushAsyncTicks()
+    binding.noteVisibilityResume()
+    await flushAsyncTicks()
+
+    const resumeConnectOptions = transport.connect.mock.calls.at(-1)?.[0] as
+      | { command?: string }
+      | undefined
+    if (expectResume) {
+      expect(resumeConnectOptions?.command).toContain('--resume')
+    } else {
+      expect(resumeConnectOptions?.command ?? '').not.toContain('--resume')
+      expect(mockStoreState.sleepingAgentSessionsByPaneKey[paneKey]).toBeDefined()
+    }
   })
 
   it('resumes a hibernated agent from a navigation-free wake without a visibility reveal', async () => {

@@ -113,6 +113,20 @@ describe('startup ordering', () => {
     expect(barrier).toContain(
       'return runtime?.reconcileLegacyWorkerTerminals({ materializeRenderer: true })'
     )
+    // The live-terminal surface reconcile waits on the same startup gates before it runs.
+    const reconcileHandler = barrier.slice(
+      barrier.indexOf("ipcMain.handle('app:reconcileLiveTerminalSurfaces'")
+    )
+    expect(
+      reconcileHandler.indexOf('await Promise.all([firstWindowStartupServicesReady')
+    ).toBeLessThan(reconcileHandler.indexOf('runtime?.reconcileLiveTerminalSurfacesForRenderer()'))
+    expect(reconcileHandler).toContain('managedWslCliStartupBarrierReady')
+    // An unknown live set (null) leaves the field out of the reply.
+    expect(reconcileHandler).toContain('if (marks) {')
+    // The live agent marks are read after the reconcile and returned with it.
+    expect(reconcileHandler.indexOf('runtime?.getLiveAgentSessionMarks()')).toBeGreaterThan(
+      reconcileHandler.indexOf('runtime?.reconcileLiveTerminalSurfacesForRenderer()')
+    )
   })
 
   it('reconciles retained Codex homes after authoritative daemon inventory', () => {

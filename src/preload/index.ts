@@ -4,6 +4,7 @@ import { electronAPI } from '@electron-toolkit/preload'
 import { preloadE2EConfig } from './e2e-config'
 import { glApi } from './gitlab'
 import type { AppIdentity } from '../shared/app-identity'
+import type { ReconcileLiveTerminalSurfacesReply } from '../shared/sweep-restore-mark-list'
 import {
   LAUNCH_ADMISSION_NOTICE_CHANNEL,
   type LaunchAdmissionNoticePayload
@@ -561,6 +562,8 @@ const api = {
       ipcRenderer.invoke('app:awaitFirstWindowStartupServices'),
     recoverLegacyWorkerTerminalsForRendererStartup: (): Promise<void> =>
       ipcRenderer.invoke('app:recoverLegacyWorkerTerminalsForRendererStartup'),
+    reconcileLiveTerminalSurfaces: (): Promise<ReconcileLiveTerminalSurfacesReply> =>
+      ipcRenderer.invoke('app:reconcileLiveTerminalSurfaces'),
     startupDiagnostic: (event: string, details?: Record<string, unknown>): Promise<void> =>
       startupDiagnosticsEnabled
         ? ipcRenderer.invoke('app:startupDiagnostic', event, details)
@@ -4029,6 +4032,7 @@ const api = {
         ptyId?: string
         activate?: boolean
         focus?: boolean
+        materializeOnly?: boolean
         presentation?: RuntimeTerminalPresentation
         surfaceOwner?: false
         tabId?: string
@@ -4055,6 +4059,7 @@ const api = {
           ptyId?: string
           activate?: boolean
           focus?: boolean
+          materializeOnly?: boolean
           presentation?: RuntimeTerminalPresentation
           surfaceOwner?: false
           tabId?: string

@@ -340,6 +340,10 @@ import type { DirectSshPaneRetryAttempt } from '@/store/slices/direct-ssh-termin
 import { directSshAuthoritiesEqual } from '@/store/slices/direct-ssh-terminal-authority-ledger'
 import { reanchorResumePrompt } from './daemon-death-reanchor'
 import {
+  isHeldByOtherLiveAgentTerminal,
+  recordLiveAgentResumeSkipped
+} from '@/lib/live-agent-session-guard'
+import {
   consumeDaemonSessionLostRelaunch,
   isDaemonSessionLostRelaunch
 } from './pty-daemon-session-loss-registry'
@@ -5052,6 +5056,19 @@ export function connectPanePty(
         useLiveEntry ? entry.providerSession : sleepingRecord?.providerSession
       )
       if (!providerSession) {
+        return null
+      }
+      // Why: another pane's live terminal still runs this conversation, so typing `--resume` here would fork it.
+      // Skipped only when this pane is not itself the live holder; the sleeping record stays uncleared.
+      if (
+        isHeldByOtherLiveAgentTerminal(state, {
+          paneKey: cacheKey,
+          worktreeId: deps.worktreeId,
+          agent,
+          providerSessionId: providerSession.id
+        })
+      ) {
+        recordLiveAgentResumeSkipped('cold-restore', cacheKey)
         return null
       }
       const matchingSleepingLaunchConfig =

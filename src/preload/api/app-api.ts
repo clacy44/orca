@@ -9,6 +9,7 @@ import type { MarkdownDocument } from '../../shared/filesystem-entry-types'
 import type { PersistedUIState } from '../../shared/persisted-ui-state-types'
 import type { FloatingTerminalCwdRequest } from '../../shared/ui-chrome-types'
 import type { WorkspaceSessionState } from '../../shared/workspace-session-state-types'
+import type { ReconcileLiveTerminalSurfacesReply } from '../../shared/sweep-restore-mark-list'
 
 export type AppApi = {
   /** Returns the app identity currently exposed to native chrome and the titlebar. */
@@ -37,6 +38,9 @@ export type AppApi = {
   awaitFirstWindowStartupServices: () => Promise<void>
   /** Reconciles legacy worker authority around persisted terminal reconnect. */
   recoverLegacyWorkerTerminalsForRendererStartup: () => Promise<void>
+  /** Re-shows live local terminals main still holds that this window has no tab for, and names the
+   * agent conversations live terminals hold. */
+  reconcileLiveTerminalSurfaces: () => Promise<ReconcileLiveTerminalSurfacesReply>
   /** Emits a startup benchmark marker when ORCA_STARTUP_DIAGNOSTICS is enabled. */
   startupDiagnostic: (event: string, details?: Record<string, unknown>) => Promise<void>
   /** macOS active input mode, or layout ID when no IME is selected (e.g. `com.apple.keylayout.PolishPro`).

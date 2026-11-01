@@ -51,6 +51,7 @@ import {
   registerHttpLinkStoreAccessor,
   registerRuntimeHttpLinkBrowserOpener
 } from '@/lib/http-link-routing'
+import { registerGlobalPtyExitObserver } from '@/lib/global-pty-exit-observers'
 import { installStoreListenerCensus } from './store-listener-census'
 import {
   registerRendererMemoryProfileContributor,
@@ -113,6 +114,10 @@ registerRuntimeHttpLinkBrowserOpener(async (request) => {
   const { openWorkspaceBrowserTab } = await import('@/lib/workspace-browser-tab-open')
   await openWorkspaceBrowserTab(request)
 })
+
+registerGlobalPtyExitObserver((ptyId) =>
+  useAppStore.getState().dropLiveAgentSessionMarksForPty(ptyId)
+)
 
 // Why: names the fattest store slices in renderer_memory_highwater breadcrumbs
 // so OOM crash reports identify what grew without a local repro.

@@ -245,6 +245,20 @@ const hasCustomTitleBar = shouldRenderDesktopWindowChrome({
   isWebClient: isPairedWebClientWindow()
 })
 
+// Why: a failed reconcile must never block startup; the later call retries what it left.
+async function reconcileLiveTerminalSurfacesForStartup(): Promise<void> {
+  try {
+    const reply = await window.api.app.reconcileLiveTerminalSurfaces()
+    // Why: the hydration-time read can predate the PTY provider; main returns a fresh read with the
+    // reconcile, so this never waits on the sweep-lock-gated `sweepRestoreMarkList`.
+    if (reply?.liveAgentSessions) {
+      useAppStore.getState().setLiveAgentSessions(reply.liveAgentSessions)
+    }
+  } catch (err) {
+    console.warn('[startup] live terminal surface reconcile failed:', err)
+  }
+}
+
 async function listRuntimeSessionHostIdsForStartup(): Promise<ExecutionHostId[]> {
   try {
     return (await window.api.runtimeEnvironments.list()).map((environment) =>
@@ -1133,6 +1147,11 @@ function App(): React.JSX.Element {
           await timeRendererStartupStep('recover-legacy-worker-terminals-pre-reconnect', () =>
             window.api.app.recoverLegacyWorkerTerminalsForRendererStartup()
           )
+          // Why here: after hydration (restored tabs count as owners), before reconnect reads and
+          // rewrites tab state, and before panes mount or the startup wake can resume a live agent.
+          await timeRendererStartupStep('reconcile-live-terminal-surfaces', () =>
+            reconcileLiveTerminalSurfacesForStartup()
+          )
           await timeRendererStartupStep('terminal-provider-snapshot-capabilities', () => {
             return refreshTerminalProviderSnapshotCapabilities(
               collectTerminalProviderSnapshotPtyIds(useAppStore.getState())
@@ -1183,6 +1202,8 @@ function App(): React.JSX.Element {
             } finally {
               if (!cancelled) {
                 useAppStore.setState({ startupWorktreeRefreshCompleted: true })
+                // Why: worktrees that were not loaded during the first pass can be revealed now.
+                void reconcileLiveTerminalSurfacesForStartup()
               }
             }
           })()
@@ -1234,6 +1255,7 @@ function App(): React.JSX.Element {
             try {
               await window.api.app.awaitFirstWindowStartupServices()
               await window.api.app.recoverLegacyWorkerTerminalsForRendererStartup()
+              await reconcileLiveTerminalSurfacesForStartup()
               await refreshTerminalProviderSnapshotCapabilities(
                 collectTerminalProviderSnapshotPtyIds(useAppStore.getState())
               )

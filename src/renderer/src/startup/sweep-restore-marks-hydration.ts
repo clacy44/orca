@@ -14,6 +14,10 @@ import { recordRendererCrashBreadcrumb } from '../lib/crash-breadcrumb-recorder'
  * console.error remains the always-on record). */
 export function applySweepRestoreMarkListReply(reply: SweepRestoreMarkListReply): void {
   useAppStore.getState().setSweepRestoredPaneKeys(reply.paneKeys)
+  // Why: an omitted field means the live set is unknown, so marks already held must stay.
+  if (reply.liveAgentSessions) {
+    useAppStore.getState().setLiveAgentSessions(reply.liveAgentSessions)
+  }
   if (reply.sweepIncomplete) {
     console.error(
       '[startup] sweepRestoreMarkList timed out waiting for the sweep lock; adopting the pre-sweep marks:',

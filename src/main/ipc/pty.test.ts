@@ -6982,6 +6982,182 @@ describe('registerPtyHandlers', () => {
     )
   })
 
+  it('tells the runtime a close was requested before the shutdown completes', async () => {
+    let shutdownStartedAfterMark = false
+    const runtime = {
+      setPtyController: vi.fn(),
+      onPtyExit: vi.fn(),
+      markPtyShutdownRequested: vi.fn()
+    }
+    const shutdown = vi.fn(async () => {
+      shutdownStartedAfterMark = runtime.markPtyShutdownRequested.mock.calls.length > 0
+    })
+    setLocalPtyProvider({
+      spawn: vi.fn(),
+      write: vi.fn(),
+      resize: vi.fn(),
+      shutdown,
+      sendSignal: vi.fn(),
+      getCwd: vi.fn(),
+      getInitialCwd: vi.fn(),
+      clearBuffer: vi.fn(),
+      acknowledgeDataEvent: vi.fn(),
+      hasChildProcesses: vi.fn(),
+      getForegroundProcess: vi.fn(),
+      serialize: vi.fn(),
+      revive: vi.fn(),
+      onData: vi.fn(() => () => {}),
+      onReplay: vi.fn(() => () => {}),
+      onExit: vi.fn(() => () => {}),
+      listProcesses: vi.fn(async () => []),
+      attach: vi.fn(),
+      getDefaultShell: vi.fn(),
+      getProfiles: vi.fn()
+    } as never)
+    handlers.clear()
+    registerPtyHandlers(mainWindow as never, runtime as never)
+
+    await handlers.get('pty:kill')!(null, { id: 'local-pty' })
+
+    expect(runtime.markPtyShutdownRequested).toHaveBeenCalledWith('local-pty')
+    expect(shutdownStartedAfterMark).toBe(true)
+  })
+
+  describe('shutdown-requested mark after a close', () => {
+    function useProvider(overrides: Record<string, unknown>): void {
+      setLocalPtyProvider({
+        spawn: vi.fn(),
+        write: vi.fn(),
+        resize: vi.fn(),
+        shutdown: vi.fn(async () => undefined),
+        sendSignal: vi.fn(),
+        getCwd: vi.fn(),
+        getInitialCwd: vi.fn(),
+        clearBuffer: vi.fn(),
+        acknowledgeDataEvent: vi.fn(),
+        hasChildProcesses: vi.fn(),
+        getForegroundProcess: vi.fn(),
+        serialize: vi.fn(),
+        revive: vi.fn(),
+        onData: vi.fn(() => () => {}),
+        onReplay: vi.fn(() => () => {}),
+        onExit: vi.fn(() => () => {}),
+        listProcesses: vi.fn(async () => []),
+        attach: vi.fn(),
+        getDefaultShell: vi.fn(),
+        getProfiles: vi.fn(),
+        ...overrides
+      } as never)
+    }
+    function register() {
+      const runtime = {
+        setPtyController: vi.fn(),
+        onPtyExit: vi.fn(),
+        markPtyShutdownRequested: vi.fn(),
+        clearPtyShutdownRequested: vi.fn()
+      }
+      handlers.clear()
+      registerPtyHandlers(mainWindow as never, runtime as never)
+      const controller = runtime.setPtyController.mock.calls[0]?.[0] as {
+        stopAndWait: (ptyId: string) => Promise<boolean>
+        kill: (ptyId: string) => boolean
+      }
+      return { runtime, controller }
+    }
+
+    it('keeps the mark after a kill that succeeded, so the terminal stays excluded until its exit', async () => {
+      useProvider({})
+      const { runtime } = register()
+
+      await handlers.get('pty:kill')!(null, { id: 'local-pty' })
+
+      expect(runtime.markPtyShutdownRequested).toHaveBeenCalledWith('local-pty')
+      expect(runtime.clearPtyShutdownRequested).not.toHaveBeenCalled()
+    })
+
+    it('keeps the mark when a user close (pty:kill) fails, so the closed terminal stays excluded', async () => {
+      useProvider({
+        shutdown: vi.fn(async () => {
+          throw new Error('daemon busy')
+        })
+      })
+      const { runtime } = register()
+
+      await expect(handlers.get('pty:kill')!(null, { id: 'local-pty' })).rejects.toThrow(
+        'daemon busy'
+      )
+
+      expect(runtime.markPtyShutdownRequested).toHaveBeenCalledWith('local-pty')
+      expect(runtime.clearPtyShutdownRequested).not.toHaveBeenCalled()
+    })
+
+    it('keeps the mark when the runtime controller kill fails', async () => {
+      const shutdown = vi.fn(async () => {
+        throw new Error('daemon busy')
+      })
+      useProvider({ shutdown })
+      const { runtime, controller } = register()
+
+      expect(controller.kill('local-pty')).toBe(true)
+      await vi.waitFor(() => expect(shutdown).toHaveBeenCalled())
+      await vi.waitFor(() => expect(runtime.onPtyExit).toHaveBeenCalled())
+      await new Promise((resolve) => setImmediate(resolve))
+
+      expect(runtime.markPtyShutdownRequested).toHaveBeenCalledWith('local-pty')
+      expect(runtime.clearPtyShutdownRequested).not.toHaveBeenCalled()
+      // The real onPtyExit drops the mark, so the last mark must come after it.
+      const lastMark = Math.max(...runtime.markPtyShutdownRequested.mock.invocationCallOrder)
+      expect(lastMark).toBeGreaterThan(runtime.onPtyExit.mock.invocationCallOrder[0]!)
+    })
+
+    it('keeps the mark when the process was already gone', async () => {
+      useProvider({
+        shutdown: vi.fn(async () => {
+          throw new Error('Session not found')
+        })
+      })
+      const { runtime } = register()
+
+      await handlers.get('pty:kill')!(null, { id: 'local-pty' })
+
+      expect(runtime.clearPtyShutdownRequested).not.toHaveBeenCalled()
+    })
+
+    it('stopAndWait keeps the mark when the stop is verified', async () => {
+      useProvider({ listProcesses: vi.fn(async () => []) })
+      const { runtime, controller } = register()
+
+      await expect(controller.stopAndWait('local-pty')).resolves.toBe(true)
+
+      expect(runtime.markPtyShutdownRequested).toHaveBeenCalledWith('local-pty')
+      expect(runtime.clearPtyShutdownRequested).not.toHaveBeenCalled()
+    })
+
+    it('stopAndWait clears the mark when the pty is still listed after the stop', async () => {
+      useProvider({
+        listProcesses: vi.fn(async () => [{ id: 'local-pty', cwd: '/tmp/demo', title: 'shell' }])
+      })
+      const { runtime, controller } = register()
+
+      await expect(controller.stopAndWait('local-pty')).resolves.toBe(false)
+
+      expect(runtime.clearPtyShutdownRequested).toHaveBeenCalledWith('local-pty')
+    })
+
+    it('stopAndWait clears the mark when the shutdown itself failed', async () => {
+      useProvider({
+        shutdown: vi.fn(async () => {
+          throw new Error('daemon busy')
+        })
+      })
+      const { runtime, controller } = register()
+
+      await expect(controller.stopAndWait('local-pty')).resolves.toBe(false)
+
+      expect(runtime.clearPtyShutdownRequested).toHaveBeenCalledWith('local-pty')
+    })
+  })
+
   it('ignores a late provider exit after synthesizing kill exit', async () => {
     const exitListeners = new Set<(payload: { id: string; code: number }) => void>()
     const runtime = {

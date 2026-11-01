@@ -1087,6 +1087,19 @@ import {
   getDefaultVoiceSettings
 } from '../../shared/constants'
 import { pruneLineageForMissingRepoWorktrees } from '../worktree-lineage-pruning'
+import { recordCrashBreadcrumb } from '../crash-reporting/crash-breadcrumb-store'
+import {
+  LiveSurfaceReceipts,
+  countLiveSurfaceSkips,
+  planLiveTerminalSurfaceReveals,
+  type LiveSurfaceRevealItem
+} from './live-terminal-surface-plan'
+import {
+  LIVE_SURFACE_RECONCILE_BUDGET_MS,
+  drainLiveTerminalSurfaceReveals
+} from './live-terminal-surface-reconcile'
+import { collectLiveAgentSessionMarks, type LiveAgentStatusRow } from './live-agent-session-marks'
+import type { LiveAgentSessionMark } from '../../shared/sweep-restore-mark-list'
 import {
   createWorktreeCopiedPaths,
   createWorktreeLinkedPaths,
@@ -2230,14 +2243,27 @@ type RuntimeNotifier = {
       splitDirection?: 'horizontal' | 'vertical'
       splitTelemetrySource?: TerminalPaneSplitSource
       focus?: boolean
+      // Why: renderer-side recovery reveal — never mint a second surface for a pty a tab already
+      // records, and never rewrite a layout; see onCreateTerminal's materializeOnly branch.
+      materializeOnly?: boolean
       expectedProcessIdentity?: {
         terminalHandle: string
         incarnationId: string
       }
     }
   ):
-    | Promise<{ tabId: string; title?: string | null; identity?: TerminalRevealIdentity }>
-    | { tabId: string; title?: string | null; identity?: TerminalRevealIdentity }
+    | Promise<{
+        tabId: string
+        title?: string | null
+        identity?: TerminalRevealIdentity
+        skipped?: 'owned'
+      }>
+    | {
+        tabId: string
+        title?: string | null
+        identity?: TerminalRevealIdentity
+        skipped?: 'owned'
+      }
     | void
   resolveLegacyWorkerTerminalRecovery?(
     paneKey: string,
@@ -3364,6 +3390,7 @@ export class OrcaRuntimeService {
   private readonly restoreTickets = new RestoreTicketRegistry()
   private liveReportCheck: LiveReportCheckFn | null = null // [S10-21d b3, DEC-3 D]
   private liveReportPanesCheck: LiveReportPanesCheckFn | null = null // [S10-21f b2-10q R143]
+  private agentStatusRowsSource: (() => readonly LiveAgentStatusRow[]) | null = null
   private backgroundWorkVerdictCheck: ((paneKey: string) => BackgroundWorkVerdict) | null = null // [R316]
   // S10-16 C1 review F3: the device registry's R1.4 legacy-sweep audit rows have no sink until the
   // orchestration DB attaches (device-registry-load.ts runs before it exists) — RuntimeRpcServer
@@ -3826,6 +3853,15 @@ export class OrcaRuntimeService {
   >()
   private legacyWorkerTerminalReceiptEpochByPane = new Map<string, number>()
   private legacyWorkerRecoveredPtys = new Set<string>()
+  // Renderer-recovery reattach (live-terminal-surface-reconcile.ts): one in-flight chain, per-epoch
+  // receipts, and the two sets that mark a missing tab as deliberate.
+  private liveTerminalSurfaceReconcileQueue: Promise<void> = Promise.resolve()
+  private readonly liveTerminalSurfaceReceipts = new LiveSurfaceReceipts()
+  // Why: ptys created with explicit background presentation (automation, workers, lane wakes) never
+  // get a tab on purpose; cleared when a reveal gives one a tab, or on exit.
+  private readonly surfacelessBackgroundPtyIds = new Set<string>()
+  // Why: a requested close/kill removes the user's tab before the process is gone.
+  private readonly shutdownRequestedPtyIds = new Set<string>()
   // [S10-21c B6, design §2 S9] Desktop materialization queue — populated by the restore sweep
   // (recordRestoredPaneForDesktopMaterialization), drained by materializeRestoredAgentPanes.
   private desktopRestoredPaneMaterializeQueue = createDesktopMaterializeQueueState()
@@ -7002,6 +7038,9 @@ export class OrcaRuntimeService {
           tabId: leaf.tabId,
           paneKey: this.makeRuntimePaneKey(leaf)
         })
+        // Why: the renderer shows a leaf for this pty, so it is not tab-less by design any more; a
+        // crash must not leave a shown terminal excluded from the reconcile.
+        this.surfacelessBackgroundPtyIds.delete(leaf.ptyId)
       }
 
       if (existing && (existing.ptyId !== ptyId || existing.ptyGeneration !== ptyGeneration)) {
@@ -14510,6 +14549,65 @@ export class OrcaRuntimeService {
   ): { paneKey: string; executionHostId: string }[] | null {
     return this.liveReportPanesCheck ? this.liveReportPanesCheck(sessionId, opts) : null
   }
+  setAgentStatusRowsSource(source: () => readonly LiveAgentStatusRow[]): void {
+    this.agentStatusRowsSource = source
+  }
+
+  // Why: the renderer's wake paths must never resume a conversation a live local terminal still
+  // holds; this names those conversations from a fresh controller inventory, not the cached flag.
+  // Returns null when the live set could not be established, so callers keep what they have; [] means none.
+  async getLiveAgentSessionMarks(): Promise<LiveAgentSessionMark[] | null> {
+    if (!this.canRecoverPersistentLocalPtysFn()) {
+      return null
+    }
+    // Why bounded: the renderer awaits this during startup hydration; a slow worktree scan must not stall it.
+    const resolved = await withTimeoutResult(
+      this.getResolvedWorktreeMap(),
+      PTY_CONTROLLER_LIST_TIMEOUT_MS
+    )
+    if (!resolved.ok) {
+      return null
+    }
+    const worktrees = [...resolved.value.values()]
+    // Why: one transient controller failure must not read as "no live terminals" (same retry as the sweep).
+    const inventory =
+      (await this.refreshPtyWorktreeRecordsWithControllerInventory(
+        worktrees,
+        null,
+        undefined,
+        null
+      )) ??
+      (await this.refreshPtyWorktreeRecordsWithControllerInventory(
+        worktrees,
+        null,
+        undefined,
+        null
+      ))
+    if (!inventory) {
+      return null
+    }
+    const livePanes: { ptyId: string; paneKey: string; worktreeId: string }[] = []
+    for (const ptyId of inventory.livePtyIds) {
+      const pty = this.ptysById.get(ptyId)
+      if (pty?.paneKey && pty.connectionId === null && !this.isRemoteScopedPtyId(ptyId)) {
+        livePanes.push({ ptyId, paneKey: pty.paneKey, worktreeId: pty.worktreeId })
+      }
+    }
+    let books: ReturnType<OrcaRuntimeService['getOrchestrationDb']> | null = null
+    try {
+      books = this.getOrchestrationDb()
+    } catch {
+      books = null
+    }
+    return collectLiveAgentSessionMarks({
+      livePanes,
+      statuses: this.agentStatusRowsSource?.() ?? [],
+      books,
+      hostId: this.getOrchestrationCompatibilityHostId(),
+      now: Date.now()
+    })
+  }
+
   /** [R315] For ptys that died with the daemon: pane key, peer-owned verdict and chair verdict, read
    * BEFORE the exit semantics run (onPtyExit drops the pty record and closes peer-owned panes). The
    * chairs manifest is read once per call; a read or parse failure means "no chair" (safe side). */
@@ -16290,6 +16388,9 @@ export class OrcaRuntimeService {
       this.intentionalHandlelessPtyStops.has(ptyId) &&
       (intentionalStopIncarnation === null || intentionalStopIncarnation === incarnationId)
     advertisedUrlWatcher.unbindPty(ptyId)
+    this.surfacelessBackgroundPtyIds.delete(ptyId)
+    this.shutdownRequestedPtyIds.delete(ptyId)
+    this.liveTerminalSurfaceReceipts.delete(ptyId)
     // Clean up new mobile state for this PTY
     this.mobileSubscribers.delete(ptyId)
     // Why: the reserved 'host' presence key belongs to no stream and no connection, so no stream
@@ -29639,6 +29740,9 @@ export class OrcaRuntimeService {
           }
           pty.tabId = tabId
           pty.paneKey = paneKey
+          if (presentation === 'background' && !adoptedStablePane) {
+            this.surfacelessBackgroundPtyIds.add(result.id)
+          }
         }
         const handle = pty ? this.issuePtyHandle(pty) : preAllocatedHandle
         if (pty && !adoptedStablePane && launchOpts.deferMobileSessionPublish !== true) {
@@ -31057,6 +31161,7 @@ export class OrcaRuntimeService {
             ...(live.pty.tabId !== null ? { tabId: live.pty.tabId } : {}),
             ...(parsedPaneKey ? { leafId: parsedPaneKey.leafId } : {})
           })
+          this.surfacelessBackgroundPtyIds.delete(live.pty.ptyId)
           if (!ctx.isCurrent() || this.notifier !== notifier) {
             return {
               handle,
@@ -37085,6 +37190,9 @@ export class OrcaRuntimeService {
         db = null
       }
     }
+    const queuedPtyIds = [...this.desktopRestoredPaneMaterializeQueue.queue.values()].map(
+      (surface) => surface.ptyId
+    )
     const run = this.desktopMaterializeDrainQueue.then(() =>
       drainDesktopMaterializeQueue(
         this.desktopRestoredPaneMaterializeQueue,
@@ -37097,10 +37205,152 @@ export class OrcaRuntimeService {
         },
         db,
         this.getOrchestrationCompatibilityHostId()
-      )
+      ).then(() => {
+        // Why: a drained entry was revealed into a tab (or dropped as dead); it is no longer tab-less by design.
+        const stillQueued = new Set(
+          [...this.desktopRestoredPaneMaterializeQueue.queue.values()].map(
+            (surface) => surface.ptyId
+          )
+        )
+        for (const ptyId of queuedPtyIds) {
+          if (!stillQueued.has(ptyId)) {
+            this.surfacelessBackgroundPtyIds.delete(ptyId)
+          }
+        }
+      })
     )
     this.desktopMaterializeDrainQueue = run.catch(() => undefined)
     return run
+  }
+
+  /** Records that a close/kill of this pty was requested, so the surface reconcile never re-shows it. */
+  markPtyShutdownRequested(ptyId: string): void {
+    this.shutdownRequestedPtyIds.add(ptyId)
+  }
+
+  /** The close/kill failed and the pty is still alive: it is a recovery candidate again. */
+  clearPtyShutdownRequested(ptyId: string): void {
+    this.shutdownRequestedPtyIds.delete(ptyId)
+  }
+
+  // Renderer-recovery reattach: re-show every live local terminal this window has no tab for,
+  // attached to the same process. No-op on serve (no notifier) and while local PTYs cannot be recovered.
+  async reconcileLiveTerminalSurfacesForRenderer(): Promise<void> {
+    if (!this.notifier?.revealTerminalSession || !this.canRecoverPersistentLocalPtysFn()) {
+      return
+    }
+    const run = this.liveTerminalSurfaceReconcileQueue.then(() =>
+      this.reconcileLiveTerminalSurfacesNow()
+    )
+    this.liveTerminalSurfaceReconcileQueue = run.catch(() => undefined)
+    return run
+  }
+
+  private async reconcileLiveTerminalSurfacesNow(): Promise<void> {
+    const notifier = this.notifier
+    if (!notifier?.revealTerminalSession) {
+      return
+    }
+    const resolvedWorktrees = [...(await this.getResolvedWorktreeMap()).values()]
+    const takeInventory = (deadline?: number) =>
+      // Why: a fresh controller inventory, never the cached `connected` flag, which can read false right after a renderer death.
+      this.refreshPtyWorktreeRecordsWithControllerInventory(resolvedWorktrees, null, deadline, null)
+    // Why: one transient controller failure must not skip the pass (same retry as takeControllerInventoryForSweep).
+    const inventory = (await takeInventory()) ?? (await takeInventory())
+    if (!inventory) {
+      // Why: an unavailable inventory is not evidence that there are no live terminals.
+      recordCrashBreadcrumb('live_terminal_surface_reconcile', { outcome: 'inventory_unavailable' })
+      return
+    }
+    this.liveTerminalSurfaceReceipts.prune(inventory.allLivePtyIds)
+    // Why: never open the lazy orchestration store from here; the legacy-worker recovery that runs just before already did.
+    const legacyPlan = this._orchestrationDb
+      ? this.getLegacyWorkerTerminalRecoveryPlan()
+      : { blockedPanes: [], candidates: [], ambiguousDispatchIds: [] }
+    const knownWorktreeIds = new Set(resolvedWorktrees.map((worktree) => worktree.id))
+    const queuedSurfaces = [...this.desktopRestoredPaneMaterializeQueue.queue.values()]
+    // Why: captured with the pty snapshot, synchronously; the drain refuses to reveal once the epoch moves.
+    const planEpoch = this.rendererGraphEpoch
+    const plan = planLiveTerminalSurfaceReveals({
+      ptys: [...this.ptysById.values()].map((pty) => ({
+        ptyId: pty.ptyId,
+        worktreeId: pty.worktreeId,
+        connectionId: pty.connectionId,
+        remoteScoped: this.isRemoteScopedPtyId(pty.ptyId) || parseAppSshPtyId(pty.ptyId) !== null,
+        tabId: pty.tabId,
+        paneKey: pty.paneKey,
+        incarnationId: pty.incarnationId,
+        seq: pty.seq,
+        title: getLatestPtyTitle(pty) ?? pty.controllerTitle,
+        launchAgent: pty.launchAgent,
+        launchConfig: pty.launchConfig ? copySleepingAgentLaunchConfig(pty.launchConfig) : null
+      })),
+      inventory,
+      exclusions: {
+        legacyWorkerPtyIds: new Set([
+          ...legacyPlan.candidates.map((candidate) => candidate.ptyId),
+          ...this.legacyWorkerRecoveredPtys
+        ]),
+        legacyWorkerPaneKeys: new Set([
+          ...legacyPlan.candidates.map((candidate) => candidate.paneKey),
+          ...legacyPlan.blockedPanes.map((blocked) => blocked.paneKey),
+          ...this.legacyWorkerTerminalReceiptEpochByPane.keys()
+        ]),
+        materializeQueuePtyIds: new Set(queuedSurfaces.map((surface) => surface.ptyId)),
+        materializeQueuePaneKeys: new Set(queuedSurfaces.map((surface) => surface.paneKey)),
+        surfacelessBackgroundPtyIds: this.surfacelessBackgroundPtyIds,
+        shutdownRequestedPtyIds: this.shutdownRequestedPtyIds
+      },
+      isKnownWorktree: (worktreeId) =>
+        knownWorktreeIds.has(worktreeId) ||
+        resolvedWorktrees.some((worktree) => runtimeWorktreeIdsEqual(worktree.id, worktreeId)),
+      receipts: this.liveTerminalSurfaceReceipts,
+      epoch: planEpoch
+    })
+    // Why: the skip counts make an exclusion visible; without them a wrongly skipped terminal leaves no trace.
+    const skipCounts = countLiveSurfaceSkips(plan)
+    if (plan.groups.length === 0) {
+      recordCrashBreadcrumb('live_terminal_surface_reconcile', {
+        outcome: 'nothing_to_reveal',
+        ...skipCounts
+      })
+      return
+    }
+    const drainStart = Date.now()
+    const deadline = drainStart + LIVE_SURFACE_RECONCILE_BUDGET_MS
+    // Why serialized: concurrent inventories invalidate each other (the older one returns null).
+    let livenessChain: Promise<unknown> = Promise.resolve()
+    const checkLiveness = (item: LiveSurfaceRevealItem) => {
+      const check = livenessChain.then(async () => {
+        // Why the deadline: each round can take the full list timeout, and the rounds run one after another.
+        let fresh = await takeInventory(deadline)
+        if (!fresh && Date.now() < deadline) {
+          fresh = await takeInventory(deadline)
+        }
+        return fresh
+          ? {
+              live: fresh.livePtyIds.has(item.ptyId),
+              incarnationId: fresh.terminalIdentityByPtyId.get(item.ptyId)?.incarnationId ?? null
+            }
+          : { live: null }
+      })
+      livenessChain = check.catch(() => undefined)
+      return check
+    }
+    const summary = await drainLiveTerminalSurfaceReveals({
+      groups: plan.groups,
+      reveal: async (worktreeId, opts) => await notifier.revealTerminalSession!(worktreeId, opts),
+      checkLiveness,
+      receipts: this.liveTerminalSurfaceReceipts,
+      planEpoch,
+      getEpoch: () => this.rendererGraphEpoch,
+      recordBreadcrumb: (name, data) => recordCrashBreadcrumb(name, data)
+    })
+    recordCrashBreadcrumb('live_terminal_surface_reconcile', {
+      outcome: 'done',
+      ...summary,
+      ...skipCounts
+    })
   }
 
   // Why split from deliverPendingMessagesForHandle: R1+R2 both need an await, so this can only

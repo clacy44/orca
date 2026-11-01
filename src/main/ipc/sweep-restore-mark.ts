@@ -6,7 +6,10 @@
 import { ipcMain } from 'electron'
 import type { OrcaRuntimeService } from '../runtime/orca-runtime'
 import { awaitRestoreSweepLockRelease } from '../runtime/restore-sweep-lock'
-import type { SweepRestoreMarkListReply } from '../../shared/sweep-restore-mark-list'
+import type {
+  LiveAgentSessionMark,
+  SweepRestoreMarkListReply
+} from '../../shared/sweep-restore-mark-list'
 
 export function registerSweepRestoreMarkHandler(runtime: OrcaRuntimeService): void {
   ipcMain.handle('orchestration:sweepRestoreMark:get', (_event, paneKey: unknown): boolean => {
@@ -36,7 +39,19 @@ export function registerSweepRestoreMarkHandler(runtime: OrcaRuntimeService): vo
       const db = runtime.getOrchestrationDb()
       const hostId = runtime.getOrchestrationCompatibilityHostId()
       const paneKeys = db.listSweepRestoreMarks(hostId)
-      return waitResult === 'timeout' ? { paneKeys, sweepIncomplete: true } : { paneKeys }
+      // Why: a live terminal's conversation must not be resumed by a wake path; an unknown live set
+      // (null) or a failed read leaves the field out and main's launch refusal stays the backstop.
+      let liveAgentSessions: LiveAgentSessionMark[] | null = null
+      try {
+        liveAgentSessions = await runtime.getLiveAgentSessionMarks()
+      } catch {
+        // Best-effort: see above.
+      }
+      return {
+        paneKeys,
+        ...(liveAgentSessions ? { liveAgentSessions } : {}),
+        ...(waitResult === 'timeout' ? { sweepIncomplete: true as const } : {})
+      }
     }
   )
 }

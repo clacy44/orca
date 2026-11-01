@@ -16,6 +16,10 @@ import {
 import type { SleepingAgentSessionRecord } from '../../../shared/agent-session-resume'
 import { isLaneBoundSleepingRecord } from '@/lib/sleeping-agent-session-lane'
 import { translate } from '@/i18n/i18n'
+import {
+  isHeldByLiveAgentTerminal,
+  recordLiveAgentResumeSkipped
+} from '@/lib/live-agent-session-guard'
 
 export type ResumeSleepingAgentSessionsOptions = {
   suppressNavigation?: boolean
@@ -85,6 +89,11 @@ export function launchSleepingAgentSession(
     // other person's credential. The record stays asleep and uncleared for the host create path.
     // The host's withheld set is the authority: `lanePrincipalId` is written only at hydration, so
     // a record captured live in this same renderer run carries none.
+    return false
+  }
+  // Why: a live terminal still runs this conversation; a second `--resume` would fork it. The record stays uncleared.
+  if (isHeldByLiveAgentTerminal(useAppStore.getState(), record)) {
+    recordLiveAgentResumeSkipped('launch', record.paneKey)
     return false
   }
   const state = useAppStore.getState()

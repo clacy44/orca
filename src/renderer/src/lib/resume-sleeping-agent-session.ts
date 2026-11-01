@@ -9,6 +9,7 @@ import {
   isPassiveCompletedHibernationEvidence,
   recordPaneIsOwnedByPreservedPane
 } from './sleeping-agent-pane-ownership'
+import { isHeldByLiveAgentTerminal, recordLiveAgentResumeSkipped } from './live-agent-session-guard'
 import {
   launchSleepingAgentSession,
   type ResumeSleepingAgentSessionsOptions
@@ -194,6 +195,11 @@ export function resumeSleepingAgentSessionsForWorktree(
       continue
     }
     if (record.automaticResumeBlockedBy === 'legacy-orchestration-worker') {
+      continue
+    }
+    // A live terminal still holds this conversation: leave the record untouched, never resume it.
+    if (isHeldByLiveAgentTerminal(currentState, record)) {
+      recordLiveAgentResumeSkipped('worktree-resume', record.paneKey)
       continue
     }
     if (isInvalidWorktreeActivationRecord(record)) {

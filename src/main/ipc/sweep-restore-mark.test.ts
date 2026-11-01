@@ -17,10 +17,17 @@ vi.mock('../runtime/restore-sweep-lock', () => ({
 
 import { registerSweepRestoreMarkHandler } from './sweep-restore-mark'
 import type { OrcaRuntimeService } from '../runtime/orca-runtime'
-import type { SweepRestoreMarkListReply } from '../../shared/sweep-restore-mark-list'
+import type {
+  LiveAgentSessionMark,
+  SweepRestoreMarkListReply
+} from '../../shared/sweep-restore-mark-list'
 
-function makeRuntime(paneKeys: string[]): OrcaRuntimeService {
+function makeRuntime(
+  paneKeys: string[],
+  getLiveAgentSessionMarks?: () => Promise<LiveAgentSessionMark[] | null>
+): OrcaRuntimeService {
   return {
+    ...(getLiveAgentSessionMarks ? { getLiveAgentSessionMarks } : {}),
     getOrchestrationDb: () => ({
       listSweepRestoreMarks: vi.fn(() => paneKeys),
       getSweepRestoreMark: vi.fn(() => false)
@@ -73,5 +80,47 @@ describe('orchestration:sweepRestoreMark:list', () => {
     const reply = await getListHandler()()
 
     expect(reply).toEqual({ paneKeys: ['pane-b'], sweepIncomplete: true })
+  })
+  it('carries the agent conversations live terminals still hold', async () => {
+    awaitRestoreSweepLockReleaseMock.mockResolvedValue('not-held')
+    const live: LiveAgentSessionMark = {
+      ptyId: 'pty-1',
+      paneKey: 'tab-1:leaf-1',
+      worktreeId: 'wt-1',
+      agent: 'claude',
+      providerSessionId: 'session-1'
+    }
+    registerSweepRestoreMarkHandler(makeRuntime(['pane-a'], async () => [live]))
+
+    const reply = await getListHandler()()
+
+    expect(reply).toEqual({ paneKeys: ['pane-a'], liveAgentSessions: [live] })
+  })
+
+  it('still answers with the marks when the live-session read fails', async () => {
+    awaitRestoreSweepLockReleaseMock.mockResolvedValue('not-held')
+    registerSweepRestoreMarkHandler(
+      makeRuntime(['pane-a'], async () => {
+        throw new Error('inventory down')
+      })
+    )
+
+    const reply = await getListHandler()()
+
+    expect(reply).toEqual({ paneKeys: ['pane-a'] })
+  })
+
+  it('omits the field when the live set is unknown (null)', async () => {
+    awaitRestoreSweepLockReleaseMock.mockResolvedValue('not-held')
+    registerSweepRestoreMarkHandler(makeRuntime(['pane-a'], async () => null))
+
+    expect(await getListHandler()()).toEqual({ paneKeys: ['pane-a'] })
+  })
+
+  it('keeps an empty array when the live set is known to be empty', async () => {
+    awaitRestoreSweepLockReleaseMock.mockResolvedValue('not-held')
+    registerSweepRestoreMarkHandler(makeRuntime(['pane-a'], async () => []))
+
+    expect(await getListHandler()()).toEqual({ paneKeys: ['pane-a'], liveAgentSessions: [] })
   })
 })

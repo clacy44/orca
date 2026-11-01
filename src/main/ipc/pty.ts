@@ -4301,6 +4301,8 @@ export function registerPtyHandlers(
     opts: { immediate?: boolean; keepHistory?: boolean; deadlineMs?: number }
   ): Promise<boolean> {
     let providerExitObserved = false
+    // Why: the close removed the user's tab; the live-surface reconcile must not re-show it before the exit lands.
+    runtime?.markPtyShutdownRequested?.(id)
     const expectedIncarnationId = ptyIncarnationById.get(id)
     const unsubscribe = provider.onExit((payload) => {
       if (
@@ -6167,6 +6169,8 @@ export function registerPtyHandlers(
             // a retry can still target a PTY that survived the failed shutdown.
             if (!retired) {
               runtime?.onPtyExit(ptyId, -1, ptyIncarnationById.get(ptyId))
+              // Why: onPtyExit drops the mark, but the process may still be alive; a closed terminal must not re-show after a reload.
+              runtime?.markPtyShutdownRequested?.(ptyId)
             }
           })
         return true
@@ -6281,11 +6285,15 @@ export function registerPtyHandlers(
           console.warn(
             `[pty] Failed to stop PTY ${ptyId}: ${err instanceof Error ? err.message : String(err)}`
           )
+          // Why: only this teardown caller treats a failed stop as "still alive"; a user close keeps its mark.
+          runtime?.clearPtyShutdownRequested?.(ptyId)
           return false
         }
       }
       try {
         if (!(await verifyPtyStopped(provider, ptyId, opts))) {
+          // Why: the process is still listed, so the stop did not take; it must stay re-showable.
+          runtime?.clearPtyShutdownRequested?.(ptyId)
           return false
         }
       } catch (err) {
@@ -6294,6 +6302,7 @@ export function registerPtyHandlers(
             err instanceof Error ? err.message : String(err)
           }`
         )
+        runtime?.clearPtyShutdownRequested?.(ptyId)
         return false
       }
       const incarnationId = finishPtyShutdown(ptyId, connectionId, store)

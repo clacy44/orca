@@ -164,6 +164,97 @@ describe('renderer startup runtime routing', () => {
     expect(postReconnectRecoveryIndex).toBeGreaterThan(reconnectIndex)
   })
 
+  it('re-shows live terminals after hydration, before reconnect and before hydration is marked successful', () => {
+    const source = readFileSync(join(process.cwd(), 'src/renderer/src/App.tsx'), 'utf8')
+    const hydrateIndex = source.indexOf("'hydrate-session-stores'")
+    const preRecoveryIndex = source.indexOf(
+      "'recover-legacy-worker-terminals-pre-reconnect'",
+      hydrateIndex
+    )
+    const reconcileIndex = source.indexOf("'reconcile-live-terminal-surfaces'", preRecoveryIndex)
+    const capabilityIndex = source.indexOf(
+      "'terminal-provider-snapshot-capabilities'",
+      reconcileIndex
+    )
+    const reconnectIndex = source.indexOf(
+      'actions.reconnectPersistedTerminals(abortController.signal)',
+      reconcileIndex
+    )
+    const hydrationSucceededIndex = source.indexOf(
+      'actions.setHydrationSucceeded(true)',
+      reconcileIndex
+    )
+
+    expect(hydrateIndex).toBeGreaterThanOrEqual(0)
+    expect(preRecoveryIndex).toBeGreaterThan(hydrateIndex)
+    expect(reconcileIndex).toBeGreaterThan(preRecoveryIndex)
+    expect(capabilityIndex).toBeGreaterThan(reconcileIndex)
+    expect(reconnectIndex).toBeGreaterThan(capabilityIndex)
+    expect(hydrationSucceededIndex).toBeGreaterThan(reconnectIndex)
+    // The step goes through the failure-tolerant wrapper, never the bare IPC.
+    expect(source.slice(reconcileIndex, capabilityIndex)).toContain(
+      'reconcileLiveTerminalSurfacesForStartup()'
+    )
+  })
+
+  it('takes the live agent marks from the reconcile reply instead of the sweep-lock-gated re-read', () => {
+    const source = readFileSync(join(process.cwd(), 'src/renderer/src/App.tsx'), 'utf8')
+    const start = source.indexOf('async function reconcileLiveTerminalSurfacesForStartup')
+    const body = source.slice(start, source.indexOf('\n}\n', start))
+
+    expect(start).toBeGreaterThanOrEqual(0)
+    expect(body).toContain('window.api.app.reconcileLiveTerminalSurfaces()')
+    expect(body).toContain('setLiveAgentSessions(reply.liveAgentSessions)')
+    expect(body).not.toContain('session.sweepRestoreMarkList')
+    // The hydration-time read is unchanged.
+    expect(source).toContain('window.api.session.sweepRestoreMarkList()')
+  })
+
+  it('re-shows live terminals in the degraded startup path before its reconnect', () => {
+    const source = readFileSync(join(process.cwd(), 'src/renderer/src/App.tsx'), 'utf8')
+    const degradedStart = source.indexOf(
+      '[startup] Workspace session hydration failed; leaving disk state untouched:'
+    )
+    const recoveryIndex = source.indexOf(
+      'window.api.app.recoverLegacyWorkerTerminalsForRendererStartup()',
+      degradedStart
+    )
+    const reconcileIndex = source.indexOf(
+      'reconcileLiveTerminalSurfacesForStartup()',
+      recoveryIndex
+    )
+    const capabilityRefreshIndex = source.indexOf(
+      'refreshTerminalProviderSnapshotCapabilities(',
+      reconcileIndex
+    )
+    const reconnectIndex = source.indexOf(
+      'actions.reconnectPersistedTerminals(abortController.signal)',
+      reconcileIndex
+    )
+
+    expect(degradedStart).toBeGreaterThanOrEqual(0)
+    expect(recoveryIndex).toBeGreaterThan(degradedStart)
+    expect(reconcileIndex).toBeGreaterThan(recoveryIndex)
+    expect(capabilityRefreshIndex).toBeGreaterThan(reconcileIndex)
+    expect(reconnectIndex).toBeGreaterThan(capabilityRefreshIndex)
+  })
+
+  it('re-shows live terminals again once the startup worktree refresh completes', () => {
+    const source = readFileSync(join(process.cwd(), 'src/renderer/src/App.tsx'), 'utf8')
+    const completedIndex = source.indexOf(
+      'useAppStore.setState({ startupWorktreeRefreshCompleted: true })'
+    )
+    const secondReconcileIndex = source.indexOf(
+      'reconcileLiveTerminalSurfacesForStartup()',
+      completedIndex
+    )
+
+    expect(completedIndex).toBeGreaterThanOrEqual(0)
+    expect(secondReconcileIndex).toBeGreaterThan(completedIndex)
+    // Same finally block: nothing between the flag flip and the call ends the block.
+    expect(source.slice(completedIndex, secondReconcileIndex)).not.toContain('} finally {')
+  })
+
   it('refreshes terminal snapshot capability before degraded reconnect', () => {
     const source = readFileSync(join(process.cwd(), 'src/renderer/src/App.tsx'), 'utf8')
     const degradedStart = source.indexOf(
