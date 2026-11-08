@@ -822,7 +822,9 @@ function createWebPreloadApi(): Partial<PreloadApi> {
       // [S10-21a C7g, Ruling 34 Addendum 25] Same rationale as sweepRestoreMarkGet/List above —
       // no RPC channel exposing this host push to a remote web client exists yet; a no-op
       // subscription (never fires, no-op unsubscribe) until one is added.
-      onLaunchAdmissionNotice: () => () => {}
+      onLaunchAdmissionNotice: () => () => {},
+      // Same rationale: no remote push channel for live-session marks exists yet.
+      onLiveAgentSessions: () => () => {}
     },
     onboarding: {
       get: () => Promise.resolve(getStoredOnboarding()),

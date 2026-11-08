@@ -15,6 +15,13 @@ import {
   type ChairPlanLookup,
   type ChairsRestorePlan
 } from './chairs-restore-plan'
+import {
+  publishAfterRestore,
+  retryDeferredRestoreActions,
+  runRestoreAction,
+  type DeferredRestoreAction,
+  type RestoreActionResult
+} from './chairs-restore-settle-retry'
 
 export type RequestChairRestoreOutcome =
   | {
@@ -54,6 +61,12 @@ export type ChairsRestoreExecutorDeps = {
   // [S10-21d b3b, D-R165 M5] null = the hook-report check is unwired — never a wired false.
   hasLiveHookReportOfSession: (sessionId: string) => boolean | null
   hasResumableTranscriptTurn: (agentType: string, sessionId: string) => Promise<boolean>
+  // Wait used once per run when a chair is refused as `same_generation_settling`; tests inject it.
+  sleep?: (ms: number) => Promise<void>
+  // Run once after at least one chair was rebound/launched: push fresh live-session marks to the
+  // renderer, and queue the restored panes for a visible tab. Neither may fail the restore.
+  publishLiveAgentSessionMarks?: () => Promise<void>
+  materializeRestoredPanes?: () => Promise<void>
 }
 
 // The verification row buildVerificationRow always returns — split out so that function's
@@ -170,12 +183,22 @@ export async function executeChairsRestorePlan(
   plan: ChairsRestorePlan,
   deps: ChairsRestoreExecutorDeps
 ): Promise<ChairsRestoreExecutionSummary> {
-  const rows: ChairsRestoreResultRow[] = []
+  // A deferred (settling) chair holds a null slot until its one retry fills it, so rows stay in
+  // plan order; every slot is filled before return.
+  const rows: (ChairsRestoreResultRow | null)[] = []
+  const deferred: DeferredRestoreAction[] = []
+  let anySucceeded = false
   let exitNonZero = false
   // [S10-21d b3b, D-R165 L5] Only true once a write-back actually changes an entry — the caller
   // (chairs-restore.ts) skips rewriting the manifest file when this stays false.
   let changed = false
   const byName = new Map(manifest.chairs.map((entry) => [entry.name, entry]))
+  const settle = (slot: number, result: RestoreActionResult): void => {
+    rows[slot] = result.row
+    exitNonZero ||= result.failed
+    changed ||= result.changed
+    anySucceeded ||= result.succeeded
+  }
 
   for (const action of plan.actions) {
     const entry = byName.get(action.name)
@@ -206,44 +229,36 @@ export async function executeChairsRestorePlan(
       continue
     }
 
-    // rebind | launch: same call — requestChairRestore's own DEC-3 predicate distinguishes
-    // adoption from an unheld restore internally; the executor need not branch on it.
-    const outcome = await deps.requestChairRestore({
-      worktreeSelector: entry.worktree,
-      sessionId: action.sessionId,
-      displayName: entry.name,
-      role: entry.role,
-      model: entry.model,
-      effort: entry.effort,
-      launchArgs: entry.launchArgs
-    })
-    if (!outcome.ok) {
-      rows.push({
-        name: action.name,
-        kind: 'error',
-        reason: outcome.reason,
-        ok: false,
-        ...(outcome.detail ? { detail: outcome.detail } : {})
-      })
-      exitNonZero = true
-      continue
-    }
-    const row = await buildVerificationRow(entry, action.kind, outcome.paneKey, deps)
-    // [S10-21d b3b, D-R165 M1 fix] The RECORDED id (what the admission actually wrote), never the
-    // requested `action.sessionId` blindly — a mismatch there is exactly what `row.ok` catches,
-    // and pinning the requested id anyway would make the write-back lie about what happened.
-    const nextSessionId = row.recorded ?? action.sessionId
-    if (entry.lastSessionId !== nextSessionId) {
-      entry.lastSessionId = nextSessionId
-      changed = true
-    }
-    rows.push(row)
-    if (!row.ok) {
-      exitNonZero = true
+    const result = await runRestoreAction(action, entry, true, deps, buildVerificationRow)
+    if (result === null) {
+      // Settling: no row yet — one shared wait and one retry after the loop.
+      deferred.push({ slot: rows.length, action, entry })
+      rows.push(null)
+    } else {
+      rows.push(null)
+      settle(rows.length - 1, result)
     }
   }
 
-  return { plan, rows, exitNonZero, changed }
+  for (const { slot, result } of await retryDeferredRestoreActions(
+    deferred,
+    deps,
+    buildVerificationRow
+  )) {
+    settle(slot, result)
+  }
+  if (anySucceeded) {
+    // Fire-and-forget: this runs inside the caller's manifest lock and the CLI is waiting, and
+    // publishAfterRestore can neither throw nor reject.
+    void publishAfterRestore(deps)
+  }
+
+  return {
+    plan,
+    rows: rows.filter((row): row is ChairsRestoreResultRow => row !== null),
+    exitNonZero,
+    changed
+  }
 }
 
 /** One-shot convenience: gather lookups, plan, execute. The CLI handler (via the RPC method)

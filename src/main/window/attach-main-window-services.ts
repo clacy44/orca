@@ -74,6 +74,7 @@ import {
 import { logStartupMilestone } from '../startup/startup-diagnostics'
 import { createRuntimeRendererNotificationSender } from './runtime-renderer-notification-sender'
 import { registerRendererDocumentNavigation } from './renderer-document-navigation'
+import { LIVE_AGENT_SESSIONS_CHANNEL } from '../../shared/sweep-restore-mark-list'
 
 const UPDATER_SETUP_FALLBACK_MS = 15_000
 
@@ -459,6 +460,7 @@ function registerRuntimeWindowLifecycle(
           reject(new Error('runtime_unavailable'))
         }
       }),
+    liveAgentSessionsChanged: (marks) => send(LIVE_AGENT_SESSIONS_CHANNEL, marks),
     resolveLegacyWorkerTerminalRecovery: (paneKey, resolution, ptyId) =>
       send('agentStatus:legacyWorkerTerminalRecovery', {
         paneKey,

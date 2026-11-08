@@ -13,6 +13,7 @@ import { isRestoreSweepLockHeld } from '../restore-sweep-lock'
 import { resolveResumeTranscript } from '../../startup/resolve-resume-transcript'
 import { preflightResumeTranscript } from '../../ipc/agent-launch-admission-support'
 import { parsePaneKey } from '../../../shared/stable-pane-id'
+import { recordDesktopMaterialize } from '../../startup/restore-sweep-desktop-materialize-queue'
 import { LaunchAdmissionRefusedError } from '../../ipc/agent-launch-admission-errors'
 import {
   LOCAL_EXECUTION_HOST_ID,
@@ -406,6 +407,12 @@ export async function requestChairRestore(
     writeAdoptionAudit(null, newPaneKey, `register_failed:${registration.reason}`)
     return { ok: false, reason: `register_failed: ${registration.reason}` }
   }
+  // Queue the restored chair's pty for a visible tab (drained by materializeRestoredAgentPanes);
+  // the helper never throws.
+  recordDesktopMaterialize(deps.runtime, registration.agent.id, created, {
+    pane_key: newPaneKey,
+    agent_type: agentType
+  })
   writeAdoptionAudit(registration.agent.id, newPaneKey, 'ok')
   // [R184, owner ruling 2026-09-13] No pane-typed adoption notice on the CLI path: the CLI
   // prints the result and agent_audit (session_adopted/superseded) is the durable record; a

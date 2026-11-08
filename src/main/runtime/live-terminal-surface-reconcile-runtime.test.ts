@@ -389,6 +389,33 @@ describe('OrcaRuntimeService.reconcileLiveTerminalSurfacesForRenderer', () => {
       await expect(runtime.getLiveAgentSessionMarks()).resolves.toHaveLength(1)
     })
 
+    it('omits a terminal that exits during the inventory round even though that round still lists it', async () => {
+      let runtimeRef: OrcaRuntimeService | null = null
+      const { runtime } = makeRuntime({
+        listed: async () => {
+          // The pty exits mid-round, but the controller's snapshot was taken before that.
+          runtimeRef!.onPtyExit('pty-1', 0)
+          return [{ id: 'pty-1', cwd: repoDir }]
+        }
+      })
+      runtimeRef = runtime
+      registerLivePane(runtime, 'pty-1')
+      runtime.setAgentStatusRowsSource(() => [statusRow])
+
+      await expect(runtime.getLiveAgentSessionMarks()).resolves.toEqual([])
+    })
+
+    it('still names a terminal that had already exited before the round began and is listed again', async () => {
+      // Guards the snapshot: only an exit DURING the round is filtered, so a reused id is not lost.
+      const { runtime } = makeRuntime({ listed: async () => [{ id: 'pty-1', cwd: repoDir }] })
+      registerLivePane(runtime, 'pty-1')
+      runtime.onPtyExit('pty-1', 0)
+      registerLivePane(runtime, 'pty-1')
+      runtime.setAgentStatusRowsSource(() => [statusRow])
+
+      await expect(runtime.getLiveAgentSessionMarks()).resolves.toHaveLength(1)
+    })
+
     it('returns null (unknown) while local ptys cannot be recovered', async () => {
       const { runtime } = makeRuntime({
         listed: async () => [{ id: 'pty-1', cwd: repoDir }],

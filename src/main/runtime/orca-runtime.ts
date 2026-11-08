@@ -2297,6 +2297,9 @@ type RuntimeNotifier = {
     staged: boolean,
     runtimeEnvironmentId?: string | null
   ): void
+  // Why: pushes the host's live agent-session marks to the renderer so its wake paths see ptys
+  // created after startup (the startup hydration is the only other writer).
+  liveAgentSessionsChanged?(marks: LiveAgentSessionMark[]): void
   readMobileMarkdownTab?(worktreeId: string, tabId: string): Promise<RuntimeMarkdownReadTabResult>
   saveMobileMarkdownTab?(
     worktreeId: string,
@@ -3860,6 +3863,11 @@ export class OrcaRuntimeService {
   // Why: ptys created with explicit background presentation (automation, workers, lane wakes) never
   // get a tab on purpose; cleared when a reveal gives one a tab, or on exit.
   private readonly surfacelessBackgroundPtyIds = new Set<string>()
+  // Coalesces the live-session-mark pushes triggered by background agent spawns, so a burst of
+  // spawns costs one controller inventory round instead of one per spawn.
+  private liveMarksPublishTimer: ReturnType<typeof setTimeout> | null = null
+  private liveMarksPublishInFlight = false
+  private liveMarksPublishPending = false
   // Why: a requested close/kill removes the user's tab before the process is gone.
   private readonly shutdownRequestedPtyIds = new Set<string>()
   // [S10-21c B6, design §2 S9] Desktop materialization queue — populated by the restore sweep
@@ -14560,6 +14568,9 @@ export class OrcaRuntimeService {
     if (!this.canRecoverPersistentLocalPtysFn()) {
       return null
     }
+    // Why: a pty that exits while the inventory round is in flight can still read as live in that
+    // round's snapshot; its mark would be pushed after the renderer already dropped it.
+    const exitedBefore = new Set(this.exitedPtyIdsThisGeneration)
     // Why bounded: the renderer awaits this during startup hydration; a slow worktree scan must not stall it.
     const resolved = await withTimeoutResult(
       this.getResolvedWorktreeMap(),
@@ -14588,6 +14599,9 @@ export class OrcaRuntimeService {
     }
     const livePanes: { ptyId: string; paneKey: string; worktreeId: string }[] = []
     for (const ptyId of inventory.livePtyIds) {
+      if (this.exitedPtyIdsThisGeneration.has(ptyId) && !exitedBefore.has(ptyId)) {
+        continue
+      }
       const pty = this.ptysById.get(ptyId)
       if (pty?.paneKey && pty.connectionId === null && !this.isRemoteScopedPtyId(ptyId)) {
         livePanes.push({ ptyId, paneKey: pty.paneKey, worktreeId: pty.worktreeId })
@@ -14606,6 +14620,52 @@ export class OrcaRuntimeService {
       hostId: this.getOrchestrationCompatibilityHostId(),
       now: Date.now()
     })
+  }
+
+  // Why: the renderer's live-session marks are otherwise only set at startup, so a pty created later
+  // (a restored chair, a background worker) would look absent and a resume pass could open a
+  // second tab for its conversation. Fire-and-forget by contract: never throws.
+  async publishLiveAgentSessionMarks(): Promise<void> {
+    try {
+      if (!this.notifier?.liveAgentSessionsChanged) {
+        return
+      }
+      const marks = await this.getLiveAgentSessionMarks()
+      if (marks) {
+        this.notifier?.liveAgentSessionsChanged?.(marks)
+      }
+    } catch (error) {
+      console.warn('[runtime] publishLiveAgentSessionMarks failed', error)
+    }
+  }
+
+  // Debounced entry point for background-agent spawns; the end-of-restore path calls
+  // publishLiveAgentSessionMarks directly. At most one publish runs at a time, and spawns that land
+  // while one is in flight cost exactly one more run after it.
+  private schedulePublishLiveAgentSessionMarks(): void {
+    if (this.liveMarksPublishTimer) {
+      return
+    }
+    this.liveMarksPublishTimer = setTimeout(() => void this.runScheduledLiveMarksPublish(), 250)
+    this.liveMarksPublishTimer.unref?.()
+  }
+
+  private async runScheduledLiveMarksPublish(): Promise<void> {
+    this.liveMarksPublishTimer = null
+    if (this.liveMarksPublishInFlight) {
+      this.liveMarksPublishPending = true
+      return
+    }
+    this.liveMarksPublishInFlight = true
+    try {
+      await this.publishLiveAgentSessionMarks()
+    } finally {
+      this.liveMarksPublishInFlight = false
+    }
+    if (this.liveMarksPublishPending) {
+      this.liveMarksPublishPending = false
+      this.schedulePublishLiveAgentSessionMarks()
+    }
   }
 
   /** [R315] For ptys that died with the daemon: pane key, peer-owned verdict and chair verdict, read
@@ -29742,6 +29802,12 @@ export class OrcaRuntimeService {
           pty.paneKey = paneKey
           if (presentation === 'background' && !adoptedStablePane) {
             this.surfacelessBackgroundPtyIds.add(result.id)
+            // Why: launch admission already wrote this agent's launch row and pty.paneKey is set
+            // just above, so the new pty's mark is derivable now; tab-less agents report hooks the
+            // renderer would otherwise treat as unowned.
+            if (launchOpts.launchAgent) {
+              this.schedulePublishLiveAgentSessionMarks()
+            }
           }
         }
         const handle = pty ? this.issuePtyHandle(pty) : preAllocatedHandle

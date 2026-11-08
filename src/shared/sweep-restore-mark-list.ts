@@ -11,6 +11,9 @@ export type LiveAgentSessionMark = {
   providerSessionId: string
 }
 
+/** Main -> renderer push of a fresh live-session mark set (payload: `LiveAgentSessionMark[]`). */
+export const LIVE_AGENT_SESSIONS_CHANNEL = 'agentStatus:liveAgentSessions'
+
 /** Key for "this provider session is held by a live terminal" lookups; the pane key is deliberately absent. */
 export function liveAgentSessionKey(
   worktreeId: string,

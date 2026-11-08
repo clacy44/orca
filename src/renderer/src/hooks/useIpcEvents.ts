@@ -191,6 +191,7 @@ import {
 import { directSshAuthoritiesEqual } from './direct-ssh-reconnect-tokens'
 import { createDirectSshHostHydration } from './direct-ssh-host-hydration'
 import { createDirectSshReconnectProductTelemetryAdapter } from '@/lib/direct-ssh-reconnect-product-telemetry'
+import { subscribeLiveAgentSessionPush } from '@/lib/live-agent-session-push'
 import {
   createRemoteWorkspaceTargetSync,
   isDirectSshRemoteWorkspaceApplyInProgress,
@@ -3801,6 +3802,9 @@ export function useIpcEvents(): void {
     if (unsubscribeLaunchAdmissionNotice) {
       unsubs.push(unsubscribeLaunchAdmissionNotice)
     }
+
+    // Keep the renderer's live-session marks current for ptys created after startup.
+    unsubs.push(subscribeLiveAgentSessionPush())
 
     // R315: subscribe here, not on the first terminal transport, so a loss with no pane mounted is still recovered.
     const unsubscribeSessionsLost =

@@ -106,10 +106,16 @@ export function enqueueRestoredPaneForMaterialization(
  * via `auditSweepNoteSafe` (never-throws) so the catch below can still leave an evidenced note
  * even when the accessor that threw is the very one that would have supplied `db`. */
 export function recordDesktopMaterialize(
-  deps: RestoreSweepDeps,
+  deps: Pick<
+    RestoreSweepDeps,
+    | 'getOrchestrationDb'
+    | 'getOrchestrationCompatibilityHostId'
+    | 'getTerminalProcessIncarnation'
+    | 'recordRestoredPaneForDesktopMaterialization'
+  >,
   agentId: string,
   created: RuntimeEnsureAgentSessionResult,
-  launchRow: AgentLaunchSessionRow
+  launchRow: Pick<AgentLaunchSessionRow, 'pane_key' | 'agent_type'>
 ): void {
   // Pure property access on already-validated inputs — never throws — so it stays available to
   // the catch below even when an accessor that runs after it throws.

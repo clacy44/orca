@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   executeChairsRestorePlan,
   gatherChairsRestoreLookups,
@@ -44,6 +44,8 @@ function fakeDeps(overrides: Partial<ChairsRestoreExecutorDeps> = {}): {
     },
     hasLiveHookReportOfSession: () => true,
     hasResumableTranscriptTurn: async () => true,
+    // Never really wait out the settle window in a unit test; individual tests override to observe it.
+    sleep: async () => {},
     ...overrides
   }
   return { deps, calls }
@@ -280,5 +282,192 @@ describe('executeChairsRestorePlan', () => {
     ])
     await runChairsRestore(m, deps)
     expect(seen).toEqual([['--autocompact', '200000']])
+  })
+
+  describe('same_generation_settling wait-and-retry', () => {
+    const settling: RequestChairRestoreOutcome = {
+      ok: false,
+      reason: 'same_generation_settling',
+      holderPaneKey: 'tab:x',
+      detail: 'settling'
+    }
+    const chair = (name: string): ChairsManifest['chairs'][number] => ({
+      name,
+      worktree: `path:/repo/${name}`,
+      agent: 'claude',
+      conversationId: `sess-${name}`
+    })
+
+    // E1
+    it('waits once for the settle window, retries, and reports the chair ok', async () => {
+      const sleeps: number[] = []
+      const attempts: string[] = []
+      const { deps } = fakeDeps({
+        sleep: async (ms) => {
+          sleeps.push(ms)
+        }
+      })
+      const inner = deps.requestChairRestore
+      deps.requestChairRestore = async (request) => {
+        attempts.push(request.displayName)
+        return attempts.length === 1 ? settling : inner(request)
+      }
+      const summary = await runChairsRestore(manifest([chair('a')]), deps)
+      expect(sleeps).toHaveLength(1)
+      expect(sleeps[0]).toBeGreaterThanOrEqual(10_000)
+      expect(sleeps[0]).toBeLessThanOrEqual(15_000)
+      expect(attempts).toEqual(['a', 'a'])
+      expect(summary.rows).toHaveLength(1)
+      expect(summary.rows[0]).toMatchObject({ name: 'a', kind: 'launch', ok: true })
+      expect(summary.exitNonZero).toBe(false)
+    })
+
+    // E2
+    it('uses ONE wait for several settling chairs, retries each, and keeps plan order', async () => {
+      const sleeps: number[] = []
+      const attempts: string[] = []
+      const seen = new Set<string>()
+      const { deps } = fakeDeps({
+        sleep: async (ms) => {
+          sleeps.push(ms)
+        }
+      })
+      const inner = deps.requestChairRestore
+      deps.requestChairRestore = async (request) => {
+        attempts.push(request.displayName)
+        // a and c settle on their first attempt; b succeeds straight away.
+        if (request.displayName !== 'b' && !seen.has(request.displayName)) {
+          seen.add(request.displayName)
+          return settling
+        }
+        return inner(request)
+      }
+      const summary = await runChairsRestore(manifest([chair('a'), chair('b'), chair('c')]), deps)
+      expect(sleeps).toHaveLength(1)
+      expect(attempts).toEqual(['a', 'b', 'c', 'a', 'c'])
+      expect(summary.rows.map((row) => row.name)).toEqual(['a', 'b', 'c'])
+      expect(summary.rows.every((row) => row.ok)).toBe(true)
+      expect(summary.exitNonZero).toBe(false)
+    })
+
+    // E3
+    it('reports an error row after a second settling refusal, with exactly two attempts', async () => {
+      const attempts: string[] = []
+      const { deps } = fakeDeps({
+        requestChairRestore: async (request) => {
+          attempts.push(request.displayName)
+          return settling
+        }
+      })
+      const summary = await runChairsRestore(manifest([chair('a')]), deps)
+      expect(attempts).toEqual(['a', 'a'])
+      expect(summary.rows).toHaveLength(1)
+      expect(summary.rows[0]).toMatchObject({
+        name: 'a',
+        kind: 'error',
+        reason: 'same_generation_settling',
+        ok: false
+      })
+      expect(summary.exitNonZero).toBe(true)
+    })
+
+    // E4 (control)
+    it.each([
+      [
+        'current_generation',
+        { ok: false, reason: 'current_generation', holderPaneKey: 'tab:x' } as const
+      ],
+      [
+        'restore_target_live_elsewhere',
+        { ok: false, reason: 'restore_target_live_elsewhere', holderPaneKey: 'tab:x' } as const
+      ]
+    ])('never waits or retries a %s refusal', async (reason, outcome) => {
+      const sleeps: number[] = []
+      const attempts: string[] = []
+      const { deps } = fakeDeps({
+        sleep: async (ms) => {
+          sleeps.push(ms)
+        },
+        requestChairRestore: async (request) => {
+          attempts.push(request.displayName)
+          return outcome
+        }
+      })
+      const summary = await runChairsRestore(manifest([chair('a')]), deps)
+      expect(sleeps).toEqual([])
+      expect(attempts).toEqual(['a'])
+      expect(summary.rows[0]).toMatchObject({ kind: 'error', reason, ok: false })
+      expect(summary.exitNonZero).toBe(true)
+    })
+
+    // E5
+    it('publishes marks and materializes panes once, after every requestChairRestore', async () => {
+      const order: string[] = []
+      const { deps } = fakeDeps({
+        publishLiveAgentSessionMarks: async () => {
+          order.push('publish')
+        },
+        materializeRestoredPanes: async () => {
+          order.push('materialize')
+        }
+      })
+      const inner = deps.requestChairRestore
+      deps.requestChairRestore = async (request) => {
+        order.push(`restore:${request.displayName}`)
+        return inner(request)
+      }
+      await runChairsRestore(manifest([chair('a'), chair('b')]), deps)
+      // Post-run work is fire-and-forget, so it lands a few microtasks after the summary returns.
+      await vi.waitFor(() => expect(order).toHaveLength(4))
+      expect(order.slice(0, 2)).toEqual(['restore:a', 'restore:b'])
+      expect(order.slice(2).sort()).toEqual(['materialize', 'publish'])
+    })
+
+    it('publishes and materializes nothing when no chair was restored', async () => {
+      const calls: string[] = []
+      const { deps } = fakeDeps({
+        requestChairRestore: async () => ({
+          ok: false,
+          reason: 'restore_target_live_elsewhere',
+          holderPaneKey: 'tab:x'
+        }),
+        publishLiveAgentSessionMarks: async () => {
+          calls.push('publish')
+        },
+        materializeRestoredPanes: async () => {
+          calls.push('materialize')
+        }
+      })
+      await runChairsRestore(manifest([chair('a')]), deps)
+      expect(calls).toEqual([])
+    })
+
+    it('a throwing publish or materialize never fails the restore', async () => {
+      const { deps } = fakeDeps({
+        publishLiveAgentSessionMarks: async () => {
+          throw new Error('publish boom')
+        },
+        materializeRestoredPanes: async () => {
+          throw new Error('materialize boom')
+        }
+      })
+      const summary = await runChairsRestore(manifest([chair('a')]), deps)
+      expect(summary.exitNonZero).toBe(false)
+    })
+
+    it('a dep that throws synchronously never fails the restore and still lets the other run', async () => {
+      const calls: string[] = []
+      const { deps } = fakeDeps({
+        publishLiveAgentSessionMarks: () => {
+          throw new Error('sync publish boom')
+        },
+        materializeRestoredPanes: async () => {
+          calls.push('materialize')
+        }
+      })
+      const summary = await runChairsRestore(manifest([chair('a')]), deps)
+      expect(summary.exitNonZero).toBe(false)
+      await vi.waitFor(() => expect(calls).toEqual(['materialize']))
+    })
   })
 })

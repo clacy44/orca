@@ -4,7 +4,11 @@ import { electronAPI } from '@electron-toolkit/preload'
 import { preloadE2EConfig } from './e2e-config'
 import { glApi } from './gitlab'
 import type { AppIdentity } from '../shared/app-identity'
-import type { ReconcileLiveTerminalSurfacesReply } from '../shared/sweep-restore-mark-list'
+import {
+  LIVE_AGENT_SESSIONS_CHANNEL,
+  type LiveAgentSessionMark,
+  type ReconcileLiveTerminalSurfacesReply
+} from '../shared/sweep-restore-mark-list'
 import {
   LAUNCH_ADMISSION_NOTICE_CHANNEL,
   type LaunchAdmissionNoticePayload
@@ -3213,6 +3217,12 @@ const api = {
         callback(data)
       ipcRenderer.on(LAUNCH_ADMISSION_NOTICE_CHANNEL, listener)
       return () => ipcRenderer.removeListener(LAUNCH_ADMISSION_NOTICE_CHANNEL, listener)
+    },
+    onLiveAgentSessions: (callback: (marks: LiveAgentSessionMark[]) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, data: LiveAgentSessionMark[]) =>
+        callback(data)
+      ipcRenderer.on(LIVE_AGENT_SESSIONS_CHANNEL, listener)
+      return () => ipcRenderer.removeListener(LIVE_AGENT_SESSIONS_CHANNEL, listener)
     }
   } satisfies PreloadApi['session'],
 

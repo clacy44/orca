@@ -120,7 +120,11 @@ function buildExecutorDeps(
     hasResumableTranscriptTurn: async (agentType, sessionId) => {
       const result = await resolveResumeTranscript(agentType, sessionId)
       return result !== null && 'hasTurn' in result && result.hasTurn
-    }
+    },
+    // After a successful restore: push fresh live-session marks and queue the restored chair
+    // panes for a visible tab (both never throw into the restore).
+    publishLiveAgentSessionMarks: () => runtime.publishLiveAgentSessionMarks(),
+    materializeRestoredPanes: () => runtime.materializeRestoredAgentPanes()
   }
 }
 

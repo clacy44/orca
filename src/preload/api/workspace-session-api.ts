@@ -5,7 +5,10 @@ import type {
 } from '../../shared/workspace-session-state-types'
 import type { ExecutionHostId } from '../../shared/execution-host'
 import type { LaunchAdmissionNoticePayload } from '../../shared/launch-admission-notice'
-import type { SweepRestoreMarkListReply } from '../../shared/sweep-restore-mark-list'
+import type {
+  LiveAgentSessionMark,
+  SweepRestoreMarkListReply
+} from '../../shared/sweep-restore-mark-list'
 import type {
   RemoteWorkspaceChangedEvent,
   RemoteWorkspaceConnectedClient,
@@ -36,6 +39,10 @@ export type WorkspaceSessionApi = {
      * reconcile `sleepingAgentSessionsByPaneKey` (the host-notice path types text into the pty,
      * never the renderer store). */
     onLaunchAdmissionNotice: (callback: (event: LaunchAdmissionNoticePayload) => void) => () => void
+    /** READ-ONLY push of the host's fresh live agent-session marks after a background agent pty is
+     * created or a chair restore finishes, so the renderer's wake paths see ptys born after the
+     * startup hydration. */
+    onLiveAgentSessions: (callback: (marks: LiveAgentSessionMark[]) => void) => () => void
   }
   cache: {
     getGitHub: () => Promise<{
